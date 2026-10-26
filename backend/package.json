@@ -10,6 +10,7 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "test": "tsx --test --test-concurrency=1 test/*.test.ts",
+    "test:postgres": "node --env-file-if-exists=.env --import tsx test/run-postgres.ts",
     "db:migrate": "node --env-file-if-exists=.env --import tsx src/db/migrate.ts"
   },
   "dependencies": {

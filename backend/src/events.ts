@@ -1,7 +1,9 @@
 import type { Sql } from './db/database.js';
 
 export async function publish(sql: Sql, userId: string, type: string, payload: unknown): Promise<void> {
-  await sql.query('INSERT INTO events(user_id, type, payload) VALUES ($1, $2, $3::jsonb)',
+  await sql.query(`INSERT INTO events(user_id, type, payload)
+    SELECT owner.id, $2, $3::jsonb FROM
+      (SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE) owner`,
     [userId, type, JSON.stringify(payload)]);
 }
 

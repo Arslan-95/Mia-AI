@@ -26,15 +26,20 @@ export class AssistantState {
     return session;
   }
 
-  async accept(userId: string, sessionId: string, clientTurnId: string, text: string) {
+  async accept(userId: string, sessionId: string, clientTurnId: string, text: string, signal?: AbortSignal) {
     return this.db.transaction(async (sql) => {
       const session = await this.requireSession(userId, sessionId, sql, true);
+      throwIfAborted(signal);
       const [existing] = await sql.query<Turn>(`SELECT ${turnColumns} FROM assistant_turns t
         JOIN assistant_sessions s ON s.id = t.session_id WHERE t.session_id = $1 AND t.client_turn_id = $2`, [sessionId, clientTurnId]);
       if (existing) {
         if (existing.userText !== text) throw conflict('This turn ID was used with different content.');
         return { turn: existing, duplicate: true };
       }
+      const [recent] = await sql.query<{ count: number }>(`SELECT count(*)::integer AS count FROM assistant_turns
+        WHERE session_id = $1 AND created_at > now() - interval '1 minute'`, [sessionId]);
+      if (recent!.count >= 20) throw new AppError(429, 'TURN_RATE_LIMIT', 'Please wait a moment before asking again.');
+      throwIfAborted(signal);
       const generation = session.generation + 1;
       await sql.query('UPDATE assistant_sessions SET generation = $2,updated_at = now() WHERE id = $1', [sessionId, generation]);
       const interrupted = await sql.query<{ id: string }>(`UPDATE assistant_turns SET status = 'interrupted',completed_at = now()
@@ -49,6 +54,21 @@ export class AssistantState {
       const turn: Turn = { id, sessionId, userId, generation, userText: text, status: 'queued', assistantText: null, clientTurnId };
       await publish(sql, userId, 'assistant.accepted', { sessionId, turnId: id, clientTurnId });
       return { turn, duplicate: false };
+    });
+  }
+
+  async interrupt(userId: string, sessionId: string, signal?: AbortSignal) {
+    await this.db.transaction(async (sql) => {
+      await this.requireSession(userId, sessionId, sql, true);
+      throwIfAborted(signal);
+      await sql.query('UPDATE assistant_sessions SET generation = generation + 1,updated_at = now() WHERE id = $1', [sessionId]);
+      const turns = await sql.query<{ id: string }>(`UPDATE assistant_turns SET status = 'interrupted',completed_at = now()
+        WHERE session_id = $1 AND status IN ('queued','running') RETURNING id`, [sessionId]);
+      for (const turn of turns) await publish(sql, userId, 'assistant.interrupted', { sessionId, turnId: turn.id });
+      const actions = await sql.query<{ id: string }>(`UPDATE device_actions SET state = 'cancelled'
+        WHERE session_id = $1 AND state = 'pending' RETURNING id`, [sessionId]);
+      for (const action of actions) await publish(sql, userId, 'device.action_cancelled', { sessionId, actionId: action.id });
+      await publish(sql, userId, 'assistant.audio_cancelled', { sessionId });
     });
   }
 

@@ -2,12 +2,31 @@ import { PGlite } from '@electric-sql/pglite';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { Database, Row, Sql } from '../src/db/database.js';
+import { PostgresDatabase } from '../src/db/database.js';
 import { migrate } from '../src/db/migrate.js';
 import { readConfig } from '../src/config.js';
 import { createApp } from '../src/app.js';
 
 export async function testDatabase(): Promise<Database> {
+  if (process.env.TEST_DATABASE_URL) {
+    const admin = new PostgresDatabase(process.env.TEST_DATABASE_URL);
+    const schema = `mia_test_${randomUUID().replaceAll('-', '')}`;
+    if (!/^mia_test_[a-f0-9]{32}$/.test(schema)) throw new Error('Invalid test schema');
+    await admin.query(`CREATE SCHEMA "${schema}"`);
+    const url = new URL(process.env.TEST_DATABASE_URL);
+    url.searchParams.set('options', `-c search_path=${schema}`);
+    const database = new PostgresDatabase(url.toString());
+    const close = async () => {
+      await database.close();
+      try { await admin.query(`DROP SCHEMA "${schema}" CASCADE`); }
+      finally { await admin.close(); }
+    };
+    try { await migrate(database); }
+    catch (error) { await close(); throw error; }
+    return { query: database.query.bind(database), transaction: database.transaction.bind(database), close };
+  }
   const pg = new PGlite();
   const sqlFor = (connection: Pick<PGlite, 'query' | 'exec'>): Sql => ({
     async query<T extends Row>(sql: string, values: unknown[] = []): Promise<T[]> {
@@ -25,11 +44,11 @@ export async function testDatabase(): Promise<Database> {
   return db;
 }
 
-export async function testApp() {
+export async function testApp(options: Parameters<typeof createApp>[2] = {}) {
   const db = await testDatabase();
   const directory = await mkdtemp(join(tmpdir(), 'mia-test-'));
   const config = readConfig({ NODE_ENV: 'test', LOG_LEVEL: 'silent', MEDIA_DIRECTORY: directory });
-  const app = await createApp(config, db);
+  const app = await createApp(config, db, options);
   await app.ready();
   return { app, db, config, async close() {
     await app.close();

@@ -133,6 +133,7 @@ export class MessagingService {
       return message;
     }
     const members = await sql.query<{ userId: string }>('SELECT user_id AS "userId" FROM chat_members WHERE chat_id = $1', [chatId]);
+    await sql.query('SELECT id FROM users WHERE id = ANY($1::uuid[]) ORDER BY id FOR NO KEY UPDATE', [members.map((member) => member.userId)]);
     for (const member of members) await publish(sql, member.userId, 'message.created', inserted);
     return inserted;
   }

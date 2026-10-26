@@ -41,16 +41,21 @@ export class AssistantRuntime {
     await Promise.allSettled(this.runs.values());
   }
 
-  async submit(userId: string, sessionId: string, clientTurnId: string, text: string) {
+  async submit(userId: string, sessionId: string, clientTurnId: string, text: string, signal?: AbortSignal) {
     if (this.stopping) throw new AppError(503, 'SHUTTING_DOWN', 'The assistant is restarting. Please reconnect.');
     if (!this.provider.configured) throw new AppError(503, 'AGENT_UNAVAILABLE', 'The assistant is not configured yet.');
-    const accepted = await this.state.accept(userId, sessionId, clientTurnId, text);
+    const accepted = await this.state.accept(userId, sessionId, clientTurnId, text, signal);
     if (!accepted.duplicate) {
       const previous = this.active.get(sessionId);
       previous?.controller.abort(new Error('Superseded by a new user turn'));
       void this.poll();
     }
     return accepted;
+  }
+
+  async interrupt(userId: string, sessionId: string, signal?: AbortSignal) {
+    await this.state.interrupt(userId, sessionId, signal);
+    this.active.get(sessionId)?.controller.abort();
   }
 
   private async poll() {
