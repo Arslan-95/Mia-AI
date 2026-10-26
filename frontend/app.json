@@ -7,17 +7,11 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "bundleIdentifier": "app.mia.messenger",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Record a voice note or speak a request to Mia, only when you choose."
       }
-    },
-    "android": {
-      "package": "app.mia.messenger",
-      "permissions": [
-        "RECORD_AUDIO"
-      ]
     },
     "plugins": [
       [
@@ -32,9 +26,8 @@
       "expo-font",
       "expo-asset"
     ],
-    "web": {
-      "bundler": "metro",
-      "name": "Mia — a little closer"
-    }
+    "platforms": [
+      "ios"
+    ]
   }
 }

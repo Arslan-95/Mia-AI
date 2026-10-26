@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AccessibilityInfo, AppState, Platform } from 'react-native';
+import { AccessibilityInfo, AppState } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { Api } from './api';
 import { preferences, sessionStorage } from './storage';
@@ -258,8 +258,7 @@ export function useMia() {
   }
   async function uploadRecording(value: Recording) {
     const data = new FormData();
-    if (Platform.OS === 'web' && value.blob) data.append('file', value.blob, 'voice.wav');
-    else data.append('file', { uri: value.uri, name: 'voice.wav', type: 'audio/wav' } as unknown as Blob);
+    data.append('file', { uri: value.uri, name: 'voice.wav', type: 'audio/wav' } as unknown as Blob);
     return api.request<{ id: string }>('/v1/media', 'POST', data);
   }
   async function useRecording() {

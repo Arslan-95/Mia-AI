@@ -1,12 +1,12 @@
 import React, { useEffect, useRef } from 'react';
-import { AccessibilityInfo, FlatList, Platform, Pressable, ScrollView, Text, TextInput, View, findNodeHandle } from 'react-native';
+import { AccessibilityInfo, FlatList, Pressable, ScrollView, Text, TextInput, View, findNodeHandle } from 'react-native';
 import type { Message } from '../types';
 import type { Mia } from '../useMia';
 import { Avatar, Button, Empty, Icon, Notice, colors, s } from '../ui';
 export function Chats({ mia }: { mia: Mia }) {
   const chat = mia.chats.find(item => item.id === mia.activeChatId); const heading = useRef<Text>(null);
   const list = useRef<FlatList<Message>>(null); const atBottom = useRef(true);
-  useEffect(() => { atBottom.current = true; if (chat && Platform.OS !== 'web') { const node = findNodeHandle(heading.current); if (node) AccessibilityInfo.setAccessibilityFocus(node); } }, [chat?.id]);
+  useEffect(() => { atBottom.current = true; if (chat) { const node = findNodeHandle(heading.current); if (node) AccessibilityInfo.setAccessibilityFocus(node); } }, [chat?.id]);
   if (!chat) return <ScrollView contentContainerStyle={s.content}>
     <View style={s.between}><View style={{ gap: 5 }}><Text style={s.eyebrow}>YOUR EVERYDAY CONNECTIONS</Text><Text accessibilityRole="header" style={s.heading}>Conversations</Text></View><Button quiet iconOnly label="Refresh chats" icon="refresh-outline" onPress={() => void mia.refresh().catch(mia.fail)} /></View>
     <Pressable accessibilityRole="button" accessibilityLabel="Talk with Mia, your assistant" onPress={() => void mia.navigate('mia')} style={[s.card, { backgroundColor: colors.soft, borderWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 16 }]}><View style={{ backgroundColor: colors.green, width: 52, height: 52, borderRadius: 20, alignItems: 'center', justifyContent: 'center' }}><Icon name="sparkles" color={colors.paper} size={25} /></View><View style={{ flex: 1, gap: 4 }}><Text style={s.sectionTitle}>A little help from Mia</Text><Text style={s.small}>Find a person. Pick up a conversation.</Text></View><Icon name="arrow-forward" /></Pressable>

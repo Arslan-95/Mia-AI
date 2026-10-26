@@ -1,4 +1,3 @@
-import { Platform } from 'react-native';
 import { AudioModule, AudioQuality, IOSOutputFormat, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import type { AudioPlayer, AudioRecorder } from 'expo-audio';
 import { File, Paths } from 'expo-file-system';
@@ -9,7 +8,6 @@ export class Engine implements AudioEngine {
   private recorder?: AudioRecorder; private player?: AudioPlayer; private startedAt = 0;
   private rejectPlayback?: (error: Error) => void; private owner = new AudioOwnership();
   async start() {
-    if (Platform.OS !== 'ios') throw new Error('PCM recording currently requires iOS or the web preview. Android voice recording is not supported yet.');
     await this.owner.transition(async current => {
     await this.cleanup(); if (!current()) throw new Error('Recording was cancelled.');
     const permission = await AudioModule.requestRecordingPermissionsAsync();
@@ -17,7 +15,7 @@ export class Engine implements AudioEngine {
     if (!current()) throw new Error('Recording was cancelled.');
     await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, shouldPlayInBackground: false, interruptionMode: 'doNotMix' });
     if (!current()) throw new Error('Recording was cancelled.');
-    const recorder = new AudioModule.AudioRecorder({ extension: '.wav', sampleRate: 24000, numberOfChannels: 1, bitRate: 384000, ios: { extension: '.wav', outputFormat: IOSOutputFormat.LINEARPCM, audioQuality: AudioQuality.MAX, linearPCMBitDepth: 16, linearPCMIsBigEndian: false, linearPCMIsFloat: false }, android: { outputFormat: 'default', audioEncoder: 'default' }, web: {} });
+    const recorder = new AudioModule.AudioRecorder({ extension: '.wav', sampleRate: 24000, numberOfChannels: 1, bitRate: 384000, ios: { extension: '.wav', outputFormat: IOSOutputFormat.LINEARPCM, audioQuality: AudioQuality.MAX, linearPCMBitDepth: 16, linearPCMIsBigEndian: false, linearPCMIsFloat: false } });
     this.recorder = recorder;
     try {
       await recorder.prepareToRecordAsync();

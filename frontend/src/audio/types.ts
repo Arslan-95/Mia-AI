@@ -1,4 +1,4 @@
-export type Recording = { uri: string; durationMs: number; blob?: Blob };
+export type Recording = { uri: string; durationMs: number };
 export interface AudioEngine {
   start(): Promise<void>;
   finish(): Promise<Recording>;

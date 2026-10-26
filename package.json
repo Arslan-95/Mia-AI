@@ -16,7 +16,7 @@
     "dev:frontend": "npm run start --workspace @mia/frontend",
     "check:frontend": "npm run check --workspace @mia/frontend",
     "test:frontend": "npm run test --workspace @mia/frontend",
-    "build:frontend": "npm run build:web --workspace @mia/frontend"
+    "build:frontend": "npm run build:ios --workspace @mia/frontend"
   },
   "engines": {
     "node": ">=24"

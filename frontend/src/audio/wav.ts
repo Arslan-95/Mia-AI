@@ -9,11 +9,6 @@ export function pcmWav(pcm: Uint8Array, sampleRate = 24000) {
   view.setUint16(32, 2, true); view.setUint16(34, 16, true); label(36, 'data'); view.setUint32(40, pcm.length, true);
   bytes.set(pcm, 44); return bytes;
 }
-export function floatToPcm(samples: Float32Array) {
-  const bytes = new Uint8Array(samples.length * 2); const view = new DataView(bytes.buffer);
-  samples.forEach((sample, i) => view.setInt16(i * 2, Math.round(Math.max(-1, Math.min(1, sample)) * (sample < 0 ? 32768 : 32767)), true));
-  return bytes;
-}
 export function concatBytes(parts: Uint8Array[]) {
   const output = new Uint8Array(parts.reduce((n, part) => n + part.length, 0)); let offset = 0;
   for (const part of parts) { output.set(part, offset); offset += part.length; } return output;

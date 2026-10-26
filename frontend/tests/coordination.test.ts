@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PresentationLease, isLiveAction, mergeMessages } from '../src/coordination';
-import { floatToPcm, pcmWav } from '../src/audio/wav';
+import { pcmWav } from '../src/audio/wav';
 import type { Message } from '../src/types';
 test('switching conversation revokes pending acceptance and all older device presentations', () => {
   const lease = new PresentationLease(); const first = lease.begin('anna');
@@ -23,10 +23,12 @@ test('paginated messages merge and deduplicate without losing newer live message
   assert.deepEqual(mergeMessages([newest, middle], [old, middle]).map(m => m.id), ['c', 'b', 'a']);
 });
 test('voice notes encode signed mono Int16 little endian WAV within backend contract', () => {
-  const pcm = floatToPcm(new Float32Array([-1, 0, 1, 2])); const bytes = pcmWav(pcm); const view = new DataView(bytes.buffer);
+  const pcm = new Uint8Array(8); const samples = new DataView(pcm.buffer);
+  [-32768, 0, 32767, -1234].forEach((sample, index) => samples.setInt16(index * 2, sample, true));
+  const bytes = pcmWav(pcm); const view = new DataView(bytes.buffer);
   assert.equal(new TextDecoder().decode(bytes.slice(0, 4)), 'RIFF'); assert.equal(view.getUint32(4, true) + 8, bytes.length);
   assert.equal(view.getUint16(20, true), 1); assert.equal(view.getUint16(22, true), 1); assert.equal(view.getUint16(34, true), 16);
   assert.equal(view.getUint32(24, true), 24000); assert.equal(view.getUint32(40, true), 8);
-  assert.equal(view.getInt16(44, true), -32768); assert.equal(view.getInt16(48, true), 32767); assert.equal(view.getInt16(50, true), 32767);
+  assert.equal(view.getInt16(44, true), -32768); assert.equal(view.getInt16(48, true), 32767); assert.equal(view.getInt16(50, true), -1234);
   assert.throws(() => pcmWav(new Uint8Array(3)));
 });
