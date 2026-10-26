@@ -1,6 +1,7 @@
 export type Profile = { id: string; username: string; displayName: string };
-export type User = Profile & { email: string };
+export type User = Profile & { phoneNumber: string; profileComplete: boolean };
 export type Session = { user: User; token: string; expiresAt: string };
+export type OtpChallenge = { challengeId: string; expiresAt: string; delivery: 'development' };
 export type Content = { kind: 'text'; text: string } | { kind: 'voice'; mediaId: string; text?: string };
 export type Message = { id: string; chatId: string; senderId: string; kind: 'text' | 'voice'; text: string | null; mediaId: string | null; createdAt: string };
 export type Chat = { id: string; recipient: Profile; lastMessage: Message | null; unreadCount: number };

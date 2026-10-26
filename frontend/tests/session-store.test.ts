@@ -15,7 +15,7 @@ function fixture(initial: string | null = null) {
 
 test('session persistence restores a valid session and removes credentials on sign-out', async () => {
   const { store, persisted } = fixture();
-  const session = { token: 'opaque-session-token', user: { id: 'user' }, expiresAt: new Date(Date.now() + 60000).toISOString() } as Session;
+  const session = { token: 'opaque-session-token', user: { id: 'user', phoneNumber: '+12025550123', profileComplete: false }, expiresAt: new Date(Date.now() + 60000).toISOString() } as Session;
   await store.write(session);
   assert.deepEqual(await store.read(), session);
   await store.write(null);
@@ -24,7 +24,7 @@ test('session persistence restores a valid session and removes credentials on si
 });
 
 test('expired or malformed persisted credentials are removed rather than restored', async () => {
-  const cases = ['{damaged', JSON.stringify({ token: 'token', user: { id: 'user' }, expiresAt: 'invalid' }), JSON.stringify({ token: 'token', user: { id: 'user' }, expiresAt: new Date(0).toISOString() })];
+  const cases = ['{damaged', JSON.stringify({ token: 'token', user: { id: 'user' }, expiresAt: 'invalid' }), JSON.stringify({ token: 'token', user: { id: 'user' }, expiresAt: new Date(0).toISOString() }), JSON.stringify({ token: 'legacy-token', user: { id: 'user' }, expiresAt: new Date(Date.now() + 60000).toISOString() })];
   for (const serialized of cases) {
     const { store, persisted } = fixture(serialized);
     assert.equal(await store.read(), null);

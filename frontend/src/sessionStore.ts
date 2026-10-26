@@ -14,7 +14,7 @@ export function createSessionStore(secrets: SecretStore) {
       if (!serialized) return null;
       try {
         const session = JSON.parse(serialized) as Session;
-        if (typeof session.token === 'string' && session.user?.id && Date.parse(session.expiresAt) > Date.now()) return session;
+        if (typeof session.token === 'string' && session.user?.id && typeof session.user.phoneNumber === 'string' && typeof session.user.profileComplete === 'boolean' && Date.parse(session.expiresAt) > Date.now()) return session;
       } catch { /* Remove damaged persisted credentials instead of restoring them. */ }
       await secrets.remove(key);
       return null;

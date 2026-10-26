@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Pressable, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { useMia, type Tab } from './useMia';
-import { Auth } from './screens/Auth';
+import { Auth, CompleteProfile } from './screens/Auth';
 import { Chats } from './screens/Chats';
 import { Assistant } from './screens/Assistant';
 import { People } from './screens/People';
@@ -43,7 +43,7 @@ function Application() {
             <ActivityIndicator color={colors.green} />
             <Text style={s.body}>Opening Mia…</Text>
           </View>
-        ) : !mia.session ? <Auth mia={mia} /> : (
+        ) : !mia.session ? <Auth key={mia.address} mia={mia} /> : !mia.session.user.profileComplete ? <CompleteProfile mia={mia} /> : (
           <View style={app.fill}>
             <View style={app.connection}>
               <View style={[app.statusDot, { backgroundColor: mia.connection === 'Connected' ? colors.green : '#A66C28' }]} />
