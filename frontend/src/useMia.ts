@@ -30,6 +30,7 @@ export function useMia() {
   const socket = useRef<Realtime | null>(null); const state = useRef({ session, activeChatId, tab, assistantSession, chats, devicePrompt });
   state.current = { session, activeChatId, tab, assistantSession, chats, devicePrompt };
   const foreground = useRef(true); const authEpoch = useRef(0); const stopRef = useRef<() => Promise<void>>(async () => {});
+  const startingDeviceRecording = useRef<string | null>(null);
   const fail = useCallback((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Something went wrong. Please try again.'), []);
   const api = useMemo(() => new Api(address, session, () => { void clearSession(); }), [address, session]);
   async function clearSession() {
@@ -99,7 +100,8 @@ export function useMia() {
   }, []);
   async function interrupt() { lease.revoke(); setDevicePrompt(null); socket.current?.send({ type: 'assistant.stop' }); await stopAudio(); }
   async function navigate(next: Tab, chatId: string | null = null) {
-    await interrupt(); setTab(next); setActiveChatId(chatId);
+    void interrupt().catch(fail); setTab(next); setActiveChatId(chatId);
+    state.current = { ...state.current, tab: next, activeChatId: chatId };
     if (next === 'chats' && chatId) await loadMessages(chatId).catch(fail);
   }
   async function acknowledge(action: DeviceAction, success: boolean, result: { message?: string; mediaId?: string }) {
@@ -277,11 +279,12 @@ export function useMia() {
   }
   async function discardRecording() { await stopAudio(); if (recording) await audio.current!.disposeRecording(recording); setRecording(null); }
   async function preview() { if (!recording) return; await stopAudio(); setAudioState('playing'); try { await audio.current!.play(recording.uri); } finally { setAudioState('idle'); } }
-  async function declineDevice() { const action = devicePrompt; setDevicePrompt(null); if (action) await acknowledge(action, false, { message: 'Recording requires an explicit user action. Use the voice note control and try again.' }); }
+  async function declineDevice() { const action = devicePrompt; setDevicePrompt(null); if (action && startingDeviceRecording.current === action.actionId) { startingDeviceRecording.current = null; await stopAudio(); } if (action) await acknowledge(action, false, { message: 'The user declined this recording request.' }); }
   async function acceptDeviceRecording() {
-    const action = devicePrompt; if (!action || !lease.owns(action.turnId)) return;
+    const action = devicePrompt; if (!action || !lease.owns(action.turnId) || startingDeviceRecording.current) return;
+    startingDeviceRecording.current = action.actionId;
     const epoch = lease.snapshot();
-    const valid = () => lease.current(epoch) && Date.now() - Date.parse(action.createdAt) < 18000;
+    const valid = () => lease.current(epoch) && startingDeviceRecording.current === action.actionId && Date.now() - Date.parse(action.createdAt) < 18000;
     try {
       const recipientId = action.payload.recipientId;
       if (typeof recipientId !== 'string') throw new Error('The recording recipient is missing.');
@@ -293,10 +296,11 @@ export function useMia() {
       setRecordChatId(chat.id); setTab('chats'); setActiveChatId(chat.id); setDevicePrompt(null);
       await acknowledge(action, true, { message: 'Recording started after the user chose Record. The recording is not yet uploaded or sent.' });
     } catch (reason) { setDevicePrompt(null); await acknowledge(action, false, { message: reason instanceof Error ? reason.message : 'Recording did not start.' }).catch(fail); fail(reason); }
+    finally { if (startingDeviceRecording.current === action.actionId) startingDeviceRecording.current = null; }
   }
   useEffect(() => {
     if (!devicePrompt) return;
-    const timer = setTimeout(() => { setDevicePrompt(null); void stopRef.current(); }, Math.max(0, 18000 - (Date.now() - Date.parse(devicePrompt.createdAt))));
+    const timer = setTimeout(() => { setDevicePrompt(null); if (startingDeviceRecording.current === devicePrompt.actionId) { startingDeviceRecording.current = null; void stopRef.current(); } }, Math.max(0, 18000 - (Date.now() - Date.parse(devicePrompt.createdAt))));
     return () => clearTimeout(timer);
   }, [devicePrompt]);
   return { booting, session, address, voiceMode, error, setError, busy, tab, connection, capabilities, chats, contacts, drafts, messages, hasOlder, activeChatId, composers, pending, turns, assistantText, setAssistantText, assistantRetry, assistantSession, audioState, recording, recordPurpose, devicePrompt, api, fail, signIn, logout, saveSettings, checkHealth, refresh, loadMessages, navigate, startChat, sendText, sendPending, saveDraft, draftAction, submitAssistant, interrupt, speak, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice, acceptDeviceRecording,
