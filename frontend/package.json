@@ -1,0 +1,33 @@
+{
+  "name": "@mia/frontend",
+  "version": "1.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "web": "expo start --web --port 8081",
+    "ios": "expo run:ios",
+    "check": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "build:web": "expo export --platform web"
+  },
+  "dependencies": {
+    "@expo/vector-icons": "^15.0.3",
+    "expo": "~55.0.32",
+    "expo-audio": "~55.0.13",
+    "expo-crypto": "~55.0.10",
+    "expo-file-system": "~55.0.26",
+    "expo-secure-store": "~55.0.18",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-native": "^0.83.10",
+    "react-native-safe-area-context": "~5.6.2",
+    "react-native-web": "^0.21.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.2"
+  }
+}

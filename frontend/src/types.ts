@@ -1,0 +1,14 @@
+export type Profile = { id: string; username: string; displayName: string };
+export type User = Profile & { email: string };
+export type Session = { user: User; token: string; expiresAt: string };
+export type Content = { kind: 'text'; text: string } | { kind: 'voice'; mediaId: string; text?: string };
+export type Message = { id: string; chatId: string; senderId: string; kind: 'text' | 'voice'; text: string | null; mediaId: string | null; createdAt: string };
+export type Chat = { id: string; recipient: Profile; lastMessage: Message | null; unreadCount: number };
+export type Contact = Profile & { contactId: string; name: string };
+export type Draft = { id: string; recipientId: string; kind: 'text' | 'voice'; text: string | null; mediaId: string | null; version: number; state: 'editing' | 'ready' | 'sent' | 'discarded'; reviewedVersion: number | null; updatedAt: string };
+export type Turn = { id: string; sessionId: string; userId: string; generation: number; userText: string; assistantText: string | null; status: 'queued' | 'running' | 'completed' | 'interrupted' | 'failed'; clientTurnId: string };
+export type AssistantSession = { id: string; generation: number; activeChatId: string | null };
+export type ServerEvent = { id: string; type: string; payload: Record<string, unknown>; createdAt: string };
+export type Capabilities = { agent: boolean; speechRecognition: boolean; speechSynthesis: boolean };
+export type DeviceAction = { sessionId: string; turnId: string; actionId: string; kind: string; payload: Record<string, unknown> };
+export type PendingMessage = { clientMessageId: string; chatId: string; content: Content; status: 'sending' | 'failed' };

@@ -8,3 +8,6 @@ coverage/
 *.log
 *.tsbuildinfo
 .DS_Store
+
+.expo/
+web-build/
