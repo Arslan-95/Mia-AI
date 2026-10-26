@@ -76,3 +76,16 @@ test('development OTP is configurable and phone code requests are bounded', asyn
   for (let count = 0; count < 5; count++) await auth.requestCode('+15550100022');
   await assert.rejects(auth.requestCode('+15550100022'), { status: 429, code: 'OTP_RATE_LIMIT' });
 });
+
+test('phone verification has no fallback code when DEV_OTP_CODE is missing or empty', async (t) => {
+  const context = await testApp(); t.after(() => context.close());
+  for (const env of [{ NODE_ENV: 'test' }, { NODE_ENV: 'test', DEV_OTP_CODE: '' }]) {
+    const config = readConfig(env);
+    assert.equal(config.developmentOtpCode, undefined);
+    const auth = new AuthService(context.db, config);
+    await assert.rejects(auth.requestCode('+15550100031'), { status: 503, code: 'PHONE_AUTH_UNAVAILABLE' });
+    await assert.rejects(auth.verifyCode('00000000-0000-4000-8000-000000000000', '123456'), { status: 503 });
+  }
+  assert.throws(() => readConfig({ DEV_OTP_CODE: '12345' }));
+  assert.throws(() => readConfig({ DEV_OTP_CODE: 'abcdef' }));
+});

@@ -16,13 +16,14 @@ export class AuthService {
   constructor(private readonly db: Database, private readonly config: Pick<Config, 'environment' | 'developmentOtpCode'>) {}
 
   private requireDevelopmentProvider() {
-    if (this.config.environment === 'production') {
+    if (this.config.environment === 'production' || !this.config.developmentOtpCode) {
       throw new AppError(503, 'PHONE_AUTH_UNAVAILABLE', 'Phone verification is not configured for this environment.');
     }
+    return this.config.developmentOtpCode;
   }
 
   async requestCode(phoneNumber: string) {
-    this.requireDevelopmentProvider();
+    const configuredCode = this.requireDevelopmentProvider();
     return this.db.transaction(async (sql) => {
       await sql.query('SELECT pg_advisory_xact_lock(hashtextextended($1,317))', [phoneNumber]);
       const [recent] = await sql.query<{ count: number }>(`SELECT count(*)::integer AS count FROM otp_challenges
@@ -32,7 +33,7 @@ export class AuthService {
       const challengeId = randomUUID();
       const expiresAt = new Date(Date.now() + OTP_DURATION_MS);
       await sql.query('INSERT INTO otp_challenges(id,phone_number,code_hash,expires_at) VALUES ($1,$2,$3,$4)',
-        [challengeId, phoneNumber, this.codeHash(challengeId, phoneNumber, this.config.developmentOtpCode), expiresAt]);
+        [challengeId, phoneNumber, this.codeHash(challengeId, phoneNumber, configuredCode), expiresAt]);
       return { challengeId, expiresAt, delivery: 'development' as const };
     });
   }

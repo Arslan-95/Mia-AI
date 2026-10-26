@@ -64,7 +64,7 @@ export async function createApp(config: Config, db: Database, options: { provide
   app.get('/health/ready', { config: { public: true } }, async (_request, reply) => {
     try { await db.query('SELECT 1'); }
     catch { return reply.code(503).send({ status: 'unavailable' }); }
-    return { status: 'ready', capabilities: { phoneAuthentication: config.environment !== 'production', agent: provider.configured,
+    return { status: 'ready', capabilities: { phoneAuthentication: config.environment !== 'production' && Boolean(config.developmentOtpCode), agent: provider.configured,
       speechRecognition: speech.recognitionConfigured, speechSynthesis: speech.synthesisConfigured } };
   });
   registerMessagingRoutes(app, { auth, messaging, media, db });
