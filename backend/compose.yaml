@@ -1,0 +1,18 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: mia
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mia_local_password}
+      POSTGRES_DB: mia
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mia -d mia"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+volumes:
+  postgres_data:

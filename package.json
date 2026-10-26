@@ -1,0 +1,14 @@
+{
+  "name": "mia-ai",
+  "private": true,
+  "license": "UNLICENSED",
+  "workspaces": ["backend"],
+  "scripts": {
+    "dev": "npm run dev --workspace @mia/backend",
+    "build": "npm run build --workspace @mia/backend",
+    "check": "npm run check --workspace @mia/backend",
+    "test": "npm run test --workspace @mia/backend",
+    "db:migrate": "npm run db:migrate --workspace @mia/backend"
+  },
+  "engines": { "node": ">=24" }
+}

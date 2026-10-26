@@ -1,0 +1,35 @@
+{
+  "name": "@mia/backend",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --import tsx --watch src/main.ts",
+    "start": "node --env-file-if-exists=.env dist/main.js",
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
+    "db:migrate": "node --env-file-if-exists=.env --import tsx src/db/migrate.ts"
+  },
+  "dependencies": {
+    "@fastify/cors": "11.3.1",
+    "@fastify/helmet": "13.2.0",
+    "@fastify/multipart": "10.1.6",
+    "@fastify/rate-limit": "11.2.1",
+    "@fastify/websocket": "11.3.4",
+    "fastify": "5.12.7",
+    "pg": "8.23.1",
+    "ws": "8.21.3",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.12",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.0.0",
+    "@types/ws": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "7.0.2"
+  },
+  "engines": { "node": ">=24" }
+}
