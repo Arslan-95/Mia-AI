@@ -8,6 +8,25 @@ import { PostgresDatabase } from '../src/db/database.js';
 import { migrate } from '../src/db/migrate.js';
 import { readConfig } from '../src/config.js';
 import { createApp } from '../src/app.js';
+import type { FastifyInstance } from 'fastify';
+import assert from 'node:assert/strict';
+import type { User } from '../src/auth.js';
+
+export async function phoneSignIn(app: FastifyInstance, phoneNumber: string, username?: string) {
+  const challenge = await app.inject({ method: 'POST', url: '/v1/auth/otp/request', payload: { phoneNumber } });
+  assert.equal(challenge.statusCode, 202, challenge.body);
+  const result = await app.inject({ method: 'POST', url: '/v1/auth/otp/verify',
+    payload: { challengeId: challenge.json().challengeId, code: '123456' } });
+  assert.equal(result.statusCode, 200, result.body);
+  const session = result.json() as { token: string; expiresAt: string; user: User };
+  if (username) {
+    const profile = await app.inject({ method: 'PATCH', url: '/v1/me', headers: { authorization: `Bearer ${session.token}` },
+      payload: { username, displayName: username } });
+    assert.equal(profile.statusCode, 200, profile.body);
+    session.user = profile.json() as User;
+  }
+  return session;
+}
 
 export async function testDatabase(): Promise<Database> {
   if (process.env.TEST_DATABASE_URL) {

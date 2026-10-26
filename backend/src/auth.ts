@@ -1,69 +1,86 @@
-import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
-import type { Database } from './db/database.js';
-import { AppError, conflict, isDatabaseError } from './errors.js';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import type { Config } from './config.js';
+import type { Database, Sql } from './db/database.js';
+import { AppError, conflict, isDatabaseError, notFound } from './errors.js';
 
-const derive = (password: string, salt: string) => new Promise<Buffer>((resolve, reject) => {
-  scrypt(password, salt, 64, { N: 65536, r: 8, p: 1, maxmem: 80 * 1024 * 1024 }, (error, key) => {
-    if (error) reject(error); else resolve(key);
-  });
-});
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
-export type User = { id: string; email: string; username: string; displayName: string };
-type Credentials = { email: string; username: string; displayName: string; password: string };
-const columns = 'id, email, username, display_name AS "displayName"';
+const OTP_DURATION_MS = 5 * 60 * 1000;
+export type User = { id: string; phoneNumber: string; username: string; displayName: string; profileComplete: boolean };
+type AuthSession = { user: User; token: string; expiresAt: Date };
+type Challenge = { id: string; phoneNumber: string; codeHash: string; attempts: number; expired: boolean; consumed: boolean };
+const columns = 'id,phone_number AS "phoneNumber",username,display_name AS "displayName",profile_complete AS "profileComplete"';
 const unauthorized = () => new AppError(401, 'UNAUTHORIZED', 'Authentication is required.');
-
-async function hashPassword(password: string): Promise<string> {
-  const salt = randomBytes(16).toString('hex');
-  const hash = await derive(password, salt);
-  return `${salt}:${hash.toString('hex')}`;
-}
-
-async function matches(password: string, stored: string): Promise<boolean> {
-  const [salt, value] = stored.split(':');
-  if (!salt || !value) return false;
-  const expected = Buffer.from(value, 'hex');
-  const actual = await derive(password, salt);
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
-}
+const invalidCode = () => new AppError(401, 'INVALID_OTP', 'The code is incorrect, expired, or already used. Request a new code if needed.');
 
 export class AuthService {
-  private readonly dummyHash = hashPassword(randomBytes(32).toString('hex'));
-  constructor(private readonly db: Database) {}
+  constructor(private readonly db: Database, private readonly config: Pick<Config, 'environment' | 'developmentOtpCode'>) {}
 
-  async register(input: Credentials) {
-    const passwordHash = await hashPassword(input.password);
-    try {
-      return await this.db.transaction(async (sql) => {
-        const [user] = await sql.query<User>(
-          `INSERT INTO users(id, email, username, display_name, password_hash)
-           VALUES ($1,$2,$3,$4,$5) RETURNING ${columns}`,
-          [randomUUID(), input.email.toLowerCase(), input.username.toLowerCase(), input.displayName, passwordHash]);
-        if (!user) throw new Error('User creation failed');
-        return this.createSession(user, sql);
-      });
-    } catch (error) {
-      if (isDatabaseError(error, '23505')) throw conflict('The email or username is already registered.');
-      throw error;
+  private requireDevelopmentProvider() {
+    if (this.config.environment === 'production') {
+      throw new AppError(503, 'PHONE_AUTH_UNAVAILABLE', 'Phone verification is not configured for this environment.');
     }
   }
 
-  async login(email: string, password: string) {
-    const [record] = await this.db.query<User & { passwordHash: string }>(
-      `SELECT ${columns}, password_hash AS "passwordHash" FROM users WHERE email = $1`, [email.toLowerCase()]);
-    const valid = await matches(password, record?.passwordHash ?? await this.dummyHash);
-    if (!record || !valid) throw new AppError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect.');
-    const { passwordHash: _, ...user } = record;
-    return this.createSession(user, this.db);
+  async requestCode(phoneNumber: string) {
+    this.requireDevelopmentProvider();
+    return this.db.transaction(async (sql) => {
+      await sql.query('SELECT pg_advisory_xact_lock(hashtextextended($1,317))', [phoneNumber]);
+      const [recent] = await sql.query<{ count: number }>(`SELECT count(*)::integer AS count FROM otp_challenges
+        WHERE phone_number = $1 AND created_at > now() - interval '15 minutes'`, [phoneNumber]);
+      if (recent!.count >= 5) throw new AppError(429, 'OTP_RATE_LIMIT', 'Too many code requests for this number. Please try again later.');
+      await sql.query('UPDATE otp_challenges SET consumed_at = now() WHERE phone_number = $1 AND consumed_at IS NULL', [phoneNumber]);
+      const challengeId = randomUUID();
+      const expiresAt = new Date(Date.now() + OTP_DURATION_MS);
+      await sql.query('INSERT INTO otp_challenges(id,phone_number,code_hash,expires_at) VALUES ($1,$2,$3,$4)',
+        [challengeId, phoneNumber, this.codeHash(challengeId, phoneNumber, this.config.developmentOtpCode), expiresAt]);
+      return { challengeId, expiresAt, delivery: 'development' as const };
+    });
+  }
+
+  async verifyCode(challengeId: string, code: string): Promise<AuthSession> {
+    this.requireDevelopmentProvider();
+    const result = await this.db.transaction<{ session: AuthSession } | { error: AppError }>(async (sql) => {
+      const [challenge] = await sql.query<Challenge>(`SELECT id,phone_number AS "phoneNumber",code_hash AS "codeHash",attempts,
+        expires_at <= now() AS expired,consumed_at IS NOT NULL AS consumed FROM otp_challenges WHERE id = $1 FOR UPDATE`, [challengeId]);
+      if (!challenge || challenge.expired || challenge.consumed) return { error: invalidCode() };
+      if (challenge.attempts >= 5) return { error: new AppError(429, 'OTP_LOCKED', 'Too many incorrect attempts. Request a new code.') };
+      const expected = Buffer.from(challenge.codeHash, 'hex');
+      const actual = Buffer.from(this.codeHash(challengeId, challenge.phoneNumber, code), 'hex');
+      if (!timingSafeEqual(expected, actual)) {
+        await sql.query('UPDATE otp_challenges SET attempts = attempts + 1 WHERE id = $1', [challengeId]);
+        return { error: challenge.attempts + 1 >= 5
+          ? new AppError(429, 'OTP_LOCKED', 'Too many incorrect attempts. Request a new code.') : invalidCode() };
+      }
+      const [user] = await sql.query<User>(`INSERT INTO users(id,phone_number,username,display_name)
+        VALUES ($1,$2,$3,'New friend') ON CONFLICT(phone_number) DO UPDATE SET phone_number = EXCLUDED.phone_number
+        RETURNING ${columns}`, [randomUUID(), challenge.phoneNumber, `mia_${randomBytes(8).toString('hex')}`]);
+      if (!user) throw new Error('Account creation failed');
+      await sql.query('UPDATE otp_challenges SET consumed_at = now() WHERE id = $1', [challengeId]);
+      return { session: await this.createSession(user, sql) };
+    });
+    if ('error' in result) throw result.error;
+    return result.session;
+  }
+
+  async updateProfile(userId: string, username: string, displayName: string): Promise<User> {
+    try {
+      const [user] = await this.db.query<User>(`UPDATE users SET username = $2,display_name = $3,profile_complete = true
+        WHERE id = $1 AND phone_number IS NOT NULL RETURNING ${columns}`, [userId, username.toLowerCase(), displayName]);
+      if (!user) throw notFound();
+      return user;
+    } catch (error) {
+      if (isDatabaseError(error, '23505')) throw conflict('That username is already taken. Choose another one.');
+      throw error;
+    }
   }
 
   async authenticate(header?: string): Promise<User> {
     const token = header?.match(/^Bearer ([A-Za-z0-9_-]{43})$/)?.[1];
     if (!token) throw unauthorized();
-    const [user] = await this.db.query<User>(
-      `SELECT u.id, u.email, u.username, u.display_name AS "displayName"
-       FROM auth_sessions s JOIN users u ON u.id = s.user_id
-       WHERE s.token_hash = $1 AND s.expires_at > now()`, [this.tokenHash(token)]);
+    const [user] = await this.db.query<User>(`SELECT u.id,u.phone_number AS "phoneNumber",u.username,
+      u.display_name AS "displayName",u.profile_complete AS "profileComplete"
+      FROM auth_sessions s JOIN users u ON u.id = s.user_id
+      WHERE s.token_hash = $1 AND s.expires_at > now() AND u.phone_number IS NOT NULL`, [this.tokenHash(token)]);
     if (!user) throw unauthorized();
     return user;
   }
@@ -73,12 +90,14 @@ export class AuthService {
     if (token) await this.db.query('DELETE FROM auth_sessions WHERE token_hash = $1', [this.tokenHash(token)]);
   }
 
+  private codeHash(challengeId: string, phoneNumber: string, code: string) {
+    return createHash('sha256').update(`${challengeId}:${phoneNumber}:${code}`).digest('hex');
+  }
   private tokenHash(token: string) { return createHash('sha256').update(token).digest('hex'); }
-
-  private async createSession(user: User, sql: Pick<Database, 'query'>) {
+  private async createSession(user: User, sql: Sql): Promise<AuthSession> {
     const token = randomBytes(32).toString('base64url');
     const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
-    await sql.query('INSERT INTO auth_sessions(token_hash, user_id, expires_at) VALUES ($1,$2,$3)',
+    await sql.query('INSERT INTO auth_sessions(token_hash,user_id,expires_at) VALUES ($1,$2,$3)',
       [this.tokenHash(token), user.id, expiresAt]);
     return { user, token, expiresAt };
   }

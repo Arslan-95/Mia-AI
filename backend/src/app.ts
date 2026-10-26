@@ -28,7 +28,7 @@ export async function createApp(config: Config, db: Database, options: { provide
   const app = Fastify({ bodyLimit: 32_768, requestTimeout: 30_000, routerOptions: { maxParamLength: 100 },
     logger: { level: config.logLevel, redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'] },
     logController: new LogController({ disableRequestLogging: true }) });
-  const auth = new AuthService(db);
+  const auth = new AuthService(db, config);
   const messaging = new MessagingService(db);
   const media = new MediaService(db, config.mediaDirectory);
   const provider = options.provider ?? new MetaResponsesProvider(config);
@@ -64,7 +64,7 @@ export async function createApp(config: Config, db: Database, options: { provide
   app.get('/health/ready', { config: { public: true } }, async (_request, reply) => {
     try { await db.query('SELECT 1'); }
     catch { return reply.code(503).send({ status: 'unavailable' }); }
-    return { status: 'ready', capabilities: { agent: provider.configured,
+    return { status: 'ready', capabilities: { phoneAuthentication: config.environment !== 'production', agent: provider.configured,
       speechRecognition: speech.recognitionConfigured, speechSynthesis: speech.synthesisConfigured } };
   });
   registerMessagingRoutes(app, { auth, messaging, media, db });

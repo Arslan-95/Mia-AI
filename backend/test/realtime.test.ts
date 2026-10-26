@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import WebSocket from 'ws';
 import type { SpeechProvider, RecognitionEvent } from '../src/speech/providers.js';
-import { testApp } from './helpers.js';
+import { phoneSignIn, testApp } from './helpers.js';
 
 type Frame = Record<string, unknown> & { type: string };
 async function waitFor<T>(probe: () => T | undefined, timeout = 6000): Promise<T> {
@@ -46,11 +46,7 @@ test('live websocket authenticates, replays scoped events and runs only final sp
   t.after(() => context.close());
   const url = await context.app.listen({ port: 0, host: '127.0.0.1' });
   const wsUrl = `${url.replace('http:', 'ws:')}/v1/realtime`;
-  const auth = await context.app.inject({ method: 'POST', url: '/v1/auth/register', payload: {
-    email: 'realtime@example.com', username: 'realtime', displayName: 'Realtime', password: 'A-strong-test-password',
-  } });
-  assert.equal(auth.statusCode, 201, auth.body);
-  const identity = auth.json() as { token: string; user: { id: string } };
+  const identity = await phoneSignIn(context.app, '+15550000041', 'realtime');
   const client = await connect(wsUrl);
   t.after(() => client.close());
   client.send({ type: 'auth', token: identity.token, after: '0' });
@@ -145,10 +141,7 @@ test('a new request cancels ASR startup immediately and ignores late recognition
   const context = await testApp({ speech, provider: { configured: true, respond: async () => ({ text: 'Opening the requested chat.', calls: [], output: [] }) } });
   t.after(() => context.close());
   const url = await context.app.listen({ port: 0, host: '127.0.0.1' });
-  const registration = await context.app.inject({ method: 'POST', url: '/v1/auth/register', payload: {
-    email: 'interrupt@example.com', username: 'interrupt', displayName: 'Interrupt', password: 'A-strong-test-password',
-  } });
-  const token = (registration.json() as { token: string }).token;
+  const { token } = await phoneSignIn(context.app, '+15550000042', 'interrupt');
   const client = await connect(`${url.replace('http:', 'ws:')}/v1/realtime`); t.after(() => client.close());
   client.send({ type: 'auth', token, after: '0' }); await client.next('ready');
   client.send({ type: 'voice.start', requestId: randomUUID(), sampleRate: 24000, format: 'pcm_s16le' });

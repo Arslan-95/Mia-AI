@@ -1,23 +1,16 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import { testApp, wav } from './helpers.js';
+import { phoneSignIn, testApp, wav } from './helpers.js';
 import { MediaService } from '../src/media.js';
 
 test('authenticated messaging, isolation, drafts and retry-safe delivery', async (t) => {
   const context = await testApp();
   t.after(() => context.close());
   const { app } = context;
-  async function register(username: string) {
-    const response = await app.inject({ method: 'POST', url: '/v1/auth/register', payload: {
-      email: `${username}@example.com`, username, displayName: username, password: 'A-long-test-password-42',
-    } });
-    assert.equal(response.statusCode, 201, response.body);
-    return response.json() as { token: string; user: { id: string } };
-  }
-  const alice = await register('alice');
-  const anna = await register('anna');
-  const david = await register('david');
+  const alice = await phoneSignIn(app, '+15550000001', 'alice');
+  const anna = await phoneSignIn(app, '+15550000002', 'anna');
+  const david = await phoneSignIn(app, '+15550000003', 'david');
   const headers = { authorization: `Bearer ${alice.token}` };
   const annaHeaders = { authorization: `Bearer ${anna.token}` };
   const davidHeaders = { authorization: `Bearer ${david.token}` };
@@ -83,7 +76,7 @@ test('authenticated messaging, isolation, drafts and retry-safe delivery', async
 
   await app.inject({ method: 'POST', url: '/v1/auth/logout', headers });
   assert.equal((await app.inject({ url: '/v1/me', headers })).statusCode, 401);
-  const login = await app.inject({ method: 'POST', url: '/v1/auth/login', payload: { email: 'alice@example.com', password: 'A-long-test-password-42' } });
-  assert.equal(login.statusCode, 200, login.body);
-  assert.notEqual(login.json().token, alice.token);
+  const login = await phoneSignIn(app, '+15550000001');
+  assert.equal(login.user.id, alice.user.id);
+  assert.notEqual(login.token, alice.token);
 });

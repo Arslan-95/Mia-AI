@@ -10,8 +10,6 @@ import type { Database } from '../db/database.js';
 export const id = z.uuid();
 const idParams = z.object({ id });
 const username = z.string().trim().toLowerCase().regex(/^[a-z][a-z0-9_]{2,29}$/);
-const email = z.email().max(254).transform((value) => value.toLowerCase());
-const password = z.string().min(12).max(128);
 const text = z.string().trim().min(1).max(8000);
 export const contentSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('text'), text }).strict(),
@@ -24,21 +22,25 @@ export function registerMessagingRoutes(app: FastifyInstance, deps: {
   auth: AuthService; messaging: MessagingService; media: MediaService; db: Database;
 }) {
   const { auth, messaging, media, db } = deps;
-  app.post('/v1/auth/register', { config: { public: true },
+  app.post('/v1/auth/otp/request', { config: { public: true },
     preHandler: app.rateLimit({ max: 8, timeWindow: '1 minute' }) }, async (request, reply) => {
-    const input = z.object({ email, username, displayName: z.string().trim().min(1).max(80), password }).strict().parse(request.body);
-    return reply.code(201).send(await auth.register(input));
+    const { phoneNumber } = z.object({ phoneNumber: z.string().trim().regex(/^\+[1-9]\d{6,14}$/, 'Enter an international phone number with country code.') }).strict().parse(request.body);
+    return reply.code(202).send(await auth.requestCode(phoneNumber));
   });
-  app.post('/v1/auth/login', { config: { public: true },
-    preHandler: app.rateLimit({ max: 10, timeWindow: '1 minute' }) }, async (request) => {
-    const input = z.object({ email, password: z.string().min(1).max(128) }).strict().parse(request.body);
-    return auth.login(input.email, input.password);
+  app.post('/v1/auth/otp/verify', { config: { public: true },
+    preHandler: app.rateLimit({ max: 20, timeWindow: '1 minute' }) }, async (request) => {
+    const { challengeId, code } = z.object({ challengeId: id, code: z.string().regex(/^\d{6}$/) }).strict().parse(request.body);
+    return auth.verifyCode(challengeId, code);
   });
   app.post('/v1/auth/logout', async (request, reply) => {
     await auth.logout(request.headers.authorization);
     return reply.code(204).send();
   });
   app.get('/v1/me', async (request) => request.user);
+  app.patch('/v1/me', async (request) => {
+    const input = z.object({ username, displayName: z.string().trim().min(1).max(80) }).strict().parse(request.body);
+    return auth.updateProfile(request.user.id, input.username, input.displayName);
+  });
   app.get('/v1/users', async (request) => {
     const { query } = z.object({ query: z.string().trim().min(2).max(30) }).parse(request.query);
     return messaging.searchUsers(request.user.id, query);
