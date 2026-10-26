@@ -13,7 +13,7 @@ export class Api {
   async request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
     let response: Response;
     try {
-      response = await fetch(this.base + path, { method, headers: { ...(body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...(this.session ? { Authorization: `Bearer ${this.session.token}` } : {}) }, ...(body === undefined ? {} : { body: body instanceof FormData ? body : JSON.stringify(body) }), signal: AbortSignal.timeout(20000) });
+      response = await fetch(this.base + path, { method, headers: { ...(body === undefined || body instanceof FormData ? {} : { 'Content-Type': 'application/json' }), ...(this.session ? { Authorization: `Bearer ${this.session.token}` } : {}) }, ...(body === undefined ? {} : { body: body instanceof FormData ? body : JSON.stringify(body) }), signal: AbortSignal.timeout(20000) });
     } catch { throw new ApiError(0, 'OFFLINE', 'Cannot reach your server. Check the address and connection, then try again.'); }
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));

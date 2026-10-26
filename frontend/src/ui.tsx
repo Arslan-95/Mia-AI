@@ -1,12 +1,13 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View, type TextInputProps, type StyleProp, type ViewStyle } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import Ionicons from '@expo/vector-icons/Ionicons';
 export const colors = { background: '#F7F6F0', paper: '#FFFFFF', ink: '#242D29', muted: '#59665E', line: '#DEE3DA', green: '#315741', soft: '#E8EEDB', yellow: '#F1E7BC', red: '#A33230', blue: '#E9EAF5' };
 export function Icon({ name, size = 22, color = colors.ink }: { name: React.ComponentProps<typeof Ionicons>['name']; size?: number; color?: string }) { return <Ionicons name={name} size={size} color={color} accessible={false} />; }
-export function Button({ label, onPress, icon, secondary, quiet, disabled, loading, style }: { label: string; onPress: () => void; icon?: React.ComponentProps<typeof Ionicons>['name']; secondary?: boolean; quiet?: boolean; disabled?: boolean; loading?: boolean; style?: StyleProp<ViewStyle> }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled: disabled || loading }} disabled={disabled || loading} onPress={onPress} style={({ pressed }) => [s.button, secondary && s.secondary, quiet && s.quiet, { opacity: disabled || loading ? .45 : pressed ? .75 : 1 }, false && s.focus, style]}>
+export function Button({ label, onPress, icon, secondary, quiet, disabled, loading, style, iconOnly }: { label: string; onPress: () => void; icon?: React.ComponentProps<typeof Ionicons>['name']; secondary?: boolean; quiet?: boolean; disabled?: boolean; loading?: boolean; style?: StyleProp<ViewStyle>; iconOnly?: boolean }) {
+  const [focused, setFocused] = useState(false);
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled: disabled || loading }} disabled={disabled || loading} onPress={onPress} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} style={({ pressed }) => [s.button, secondary && s.secondary, quiet && s.quiet, iconOnly && { width: 50, paddingHorizontal: 0 }, { opacity: disabled || loading ? .45 : pressed ? .75 : 1 }, focused && s.focus, style]}>
     {loading ? <ActivityIndicator color={secondary || quiet ? colors.green : colors.paper} /> : icon ? <Icon name={icon} color={secondary || quiet ? colors.green : colors.paper} size={20} /> : null}
-    <Text style={[s.buttonText, (secondary || quiet) && { color: colors.green }]}>{label}</Text>
+    {!iconOnly && <Text style={[s.buttonText, (secondary || quiet) && { color: colors.green }]}>{label}</Text>}
   </Pressable>;
 }
 export function Field({ label, ...props }: TextInputProps & { label: string }) { return <View style={s.field}><Text style={s.label}>{label}</Text><TextInput accessibilityLabel={label} placeholderTextColor={colors.muted} {...props} style={[s.input, props.multiline && { minHeight: 100 }, props.style]} /></View>; }

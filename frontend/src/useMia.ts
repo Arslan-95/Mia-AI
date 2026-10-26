@@ -80,7 +80,7 @@ export function useMia() {
         setAssistantSession(current); setTurns(history.turns);
       } catch (reason) { if (!cancelled) fail(reason); }
     })();
-    const realtime = new Realtime(address, session, (event, time) => handlers.current.onEvent(event, time), frame => handlers.current.onFrame(frame), setConnection);
+    const realtime = new Realtime(address, session, (event, time) => handlers.current.onEvent(event, time), frame => handlers.current.onFrame(frame), setConnection, preferences);
     socket.current = realtime; void realtime.connect();
     return () => { cancelled = true; realtime.dispose(); lease.revoke(); void audio.current!.stop(); };
   }, [session, address, booting]);
@@ -107,12 +107,15 @@ export function useMia() {
   }
   async function performAction(action: DeviceAction) {
     const epoch = lease.snapshot();
+    const valid = () => lease.current(epoch) && foreground.current && Date.now() - Date.parse(action.createdAt) < 18000;
     try {
       if (action.kind === 'open_chat' && typeof action.payload.chatId === 'string') {
         const list = await api.request<Chat[]>('/v1/chats');
-        if (!lease.current(epoch) || !foreground.current) throw new Error('A newer conversation is active.');
+        if (!valid()) throw new Error('This device request is no longer current.');
         const chat = list.find(item => item.id === action.payload.chatId); if (!chat) throw new Error('The requested chat is unavailable.');
-        await stopAudio(); setChats(list); setActiveChatId(chat.id); setTab('chats');
+        await stopAudio();
+        if (!valid()) throw new Error('This device request is no longer current.');
+        setChats(list); setActiveChatId(chat.id); setTab('chats');
         // Acknowledge after history is actually loaded for the visible chat.
         await loadMessages(chat.id);
         if (!lease.current(epoch)) throw new Error('A newer conversation is active.');
@@ -120,9 +123,14 @@ export function useMia() {
       } else if (action.kind === 'stop_audio') {
         await stopAudio(); await acknowledge(action, true, { message: 'Audio stopped on this device.' });
       } else if (action.kind === 'play_audio' && typeof action.payload.mediaId === 'string') {
-        await playMedia(action.payload.mediaId);
-        if (!lease.current(epoch)) throw new Error('Playback was interrupted.');
-        await acknowledge(action, true, { message: 'Playback finished on this device.' });
+        let acknowledged = false;
+        await playMedia(action.payload.mediaId, () => {
+          if (valid()) {
+            acknowledged = true;
+            void acknowledge(action, true, { message: 'Playback started on this device.' }).catch(fail);
+          }
+        }, valid);
+        if (!acknowledged) throw new Error('Playback did not start.');
       } else if (action.kind === 'record_voice') {
         setDevicePrompt(action);
       } else throw new Error('This device action is not supported.');
@@ -136,13 +144,17 @@ export function useMia() {
       await refresh();
       if (foreground.current && state.current.tab === 'chats' && state.current.activeChatId === message.chatId) await api.request(`/v1/chats/${message.chatId}/read`, 'POST', { messageId: message.id });
     } else if (event.type === 'chat.read' || event.type.startsWith('draft.') || event.type === 'contact.updated') await refresh();
-    if (event.type === 'assistant.accepted') lease.accept(String(p.clientTurnId), String(p.turnId));
+    if (event.type === 'assistant.accepted') {
+      const accepted = lease.accept(String(p.clientTurnId), String(p.turnId));
+      if (!accepted && Date.parse(event.createdAt) >= connectedAt) { lease.revoke(); setDevicePrompt(null); await stopAudio(); }
+    }
+    if (['assistant.interrupted', 'assistant.audio_cancelled'].includes(event.type) && lease.owns(p.turnId)) { lease.revoke(); setDevicePrompt(null); await stopAudio(); }
     if (event.type.startsWith('assistant.')) {
       await syncAssistant();
       if (event.type === 'assistant.failed' && lease.owns(p.turnId)) setError(String(p.message ?? 'Mia could not complete your request. Your drafts are saved.'));
     }
     if (event.type === 'device.action_cancelled' && state.current.devicePrompt?.actionId === p.actionId) setDevicePrompt(null);
-    if (event.type === 'device.action_requested' && isLiveAction(event, connectedAt) && foreground.current && lease.owns(p.turnId)) await performAction(p as unknown as DeviceAction);
+    if (event.type === 'device.action_requested' && isLiveAction(event, connectedAt) && foreground.current && lease.owns(p.turnId)) void performAction({ ...p, createdAt: event.createdAt } as DeviceAction);
   };
   handlers.current.onFrame = frame => {
     const current = speech.current;
@@ -170,7 +182,7 @@ export function useMia() {
   async function logout() { try { await api.request('/v1/auth/logout', 'POST'); } finally { await clearSession(); } }
   async function saveSettings(server: string, voice: boolean) {
     await interrupt();
-    if (server !== address && session) { await api.request('/v1/auth/logout', 'POST'); await clearSession(); }
+    if (server !== address && session) { try { await api.request('/v1/auth/logout', 'POST'); } catch { /* Local sign-out remains available while offline. */ } await clearSession(); }
     await preferences.set('mia.address', server); await preferences.set('mia.voice', String(voice)); setAddress(server); setVoiceMode(voice); setCapabilities(null);
   }
   async function startChat(profile: Profile, add = false) {
@@ -179,12 +191,14 @@ export function useMia() {
     await refresh(); await navigate('chats', chat.id);
   }
   async function sendPending(item: PendingMessage) {
+    const epoch = authEpoch.current;
     setPending(previous => [...previous.filter(p => p.clientMessageId !== item.clientMessageId), { ...item, status: 'sending' }]);
     try {
       const message = await api.request<Message>(`/v1/chats/${item.chatId}/messages`, 'POST', { clientMessageId: item.clientMessageId, content: item.content });
+      if (epoch !== authEpoch.current) return;
       setPending(previous => previous.filter(p => p.clientMessageId !== item.clientMessageId));
       setMessages(previous => ({ ...previous, [item.chatId]: mergeMessages(previous[item.chatId] ?? [], [message]) })); await refresh();
-    } catch (reason) { setPending(previous => previous.map(p => p.clientMessageId === item.clientMessageId ? { ...p, status: 'failed' } : p)); fail(reason); }
+    } catch (reason) { if (epoch !== authEpoch.current) return; setPending(previous => previous.map(p => p.clientMessageId === item.clientMessageId ? { ...p, status: 'failed' } : p)); fail(reason); }
   }
   async function sendText() {
     const chatId = activeChatId; const text = chatId ? composers[chatId]?.trim() : ''; if (!chatId || !text) return;
@@ -208,32 +222,37 @@ export function useMia() {
     try {
       const response = await api.request<{ turn: Turn }>(`/v1/assistant/sessions/${assistantSession.id}/turns`, 'POST', item);
       if (lease.current(epoch)) lease.accept(item.clientTurnId, response.turn.id);
-      setAssistantRetry(null); await syncAssistant();
-    } catch (reason) { fail(reason); }
+      if (lease.current(epoch)) setAssistantRetry(null); await syncAssistant();
+    } catch (reason) { if (lease.current(epoch)) fail(reason); }
   }
   async function speak(turn: Turn) {
+    const epoch = lease.snapshot();
     await stopAudio();
-    if (turn.status !== 'completed') return;
+    if (!lease.current(epoch) || !foreground.current || turn.status !== 'completed') return;
     const requestId = Crypto.randomUUID();
-    speech.current = { requestId, turnId: turn.id, epoch: lease.snapshot(), parts: [], bytes: 0 };
+    speech.current = { requestId, turnId: turn.id, epoch, parts: [], bytes: 0 };
     if (!socket.current?.send({ type: 'speech.request', requestId, turnId: turn.id })) { speech.current = null; throw new Error('Reconnect before requesting speech.'); }
     setAudioState('loading');
   }
-  async function playMedia(mediaId: string) {
-    await stopAudio(); setAudioState('playing');
-    try { await audio.current!.play(`${address}/v1/media/${mediaId}`, { Authorization: `Bearer ${session!.token}` }); }
+  async function playMedia(mediaId: string, onStarted?: () => void, allowed = () => true) {
+    await stopAudio(); if (!allowed() || !foreground.current) throw new Error('Playback was cancelled.'); setAudioState('playing');
+    try { await audio.current!.play(`${address}/v1/media/${mediaId}`, { Authorization: `Bearer ${session!.token}` }, onStarted); }
     finally { setAudioState('idle'); }
   }
   async function startRecording(purpose: 'note' | 'assistant') {
+    const epoch = lease.snapshot();
     await stopAudio();
     if (await AccessibilityInfo.isScreenReaderEnabled()) {
       // Explicit half duplex: no automatic spoken announcements while the microphone is open.
       await new Promise(resolve => setTimeout(resolve, 350));
     }
-    await audio.current!.start(); setRecordPurpose(purpose); setRecordChatId(activeChatId); setRecording(null); setAudioState('recording');
+    if (!lease.current(epoch) || !foreground.current) throw new Error('Recording was cancelled.');
+    await audio.current!.start();
+    if (!lease.current(epoch) || !foreground.current) { await stopAudio(); throw new Error('Recording was cancelled.'); }
+    setRecordPurpose(purpose); setRecordChatId(activeChatId); setRecording(null); setAudioState('recording');
   }
   async function finishRecording() {
-    const result = await audio.current!.finish(); setRecording(result); setAudioState('idle');
+    try { const result = await audio.current!.finish(); setRecording(result); } finally { setAudioState('idle'); }
   }
   async function uploadRecording(value: Recording) {
     const data = new FormData();
@@ -243,12 +262,15 @@ export function useMia() {
   }
   async function useRecording() {
     if (!recording) return;
+    const epoch = lease.snapshot(); const userEpoch = authEpoch.current;
     setBusy(true);
     try {
       const media = await uploadRecording(recording);
+      if (userEpoch !== authEpoch.current) return;
       if (recordPurpose === 'assistant') {
         const result = await api.request<{ text: string }>('/v1/speech/transcriptions', 'POST', { mediaId: media.id });
-        setAssistantText(result.text); setTab('mia');
+        if (userEpoch !== authEpoch.current) return;
+        setAssistantText(result.text); if (lease.current(epoch)) setTab('mia');
       } else if (recordChatId) await sendPending({ chatId: recordChatId, content: { kind: 'voice', mediaId: media.id }, clientMessageId: Crypto.randomUUID(), status: 'sending' });
       await audio.current!.disposeRecording(recording); setRecording(null);
     } finally { setBusy(false); }
@@ -256,7 +278,28 @@ export function useMia() {
   async function discardRecording() { await stopAudio(); if (recording) await audio.current!.disposeRecording(recording); setRecording(null); }
   async function preview() { if (!recording) return; await stopAudio(); setAudioState('playing'); try { await audio.current!.play(recording.uri); } finally { setAudioState('idle'); } }
   async function declineDevice() { const action = devicePrompt; setDevicePrompt(null); if (action) await acknowledge(action, false, { message: 'Recording requires an explicit user action. Use the voice note control and try again.' }); }
-  return { booting, session, address, voiceMode, error, setError, busy, tab, connection, capabilities, chats, contacts, drafts, messages, hasOlder, activeChatId, composers, pending, turns, assistantText, setAssistantText, assistantRetry, assistantSession, audioState, recording, recordPurpose, devicePrompt, api, fail, signIn, logout, saveSettings, checkHealth, refresh, loadMessages, navigate, startChat, sendText, sendPending, saveDraft, draftAction, submitAssistant, interrupt, speak, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice,
+  async function acceptDeviceRecording() {
+    const action = devicePrompt; if (!action || !lease.owns(action.turnId)) return;
+    const epoch = lease.snapshot();
+    const valid = () => lease.current(epoch) && Date.now() - Date.parse(action.createdAt) < 18000;
+    try {
+      const recipientId = action.payload.recipientId;
+      if (typeof recipientId !== 'string') throw new Error('The recording recipient is missing.');
+      const chat = await api.request<{ id: string }>('/v1/chats', 'POST', { recipientId });
+      if (!valid()) throw new Error('This recording request has expired.');
+      await refresh();
+      await startRecording('note');
+      if (!valid()) { await stopAudio(); throw new Error('Recording was cancelled.'); }
+      setRecordChatId(chat.id); setTab('chats'); setActiveChatId(chat.id); setDevicePrompt(null);
+      await acknowledge(action, true, { message: 'Recording started after the user chose Record. The recording is not yet uploaded or sent.' });
+    } catch (reason) { setDevicePrompt(null); await acknowledge(action, false, { message: reason instanceof Error ? reason.message : 'Recording did not start.' }).catch(fail); fail(reason); }
+  }
+  useEffect(() => {
+    if (!devicePrompt) return;
+    const timer = setTimeout(() => { setDevicePrompt(null); void stopRef.current(); }, Math.max(0, 18000 - (Date.now() - Date.parse(devicePrompt.createdAt))));
+    return () => clearTimeout(timer);
+  }, [devicePrompt]);
+  return { booting, session, address, voiceMode, error, setError, busy, tab, connection, capabilities, chats, contacts, drafts, messages, hasOlder, activeChatId, composers, pending, turns, assistantText, setAssistantText, assistantRetry, assistantSession, audioState, recording, recordPurpose, devicePrompt, api, fail, signIn, logout, saveSettings, checkHealth, refresh, loadMessages, navigate, startChat, sendText, sendPending, saveDraft, draftAction, submitAssistant, interrupt, speak, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice, acceptDeviceRecording,
     setComposer: (text: string) => { if (activeChatId) setComposers(previous => ({ ...previous, [activeChatId]: text })); },
   };
 }

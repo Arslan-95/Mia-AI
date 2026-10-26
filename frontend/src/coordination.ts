@@ -6,7 +6,7 @@ export class PresentationLease {
   private clientId: string | null = null;
   revoke() { this.epoch++; this.turnId = null; this.clientId = null; return this.epoch; }
   begin(clientId: string) { this.revoke(); this.clientId = clientId; return this.epoch; }
-  accept(clientId: string, turnId: string) { if (this.clientId === clientId) this.turnId = turnId; }
+  accept(clientId: string, turnId: string) { if (this.clientId !== clientId) return false; this.turnId = turnId; return true; }
   owns(turnId: unknown) { return typeof turnId === 'string' && turnId === this.turnId; }
   snapshot() { return this.epoch; }
   current(epoch: number) { return epoch === this.epoch; }

@@ -10,5 +10,5 @@ export type Turn = { id: string; sessionId: string; userId: string; generation: 
 export type AssistantSession = { id: string; generation: number; activeChatId: string | null };
 export type ServerEvent = { id: string; type: string; payload: Record<string, unknown>; createdAt: string };
 export type Capabilities = { agent: boolean; speechRecognition: boolean; speechSynthesis: boolean };
-export type DeviceAction = { sessionId: string; turnId: string; actionId: string; kind: string; payload: Record<string, unknown> };
+export type DeviceAction = { sessionId: string; turnId: string; actionId: string; kind: string; payload: Record<string, unknown>; createdAt: string };
 export type PendingMessage = { clientMessageId: string; chatId: string; content: Content; status: 'sending' | 'failed' };
