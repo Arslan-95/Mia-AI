@@ -1,4 +1,4 @@
-import Fastify from 'fastify';
+import Fastify, { LogController } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import multipart from '@fastify/multipart';
@@ -11,19 +11,26 @@ import { AppError } from './errors.js';
 import { MessagingService } from './messaging.js';
 import { MediaService } from './media.js';
 import { registerMessagingRoutes } from './routes/messaging.js';
+import { MetaResponsesProvider, type ModelProvider } from './agents/model.js';
+import { AssistantRuntime } from './agents/runtime.js';
+import { registerAssistantRoutes } from './routes/assistant.js';
 
 declare module 'fastify' {
   interface FastifyRequest { user: User }
   interface FastifyContextConfig { public?: boolean }
 }
 
-export async function createApp(config: Config, db: Database) {
+export async function createApp(config: Config, db: Database, options: { provider?: ModelProvider } = {}) {
   const app = Fastify({ bodyLimit: 32_768, requestTimeout: 30_000, routerOptions: { maxParamLength: 100 },
     logger: { level: config.logLevel, redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'] },
-    disableRequestLogging: true });
+    logController: new LogController({ disableRequestLogging: true }) });
   const auth = new AuthService(db);
   const messaging = new MessagingService(db);
   const media = new MediaService(db, config.mediaDirectory);
+  const provider = options.provider ?? new MetaResponsesProvider(config);
+  const assistant = new AssistantRuntime(db, provider, (code) => app.log.error({ code }, 'Assistant runtime failed'));
+  app.addHook('onReady', async () => assistant.start());
+  app.addHook('onClose', async () => assistant.close());
   await app.register(cors, { origin: config.corsOrigins, credentials: false });
   await app.register(helmet);
   await app.register(rateLimit, { global: true, max: 120, timeWindow: '1 minute' });
@@ -55,5 +62,6 @@ export async function createApp(config: Config, db: Database) {
       speechRecognition: Boolean(config.metaApiKey), speechSynthesis: Boolean(config.elevenLabsApiKey && config.elevenLabsVoiceId) } };
   });
   registerMessagingRoutes(app, { auth, messaging, media, db });
+  registerAssistantRoutes(app, assistant);
   return app;
 }
