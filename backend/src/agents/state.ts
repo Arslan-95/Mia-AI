@@ -2,13 +2,14 @@ import { randomUUID } from 'node:crypto';
 import type { Database, Sql } from '../db/database.js';
 import { AppError, conflict, notFound, throwIfAborted } from '../errors.js';
 import { publish } from '../events.js';
+import { assertContextAccess, clientContextSchema, deviceResultSchema, sameContext, type ClientContext } from './context.js';
 
 export type Session = { id: string; userId: string; generation: number; activeChatId: string | null };
 export type Turn = { id: string; sessionId: string; userId: string; generation: number; userText: string;
-  status: 'queued' | 'running' | 'completed' | 'interrupted' | 'failed'; assistantText: string | null; clientTurnId: string };
+  status: 'queued' | 'running' | 'completed' | 'interrupted' | 'failed'; assistantText: string | null; clientTurnId: string; context: ClientContext | null };
 export type DeviceAction = { id: string; kind: string; payload: unknown; state: string; result: unknown };
 const sessionColumns = 'id,user_id AS "userId",generation,active_chat_id AS "activeChatId"';
-const turnColumns = 't.id,t.session_id AS "sessionId",s.user_id AS "userId",t.generation,t.user_text AS "userText",t.status,t.assistant_text AS "assistantText",t.client_turn_id AS "clientTurnId"';
+const turnColumns = 't.id,t.session_id AS "sessionId",s.user_id AS "userId",t.generation,t.user_text AS "userText",t.status,t.assistant_text AS "assistantText",t.client_turn_id AS "clientTurnId",t.client_context AS context';
 
 export class AssistantState {
   constructor(readonly db: Database) {}
@@ -26,14 +27,16 @@ export class AssistantState {
     return session;
   }
 
-  async accept(userId: string, sessionId: string, clientTurnId: string, text: string, signal?: AbortSignal) {
+  async accept(userId: string, sessionId: string, clientTurnId: string, text: string, signal?: AbortSignal, context?: ClientContext) {
+    const snapshot = context ? clientContextSchema.parse(context) : null;
     return this.db.transaction(async (sql) => {
       const session = await this.requireSession(userId, sessionId, sql, true);
       throwIfAborted(signal);
+      await assertContextAccess(sql, userId, snapshot);
       const [existing] = await sql.query<Turn>(`SELECT ${turnColumns} FROM assistant_turns t
         JOIN assistant_sessions s ON s.id = t.session_id WHERE t.session_id = $1 AND t.client_turn_id = $2`, [sessionId, clientTurnId]);
       if (existing) {
-        if (existing.userText !== text) throw conflict('This turn ID was used with different content.');
+        if (existing.userText !== text || !sameContext(existing.context, snapshot)) throw conflict('This turn ID was used with different content or context.');
         return { turn: existing, duplicate: true };
       }
       const [recent] = await sql.query<{ count: number }>(`SELECT count(*)::integer AS count FROM assistant_turns
@@ -49,9 +52,9 @@ export class AssistantState {
         WHERE session_id = $1 AND state = 'pending' RETURNING id`, [sessionId]);
       for (const action of actions) await publish(sql, userId, 'device.action_cancelled', { actionId: action.id, sessionId });
       const id = randomUUID();
-      await sql.query(`INSERT INTO assistant_turns(id,session_id,client_turn_id,generation,user_text) VALUES ($1,$2,$3,$4,$5)`,
-        [id, sessionId, clientTurnId, generation, text]);
-      const turn: Turn = { id, sessionId, userId, generation, userText: text, status: 'queued', assistantText: null, clientTurnId };
+      await sql.query(`INSERT INTO assistant_turns(id,session_id,client_turn_id,generation,user_text,client_context) VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
+        [id, sessionId, clientTurnId, generation, text, snapshot ? JSON.stringify(snapshot) : null]);
+      const turn: Turn = { id, sessionId, userId, generation, userText: text, status: 'queued', assistantText: null, clientTurnId, context: snapshot };
       await publish(sql, userId, 'assistant.accepted', { sessionId, turnId: id, clientTurnId });
       return { turn, duplicate: false };
     });
@@ -163,12 +166,13 @@ export class AssistantState {
       await db.query(`INSERT INTO device_actions(id,user_id,session_id,turn_id,generation,kind,payload,expires_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,now() + interval '20 seconds')`,
       [id, turn.userId, turn.sessionId, turn.id, turn.generation, kind, JSON.stringify(payload)]);
-      await publish(db, turn.userId, 'device.action_requested', { sessionId: turn.sessionId, turnId: turn.id, actionId: id, kind, payload });
+      await publish(db, turn.userId, 'device.action_requested', { sessionId: turn.sessionId, turnId: turn.id, actionId: id, kind, payload, context: turn.context });
       return { id, kind, payload, state: 'pending', result: null };
     });
   }
 
   async acknowledgeAction(userId: string, actionId: string, success: boolean, result: unknown) {
+    const feedback = deviceResultSchema.parse(result);
     return this.db.transaction(async (sql) => {
       const [lookup] = await sql.query<{ sessionId: string }>('SELECT session_id AS "sessionId" FROM device_actions WHERE id = $1 AND user_id = $2', [actionId, userId]);
       if (!lookup) throw notFound();
@@ -178,6 +182,7 @@ export class AssistantState {
       if (!action) throw notFound();
       if (action.state !== 'pending') return action;
       if (action.expired || session.generation !== action.generation) throw conflict('This device action has expired or was cancelled.');
+      await assertContextAccess(sql, userId, feedback.context ?? null);
       if (typeof result === 'object' && result !== null && 'mediaId' in result) {
         if (action.kind !== 'record_voice') throw conflict('This device action does not accept a recording.');
         const [media] = await sql.query('SELECT id FROM media WHERE id = $1 AND owner_id = $2', [result.mediaId, userId]);

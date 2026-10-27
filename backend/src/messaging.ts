@@ -42,6 +42,13 @@ export class MessagingService {
     });
   }
 
+  async contact(ownerId: string, contactId: string) {
+    const [contact] = await this.db.query<Contact>(`SELECT u.id,u.username,u.display_name AS "displayName",c.id AS "contactId",c.name
+      FROM contacts c JOIN users u ON u.id = c.user_id WHERE c.owner_id = $1 AND c.id = $2`, [ownerId, contactId]);
+    if (!contact) throw notFound();
+    return contact;
+  }
+
   async profile(userId: string): Promise<Profile> {
     const [user] = await this.db.query<Profile>('SELECT id, username, display_name AS "displayName" FROM users WHERE id = $1', [userId]);
     if (!user) throw notFound();
@@ -64,7 +71,7 @@ export class MessagingService {
     return this.db.transaction((sql) => this.directChat(ownerId, recipientId, sql));
   }
 
-  async chats(ownerId: string) {
+  async chats(ownerId: string, chatId?: string) {
     return this.db.query<{ id: string; recipient: Profile; lastMessage: Message | null; unreadCount: number }>(`
       SELECT c.id, json_build_object('id', u.id, 'username', u.username,
         'displayName', COALESCE(ct.name, u.display_name)) AS recipient,
@@ -76,7 +83,14 @@ export class MessagingService {
       FROM chats c JOIN chat_members own ON own.chat_id = c.id AND own.user_id = $1
       JOIN chat_members other ON other.chat_id = c.id AND other.user_id <> $1
       JOIN users u ON u.id = other.user_id LEFT JOIN contacts ct ON ct.owner_id = $1 AND ct.user_id = u.id
-      ORDER BY COALESCE((SELECT max(created_at) FROM messages WHERE chat_id = c.id), c.created_at) DESC,c.id LIMIT 100`, [ownerId]);
+      WHERE ($2::uuid IS NULL OR c.id = $2)
+      ORDER BY COALESCE((SELECT max(created_at) FROM messages WHERE chat_id = c.id), c.created_at) DESC,c.id LIMIT 100`, [ownerId, chatId ?? null]);
+  }
+
+  async chat(ownerId: string, chatId: string) {
+    const [chat] = await this.chats(ownerId, chatId);
+    if (!chat) throw notFound();
+    return chat;
   }
 
   async assertMember(ownerId: string, chatId: string, sql: Sql = this.db): Promise<void> {

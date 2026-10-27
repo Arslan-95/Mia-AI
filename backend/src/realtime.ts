@@ -11,18 +11,19 @@ import { listEvents } from './events.js';
 import { MessagingService } from './messaging.js';
 import type { RecognitionEvent, RecognitionStream, SpeechProvider } from './speech/providers.js';
 import { eventQuery } from './routes/messaging.js';
+import { assertContextAccess, clientContextSchema, deviceResultSchema, type ClientContext } from './agents/context.js';
 
 const frameSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('auth'), token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), after: eventQuery.shape.after }).strict(),
-  z.object({ type: z.literal('turn'), clientTurnId: z.uuid(), text: z.string().trim().min(1).max(8000) }).strict(),
+  z.object({ type: z.literal('turn'), clientTurnId: z.uuid(), text: z.string().trim().min(1).max(8000), context: clientContextSchema.optional() }).strict(),
   z.object({ type: z.literal('assistant.stop') }).strict(),
-  z.object({ type: z.literal('voice.start'), requestId: z.uuid(), sampleRate: z.literal(24000), format: z.literal('pcm_s16le') }).strict(),
+  z.object({ type: z.literal('voice.start'), requestId: z.uuid(), sampleRate: z.literal(24000), format: z.literal('pcm_s16le'), context: clientContextSchema.optional() }).strict(),
   z.object({ type: z.literal('voice.end') }).strict(),
   z.object({ type: z.literal('voice.cancel') }).strict(),
   z.object({ type: z.literal('speech.request'), requestId: z.uuid(), turnId: z.uuid() }).strict(),
   z.object({ type: z.literal('speech.cancel') }).strict(),
   z.object({ type: z.literal('device.result'), actionId: z.uuid(), success: z.boolean(),
-    result: z.object({ message: z.string().max(500).optional(), mediaId: z.uuid().optional() }).strict().default({}) }).strict(),
+    result: deviceResultSchema.default({}) }).strict(),
   z.object({ type: z.literal('ping') }).strict(),
 ]);
 
@@ -54,6 +55,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
     let recognitionId: string | undefined;
     let voiceStartedAt = 0;
     let voiceGeneration: number | undefined;
+    let voiceContext: ClientContext | undefined;
     let receivedBytes = 0;
     let voiceTimer: ReturnType<typeof setTimeout> | undefined;
     let voiceEndTimer: ReturnType<typeof setTimeout> | undefined;
@@ -80,6 +82,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
     const cancelVoice = () => {
       recognitionId = undefined;
       voiceGeneration = undefined;
+      voiceContext = undefined;
       recognitionController?.abort(); recognitionController = undefined;
       recognition?.close(); recognition = undefined;
       if (voiceTimer) clearTimeout(voiceTimer);
@@ -163,7 +166,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
           lastTurnId = turnId;
         }
         if (transcripts.length) {
-          const result = await assistant.submit(user.id, sessionId, speechTurnId(id, lastTurnId), transcripts.join(' '), signal);
+          const result = await assistant.submit(user.id, sessionId, speechTurnId(id, lastTurnId), transcripts.join(' '), signal, voiceContext);
           send({ type: 'turn.accepted', ...result });
         }
       }).catch((error: unknown) => { if (!signal.aborted) { failure(error); cancelVoice(); } });
@@ -233,7 +236,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
       if (frame.type === 'ping') { send({ type: 'pong' }); return; }
       if (frame.type === 'turn') {
         cancelSpeech(); cancelVoice();
-        send({ type: 'turn.accepted', ...await assistant.submit(user.id, sessionId, frame.clientTurnId, frame.text) });
+        send({ type: 'turn.accepted', ...await assistant.submit(user.id, sessionId, frame.clientTurnId, frame.text, undefined, frame.context) });
       } else if (frame.type === 'assistant.stop') {
         cancelSpeech();
         send({ type: 'assistant.stopped', ...await assistant.interrupt(user.id, sessionId) });
@@ -244,7 +247,9 @@ export function registerRealtime(app: FastifyInstance, deps: {
         voiceEndTimer = setTimeout(() => { cancelVoice(); send({ type: 'voice.closed' }); }, 10_000);
       } else if (frame.type === 'voice.start') {
         cancelVoice();
+        await assertContextAccess(db, user.id, frame.context ?? null);
         recognitionId = frame.requestId;
+        voiceContext = frame.context;
         const controller = new AbortController(); recognitionController = controller;
         const contacts = await new MessagingService(db).contacts(user.id);
         try {

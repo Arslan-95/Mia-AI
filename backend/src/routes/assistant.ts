@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { AssistantRuntime } from '../agents/runtime.js';
+import { clientContextSchema, deviceResultSchema } from '../agents/context.js';
 
 export function registerAssistantRoutes(app: FastifyInstance, assistant: AssistantRuntime) {
   const params = z.object({ sessionId: z.uuid() });
@@ -14,8 +15,9 @@ export function registerAssistantRoutes(app: FastifyInstance, assistant: Assista
     preHandler: app.rateLimit({ max: 20, timeWindow: '1 minute' }),
   }, async (request, reply) => {
     const { sessionId } = params.parse(request.params);
-    const { clientTurnId, text } = z.object({ clientTurnId: z.uuid(), text: z.string().trim().min(1).max(8000) }).strict().parse(request.body);
-    const result = await assistant.submit(request.user.id, sessionId, clientTurnId, text);
+    const { clientTurnId, text, context } = z.object({ clientTurnId: z.uuid(), text: z.string().trim().min(1).max(8000),
+      context: clientContextSchema.optional() }).strict().parse(request.body);
+    const result = await assistant.submit(request.user.id, sessionId, clientTurnId, text, undefined, context);
     return reply.code(result.duplicate ? 200 : 202).send(result);
   });
   app.post('/v1/assistant/sessions/:sessionId/stop', async (request) => {
@@ -30,7 +32,7 @@ export function registerAssistantRoutes(app: FastifyInstance, assistant: Assista
   app.post('/v1/device-actions/:actionId/result', async (request) => {
     const { actionId } = z.object({ actionId: z.uuid() }).parse(request.params);
     const { success, result } = z.object({ success: z.boolean(),
-      result: z.object({ message: z.string().max(500).optional(), mediaId: z.uuid().optional() }).strict().default({}) }).strict().parse(request.body);
+      result: deviceResultSchema.default({}) }).strict().parse(request.body);
     return assistant.state.acknowledgeAction(request.user.id, actionId, success, result);
   });
 }

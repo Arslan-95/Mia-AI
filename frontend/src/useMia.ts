@@ -3,13 +3,14 @@ import { AccessibilityInfo, AppState } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { Api } from './api';
 import { AssistantControl } from './assistantControl';
+import { NavigationContext, sameContext, viewRoute } from './navigationContext';
 import { preferences, sessionStorage } from './storage';
 import { Realtime, type Frame } from './realtime';
 import { PresentationLease, isLiveAction, mergeMessages } from './coordination';
 import { Engine } from './audio/engine';
 import { concatBytes } from './audio/wav';
 import type { Recording } from './audio/types';
-import type { AssistantSession, Capabilities, Chat, Contact, Content, DeviceAction, Draft, Message, OtpChallenge, PendingMessage, Profile, ServerEvent, Session, Turn, User } from './types';
+import type { AssistantRequest, AssistantSession, Capabilities, Chat, ClientContext, Contact, Content, DeviceAction, Draft, Message, OtpChallenge, PendingMessage, Profile, ServerEvent, Session, Turn, User } from './types';
 export type Tab = 'chats' | 'mia' | 'people' | 'settings' | 'drafts';
 const defaultAddress = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:8080';
 export function useMia() {
@@ -23,12 +24,14 @@ export function useMia() {
   const [hasOlder, setHasOlder] = useState<Record<string, boolean>>({}); const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [composers, setComposers] = useState<Record<string, string>>({}); const [pending, setPending] = useState<PendingMessage[]>([]);
   const [assistantSession, setAssistantSession] = useState<AssistantSession | null>(null); const [turns, setTurns] = useState<Turn[]>([]);
-  const [assistantText, setAssistantText] = useState(''); const [assistantRetry, setAssistantRetry] = useState<{ clientTurnId: string; text: string } | null>(null);
+  const [assistantText, setAssistantText] = useState(''); const [assistantRetry, setAssistantRetry] = useState<AssistantRequest | null>(null);
   const [audioState, setAudioState] = useState<'idle' | 'recording' | 'loading' | 'playing'>('idle');
   const [recording, setRecording] = useState<Recording | null>(null); const [recordPurpose, setRecordPurpose] = useState<'note' | 'assistant'>('note');
   const [recordChatId, setRecordChatId] = useState<string | null>(null); const [devicePrompt, setDevicePrompt] = useState<DeviceAction | null>(null);
   const lease = useRef(new PresentationLease()).current; const audio = useRef<Engine | null>(null); if (!audio.current) audio.current = new Engine();
   const assistantControl = useRef(new AssistantControl()).current;
+  const navigation = useRef(new NavigationContext()).current;
+  const requestContext = useRef<ClientContext | null>(null);
   const socket = useRef<Realtime | null>(null); const state = useRef({ session, activeChatId, tab, assistantSession, chats, devicePrompt });
   state.current = { session, activeChatId, tab, assistantSession, chats, devicePrompt };
   const foreground = useRef(true); const authEpoch = useRef(0); const stopRef = useRef<() => Promise<void>>(async () => {});
@@ -37,6 +40,7 @@ export function useMia() {
   const fail = useCallback((reason: unknown) => setError(reason instanceof Error ? reason.message : 'Something went wrong. Please try again.'), []);
   const api = useMemo(() => new Api(address, session, () => { void clearSession(); }), [address, session]);
   async function clearSession() {
+    navigation.reset(); requestContext.current = null; setTab('chats');
     authEpoch.current++; lease.revoke(); socket.current?.dispose(); await audio.current!.stop();
     await sessionStorage.write(null).catch(fail); setSession(null); setChats([]); setContacts([]); setDrafts([]); setMessages({}); setTurns([]); setPending([]); setComposers({}); setActiveChatId(null); setAssistantSession(null); setAssistantRetry(null); setAssistantText(''); setDevicePrompt(null); setAudioState('idle');
     if (recording) await audio.current!.disposeRecording(recording); setRecording(null);
@@ -113,29 +117,34 @@ export function useMia() {
     return () => { subscription.remove(); void audio.current!.stop(); };
   }, []);
   async function interrupt() {
-    lease.revoke(); setDevicePrompt(null);
+    lease.revoke(); requestContext.current = null; setDevicePrompt(null);
     const current = state.current.assistantSession;
     await Promise.all([stopAudio(), current && state.current.session ? assistantControl.stop(api, current.id) : Promise.resolve()]);
   }
-  async function navigate(next: Tab, chatId: string | null = null) {
-    void interrupt().catch(fail); setTab(next); setActiveChatId(chatId);
+  function setView(next: Tab, chatId: string | null = null) {
+    navigation.move(viewRoute(next, chatId)); setTab(next); setActiveChatId(chatId);
     state.current = { ...state.current, tab: next, activeChatId: chatId };
+  }
+  async function navigate(next: Tab, chatId: string | null = null) {
+    void interrupt().catch(fail); setView(next, chatId);
     if (next === 'chats' && chatId) await loadMessages(chatId).catch(fail);
   }
   async function acknowledge(action: DeviceAction, success: boolean, result: { message?: string; mediaId?: string }) {
-    await api.request(`/v1/device-actions/${action.actionId}/result`, 'POST', { success, result });
+    await api.request(`/v1/device-actions/${action.actionId}/result`, 'POST', { success, result: { ...result, context: navigation.snapshot() } });
   }
   async function performAction(action: DeviceAction) {
     const epoch = lease.snapshot();
-    const valid = () => lease.current(epoch) && foreground.current && Date.now() - Date.parse(action.createdAt) < 18000;
+    const valid = () => lease.current(epoch) && sameContext(action.context ?? null, requestContext.current)
+      && foreground.current && Date.now() - Date.parse(action.createdAt) < 18000;
     try {
+      if (!valid()) throw new Error('This device request belongs to a previous view.');
       if (action.kind === 'open_chat' && typeof action.payload.chatId === 'string') {
         const list = await api.request<Chat[]>('/v1/chats');
         if (!valid()) throw new Error('This device request is no longer current.');
         const chat = list.find(item => item.id === action.payload.chatId); if (!chat) throw new Error('The requested chat is unavailable.');
         await stopAudio();
         if (!valid()) throw new Error('This device request is no longer current.');
-        setChats(list); setActiveChatId(chat.id); setTab('chats');
+        setChats(list); setView('chats', chat.id);
         // Acknowledge after history is actually loaded for the visible chat.
         await loadMessages(chat.id);
         if (!lease.current(epoch)) throw new Error('A newer conversation is active.');
@@ -244,10 +253,12 @@ export function useMia() {
     await api.request(`/v1/drafts/${draft.id}${action === 'review' || action === 'confirm' ? `/${action}` : ''}`, action === 'discard' ? 'DELETE' : action === 'edit' ? 'PATCH' : 'POST', { version: draft.version, ...(action === 'edit' ? { content: { kind: 'text', text } } : {}) });
     await refresh();
   }
-  async function submitAssistant(retry?: { clientTurnId: string; text: string }) {
+  async function submitAssistant(retry?: AssistantRequest) {
     const text = retry?.text ?? assistantText.trim(); if (!assistantSession || !text) return;
-    const item = retry ?? { text, clientTurnId: Crypto.randomUUID() };
+    if (retry && !sameContext(retry.context, navigation.snapshot())) { fail(new Error('This request belongs to a previous view. Ask Mia again from your current view.')); return; }
+    const item = retry ?? { text, clientTurnId: Crypto.randomUUID(), context: navigation.snapshot() };
     lease.begin(item.clientTurnId); setDevicePrompt(null); setAssistantRetry(item); setAssistantText('');
+    requestContext.current = item.context;
     const epoch = lease.snapshot();
     try {
       await assistantControl.beforeTurn(api, assistantSession.id);
@@ -303,7 +314,7 @@ export function useMia() {
       if (recordPurpose === 'assistant') {
         const result = await api.request<{ text: string }>('/v1/speech/transcriptions', 'POST', { mediaId: media.id });
         if (userEpoch !== authEpoch.current) return;
-        setAssistantText(result.text); if (lease.current(epoch)) setTab('mia');
+        setAssistantText(result.text); if (lease.current(epoch)) setView('mia');
       } else if (recordChatId) await sendPending({ chatId: recordChatId, content: { kind: 'voice', mediaId: media.id }, clientMessageId: Crypto.randomUUID(), status: 'sending' });
       await audio.current!.disposeRecording(recording); setRecording(null);
     } finally { setBusy(false); }
@@ -312,7 +323,7 @@ export function useMia() {
   async function preview() { if (!recording) return; await stopAudio(); setAudioState('playing'); try { await audio.current!.play(recording.uri); } finally { setAudioState('idle'); } }
   async function declineDevice() { const action = devicePrompt; setDevicePrompt(null); if (action && startingDeviceRecording.current === action.actionId) { startingDeviceRecording.current = null; await stopAudio(); } if (action) await acknowledge(action, false, { message: 'The user declined this recording request.' }); }
   async function acceptDeviceRecording() {
-    const action = devicePrompt; if (!action || !lease.owns(action.turnId) || startingDeviceRecording.current) return;
+    const action = devicePrompt; if (!action || !lease.owns(action.turnId) || !sameContext(action.context ?? null, requestContext.current) || startingDeviceRecording.current) return;
     startingDeviceRecording.current = action.actionId;
     const epoch = lease.snapshot();
     const valid = () => lease.current(epoch) && startingDeviceRecording.current === action.actionId && Date.now() - Date.parse(action.createdAt) < 18000;
@@ -324,7 +335,7 @@ export function useMia() {
       await refresh();
       await startRecording('note');
       if (!valid()) { await stopAudio(); throw new Error('Recording was cancelled.'); }
-      setRecordChatId(chat.id); setTab('chats'); setActiveChatId(chat.id); setDevicePrompt(null);
+      setRecordChatId(chat.id); setView('chats', chat.id); setDevicePrompt(null);
       await acknowledge(action, true, { message: 'Recording started after the user chose Record. The recording is not yet uploaded or sent.' });
     } catch (reason) { setDevicePrompt(null); await acknowledge(action, false, { message: reason instanceof Error ? reason.message : 'Recording did not start.' }).catch(fail); fail(reason); }
     finally { if (startingDeviceRecording.current === action.actionId) startingDeviceRecording.current = null; }

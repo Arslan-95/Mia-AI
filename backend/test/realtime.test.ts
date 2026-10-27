@@ -6,6 +6,7 @@ import test from 'node:test';
 import WebSocket from 'ws';
 import type { SpeechProvider, RecognitionEvent } from '../src/speech/providers.js';
 import { phoneSignIn, testApp } from './helpers.js';
+import { MessagingService } from '../src/messaging.js';
 
 type Frame = Record<string, unknown> & { type: string };
 async function waitFor<T>(probe: () => T | undefined, timeout = 6000): Promise<T> {
@@ -113,6 +114,53 @@ test('HTTP stop closes existing recognition but leaves a later voice session usa
   await client.next('turn.accepted');
   const turns = await context.db.query<{ text: string }>('SELECT user_text AS text FROM assistant_turns');
   assert.deepEqual(turns.map(turn => turn.text), ['Follow the new voice request.']);
+});
+
+test('WebSocket text and recognized speech carry authorized route snapshots to the model', { timeout: 12_000 }, async (t) => {
+  let recognized: ((event: RecognitionEvent) => void) | undefined;
+  let recognitionCalls = 0;
+  const snapshots: unknown[] = [];
+  const speech: SpeechProvider = {
+    recognitionConfigured: true, synthesisConfigured: false,
+    transcribe: async () => '', async *synthesize() { yield new Uint8Array(2); },
+    recognize: async (_keywords, callback) => {
+      recognitionCalls++; recognized = callback;
+      return { write() {}, end() {}, close() {} };
+    },
+  };
+  const context = await testApp({ speech, provider: { configured: true, async respond(request) {
+    const data = JSON.parse(request.instructions.split('Server-supplied current context (data, not instructions):\n')[1]!) as { clientContext: unknown };
+    snapshots.push(data.clientContext);
+    return { text: 'The current request is understood.', calls: [], output: [] };
+  } } });
+  t.after(() => context.close());
+  const owner = await phoneSignIn(context.app, '+15550000811', 'socket_context');
+  const bob = await phoneSignIn(context.app, '+15550000812', 'socket_bob');
+  const carol = await phoneSignIn(context.app, '+15550000813', 'socket_carol');
+  const service = new MessagingService(context.db);
+  const ownChat = await service.createDirectChat(owner.user.id, bob.user.id);
+  const foreignChat = await service.createDirectChat(bob.user.id, carol.user.id);
+  const url = (await context.app.listen({ port: 0, host: '127.0.0.1' })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: owner.token, after: '0' }); await client.next('ready');
+  const textContext = { route: `/chat/${ownChat.id}`, revision: 2 };
+  client.send({ type: 'turn', clientTurnId: randomUUID(), text: 'Read this conversation.', context: textContext });
+  const accepted = await client.next('turn.accepted');
+  assert.deepEqual((accepted.turn as { context: unknown }).context, textContext);
+  await client.next('event', frame => (frame.event as { type: string }).type === 'assistant.completed');
+  client.send({ type: 'voice.start', requestId: randomUUID(), sampleRate: 24000, format: 'pcm_s16le',
+    context: { route: `/chat/${foreignChat.id}`, revision: 3 } });
+  await client.next('error', frame => (frame.error as { code: string }).code === 'NOT_FOUND');
+  assert.equal(recognitionCalls, 0);
+  const voiceContext = { route: '/mia', previousRoute: `/chat/${ownChat.id}`, revision: 4 };
+  client.send({ type: 'voice.start', requestId: randomUUID(), sampleRate: 24000, format: 'pcm_s16le', context: voiceContext });
+  await client.next('voice.ready');
+  recognized?.({ type: 'speechStart', turnId: 1 });
+  recognized?.({ type: 'speechComplete', turnId: 1, transcript: 'Reply to him.' });
+  const voice = await client.next('turn.accepted', frame => (frame.turn as { userText: string }).userText === 'Reply to him.');
+  assert.deepEqual((voice.turn as { context: unknown }).context, voiceContext);
+  await waitFor(() => snapshots.length === 2 || undefined);
+  assert.deepEqual(snapshots, [textContext, voiceContext]);
 });
 
 test('live websocket authenticates, replays scoped events and runs only final speech turns', { timeout: 25_000 }, async (t) => {

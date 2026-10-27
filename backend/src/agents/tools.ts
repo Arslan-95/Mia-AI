@@ -30,6 +30,8 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
   const tools = [
     define('list_contacts', 'Search saved contacts by name or username; an empty query lists contacts.',
       z.object({ query: z.string().max(100) }).strict(), ({ query }) => messaging.contacts(turn.userId, query)),
+    define('get_contact', 'Read a saved contact by its contact ID, including the registered user ID and name.',
+      z.object({ contactId: uuid }).strict(), ({ contactId }) => messaging.contact(turn.userId, contactId)),
     define('search_users', 'Find registered people by username prefix, not by private email.',
       z.object({ query: z.string().min(2).max(30) }).strict(), ({ query }) => messaging.searchUsers(turn.userId, query)),
     define('add_contact', 'Save a registered person as a contact when the user requests it.',
@@ -37,6 +39,8 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       ({ userId, name }) => mutate((service) => service.addContact(turn.userId, userId, name))),
     define('list_chats', 'Get current direct chats, participants, last message and unread counts.', empty,
       () => messaging.chats(turn.userId)),
+    define('get_chat', 'Read one authorized direct chat by chat ID, including its recipient and unread count.',
+      z.object({ chatId: uuid }).strict(), ({ chatId }) => messaging.chat(turn.userId, chatId)),
     define('read_messages', 'Read actual messages in a chat, newest first. Use a before ID to read older messages.',
       z.object({ chatId: uuid, limit: z.int().min(1).max(30), before: uuid.nullable() }).strict(),
       ({ chatId, limit, before }) => messaging.messages(turn.userId, chatId, limit, before ?? undefined)),
@@ -75,11 +79,7 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       })),
     define('open_chat', 'Request that the app open the direct chat with a verified recipient. This does not send or discard drafts.',
       z.object({ recipientId: uuid }).strict(), async ({ recipientId }) => {
-        const chat = await mutate(async (service, scoped) => {
-          const chat = await service.createDirectChat(turn.userId, recipientId);
-          await scoped.query('UPDATE assistant_sessions SET active_chat_id = $2 WHERE id = $1', [turn.sessionId, chat.id]);
-          return chat;
-        });
+        const chat = await mutate(service => service.createDirectChat(turn.userId, recipientId));
         return state.action(turn, signal, 'open_chat', { chatId: chat.id });
       }),
     define('play_voice_message', 'Request playback of an authorized voice message on the phone. Pending means requested, not yet played.',
@@ -103,7 +103,7 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       }),
   ];
   const allowed = agent === 'contacts'
-    ? tools.filter((tool) => ['list_contacts', 'search_users', 'add_contact'].includes(tool.definition.name))
+    ? tools.filter((tool) => ['list_contacts', 'get_contact', 'search_users', 'add_contact'].includes(tool.definition.name))
     : agent === 'messaging' ? tools.filter((tool) => tool.definition.name !== 'add_contact') : [...tools, ...coordinator];
   return new Map(allowed.map((tool) => [tool.definition.name, tool]));
 }
