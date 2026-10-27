@@ -7,8 +7,26 @@ import { CloudSpeechProvider, type RecognitionEvent } from '../src/speech/provid
 import { inspectWav } from '../src/media.js';
 import { wav } from './helpers.js';
 
-test('speech adapters use Meta multipart transcription and aligned ElevenLabs PCM streams', async () => {
-  const config = readConfig({ META_API_KEY: 'meta-test', ELEVENLABS_API_KEY: 'tts-test', ELEVENLABS_VOICE_ID: 'voice-test' });
+function synthesizedWav(pcm = Buffer.from([1, 2, 3, 4, 5, 6]), rate = 24_000) {
+  const audio = Buffer.concat([wav(0), pcm]);
+  audio.writeUInt32LE(audio.length - 8, 4);
+  audio.writeUInt32LE(rate, 24); audio.writeUInt32LE(rate * 2, 28);
+  audio.writeUInt32LE(pcm.length, 40);
+  return audio;
+}
+
+async function spokenAudio(provider: CloudSpeechProvider, text = 'Hello.', signal = new AbortController().signal) {
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of provider.synthesize(text, signal)) {
+    assert.equal(chunk.byteLength % 2, 0);
+    assert.ok(chunk.byteLength <= 12_000);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+test('speech adapters use Meta transcription and Google API-key synthesis without leaking WAV headers', async () => {
+  const config = readConfig({ META_API_KEY: 'meta-test', GOOGLE_TTS_API_KEY: 'tts-test' });
   const fetcher: typeof fetch = async (url, init) => {
     if (String(url).includes('/asr/transcribe')) {
       assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer meta-test');
@@ -20,25 +38,85 @@ test('speech adapters use Meta multipart transcription and aligned ElevenLabs PC
       assert.equal(settings.model, 'muse-voice-transcribe-1.0');
       return Response.json({ transcript: ' Seven works for me. ' });
     }
-    assert.ok(String(url).endsWith('/voice-test/stream?output_format=pcm_24000'));
-    assert.equal(new Headers(init?.headers).get('xi-api-key'), 'tts-test');
-    assert.equal((JSON.parse(String(init?.body)) as { model_id: string }).model_id, 'eleven_flash_v2_5');
-    return new Response(new ReadableStream<Uint8Array>({ start(controller) {
-      controller.enqueue(new Uint8Array([1, 2, 3]));
-      controller.enqueue(new Uint8Array([4, 5, 6])); controller.close();
-    } }));
+    assert.equal(String(url), 'https://texttospeech.googleapis.com/v1/text:synthesize');
+    assert.equal(init?.method, 'POST');
+    assert.equal(new Headers(init?.headers).get('x-goog-api-key'), 'tts-test');
+    assert.ok(!String(url).includes('tts-test'));
+    assert.deepEqual(JSON.parse(String(init?.body)), { input: { text: 'Hello.' },
+      voice: { languageCode: 'en-US', name: 'en-US-Neural2-F' },
+      audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: 24_000 } });
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
   };
   const speech = new CloudSpeechProvider(config, fetcher);
+  assert.equal(speech.synthesisConfigured, true);
   assert.equal(await speech.transcribe(wav(), new AbortController().signal), 'Seven works for me.');
-  const chunks: Uint8Array[] = [];
-  for await (const chunk of speech.synthesize('Hello.', new AbortController().signal)) {
-    assert.equal(chunk.byteLength % 2, 0); chunks.push(chunk);
+  assert.deepEqual(await spokenAudio(speech), Buffer.from([1, 2, 3, 4, 5, 6]));
+});
+
+test('Google TTS rejects missing credentials, provider errors and malformed audio', async () => {
+  let requests = 0;
+  const missing = new CloudSpeechProvider(readConfig({}), async () => { requests++; return Response.json({}); });
+  assert.equal(missing.synthesisConfigured, false);
+  await assert.rejects(() => spokenAudio(missing), { code: 'TTS_UNAVAILABLE' });
+  assert.equal(requests, 0);
+  const config = readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' });
+  const brokenBodies = [
+    {}, { audioContent: 'not base64' }, { audioContent: Buffer.from([1, 2, 3]).toString('base64') },
+    { audioContent: synthesizedWav(Buffer.from([1, 2, 3])).toString('base64') },
+    { audioContent: synthesizedWav(Buffer.from([1, 2]), 16_000).toString('base64') },
+  ];
+  for (const body of brokenBodies) {
+    const provider = new CloudSpeechProvider(config, async () => Response.json(body));
+    await assert.rejects(() => spokenAudio(provider), { code: 'INVALID_TTS_AUDIO' });
   }
-  assert.deepEqual(Buffer.concat(chunks), Buffer.from([1, 2, 3, 4, 5, 6]));
-  const broken = new CloudSpeechProvider(config, async () => new Response(new Uint8Array([1, 2, 3])));
-  await assert.rejects(async () => {
-    for await (const _chunk of broken.synthesize('Hello.', new AbortController().signal)) { /* Consume the stream. */ }
-  }, { code: 'INVALID_TTS_AUDIO' });
+  const provider = new CloudSpeechProvider(config, async () => Response.json({ error: 'private provider detail' }, { status: 403 }));
+  await assert.rejects(() => spokenAudio(provider), { code: 'TTS_UNAVAILABLE', message: 'Speech synthesis is temporarily unavailable.' });
+});
+
+test('Google TTS splits long Unicode text within the byte limit and respects the configured voice', async () => {
+  const parts: string[] = [];
+  const source = 'Hello 👋 '.repeat(1200).trim();
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test', GOOGLE_TTS_VOICE: 'en-US-Chirp3-HD-Aoede' }), async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { input: { text: string }; voice: { name: string } };
+    assert.ok(Buffer.byteLength(body.input.text, 'utf8') <= 4800);
+    assert.ok(!body.input.text.includes('\uFFFD'));
+    assert.equal(body.voice.name, 'en-US-Chirp3-HD-Aoede');
+    parts.push(body.input.text);
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
+  });
+  const output = await spokenAudio(provider, source);
+  assert.ok(parts.length > 1);
+  assert.equal(parts.join(' '), source);
+  assert.equal(output.length, parts.length * 6);
+});
+
+test('Google TTS cancels pending requests and stops producing buffered speech after interruption', async () => {
+  const config = readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' });
+  const cancelled = new AbortController();
+  cancelled.abort();
+  let requests = 0;
+  const unused = new CloudSpeechProvider(config, async () => { requests++; return Response.json({}); });
+  await assert.rejects(() => spokenAudio(unused, 'Hello.', cancelled.signal), { name: 'AbortError' });
+  assert.equal(requests, 0);
+  const pending = new AbortController();
+  const waiting = new CloudSpeechProvider(config, async (_url, init) => {
+    assert.ok(init?.signal);
+    const signal = init.signal;
+    pending.abort();
+    signal.throwIfAborted();
+    throw new Error('Expected cancellation');
+  });
+  await assert.rejects(() => spokenAudio(waiting, 'Hello.', pending.signal), { name: 'AbortError' });
+  const buffered = new AbortController();
+  const provider = new CloudSpeechProvider(config, async () => {
+    requests++;
+    return Response.json({ audioContent: synthesizedWav(Buffer.alloc(24_000)).toString('base64') });
+  });
+  const stream = provider.synthesize('Hello. '.repeat(1000), buffered.signal)[Symbol.asyncIterator]();
+  assert.equal((await stream.next()).value?.length, 12_000);
+  buffered.abort();
+  await assert.rejects(() => stream.next(), { name: 'AbortError' });
+  assert.equal(requests, 1);
 });
 
 test('Meta realtime recognizer authenticates in its handshake, streams PCM and ends cleanly', async (t) => {

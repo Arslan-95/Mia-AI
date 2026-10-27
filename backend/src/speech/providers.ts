@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Config } from '../config.js';
 import { AppError, throwIfAborted } from '../errors.js';
 import { inspectWav } from '../media.js';
+import { synthesizeGoogleSpeech } from './google-tts.js';
 
 export type RecognitionEvent =
   | { type: 'speechStart'; turnId: number }
@@ -32,7 +33,7 @@ export class CloudSpeechProvider implements SpeechProvider {
   constructor(private readonly config: Config, private readonly fetcher: typeof fetch = fetch,
     private readonly socketFactory: (url: string) => WebSocket = (url) => new WebSocket(url, { maxPayload: 256_000, handshakeTimeout: 10_000 })) {
     this.recognitionConfigured = Boolean(config.metaApiKey);
-    this.synthesisConfigured = Boolean(config.elevenLabsApiKey && config.elevenLabsVoiceId);
+    this.synthesisConfigured = Boolean(config.googleTtsApiKey);
   }
 
   async transcribe(audio: Buffer, signal: AbortSignal): Promise<string> {
@@ -132,26 +133,6 @@ export class CloudSpeechProvider implements SpeechProvider {
 
   async *synthesize(text: string, signal: AbortSignal): AsyncIterable<Uint8Array> {
     if (!this.synthesisConfigured) throw new AppError(503, 'TTS_UNAVAILABLE', 'Speech synthesis is not configured yet.');
-    const response = await this.fetcher(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(this.config.elevenLabsVoiceId)}/stream?output_format=pcm_24000`, {
-      method: 'POST', signal: AbortSignal.any([signal, AbortSignal.timeout(90_000)]),
-      headers: { 'xi-api-key': this.config.elevenLabsApiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, model_id: this.config.elevenLabsModel, language_code: 'en' }),
-    });
-    if (!response.ok || !response.body) {
-      await response.body?.cancel();
-      throw new AppError(503, 'TTS_UNAVAILABLE', 'Speech synthesis is temporarily unavailable.');
-    }
-    let carry: number | undefined;
-    let total = 0;
-    for await (const chunk of response.body) {
-      throwIfAborted(signal);
-      const bytes = carry === undefined ? Buffer.from(chunk) : Buffer.concat([Buffer.from([carry]), chunk]);
-      const evenLength = bytes.length - bytes.length % 2;
-      carry = bytes.length % 2 ? bytes[bytes.length - 1] : undefined;
-      total += evenLength;
-      if (total > 8_640_000) throw new AppError(503, 'TTS_LIMIT', 'The spoken response exceeded its duration limit.');
-      for (let offset = 0; offset < evenLength; offset += 12_000) yield bytes.subarray(offset, Math.min(offset + 12_000, evenLength));
-    }
-    if (carry !== undefined || total === 0) throw new AppError(503, 'INVALID_TTS_AUDIO', 'The speech provider returned invalid audio.');
+    yield* synthesizeGoogleSpeech(this.config, this.fetcher, text, signal);
   }
 }

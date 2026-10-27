@@ -14,9 +14,8 @@ const schema = z.object({
   META_BASE_URL: z.url().default('https://api.meta.ai/v1'),
   META_MODEL: z.string().min(1).default('muse-spark-1.3'),
   META_ASR_MODEL: z.string().min(1).default('muse-voice-transcribe-1.0'),
-  ELEVENLABS_API_KEY: z.string().default(''),
-  ELEVENLABS_VOICE_ID: z.string().default(''),
-  ELEVENLABS_MODEL: z.string().default('eleven_flash_v2_5'),
+  GOOGLE_TTS_API_KEY: z.string().trim().default(''),
+  GOOGLE_TTS_VOICE: z.string().regex(/^en-US-[A-Za-z0-9-]+$/).default('en-US-Neural2-F'),
   LOG_LEVEL: z.enum(['silent', 'fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 });
 
@@ -37,9 +36,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     metaBaseUrl: input.META_BASE_URL.replace(/\/$/, ''),
     metaModel: input.META_MODEL,
     metaAsrModel: input.META_ASR_MODEL,
-    elevenLabsApiKey: input.ELEVENLABS_API_KEY,
-    elevenLabsVoiceId: input.ELEVENLABS_VOICE_ID,
-    elevenLabsModel: input.ELEVENLABS_MODEL,
+    googleTtsApiKey: input.GOOGLE_TTS_API_KEY,
+    googleTtsVoice: input.GOOGLE_TTS_VOICE,
     logLevel: input.LOG_LEVEL,
   };
 }

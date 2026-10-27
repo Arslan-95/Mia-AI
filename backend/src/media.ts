@@ -6,8 +6,8 @@ import { AppError, notFound } from './errors.js';
 
 export type Media = { id: string; mimeType: string; byteSize: number; durationMs: number };
 
-export function inspectWav(audio: Buffer) {
-  const invalid = () => new AppError(400, 'INVALID_AUDIO', 'Upload a complete mono 16-bit PCM WAV recording, up to two minutes.');
+export function inspectWav(audio: Buffer, maxDurationMs = 120_000) {
+  const invalid = () => new AppError(400, 'INVALID_AUDIO', `Provide a complete mono 16-bit PCM WAV recording, up to ${maxDurationMs / 60_000} minutes.`);
   if (audio.length < 44 || audio.length > 12_000_000 || audio.toString('ascii', 0, 4) !== 'RIFF'
     || audio.toString('ascii', 8, 12) !== 'WAVE' || audio.readUInt32LE(4) + 8 !== audio.length) throw invalid();
   let sampleRate = 0;
@@ -31,7 +31,7 @@ export function inspectWav(audio: Buffer) {
   }
   if (!sampleRate || !data?.length || data.length % 2) throw invalid();
   const durationMs = Math.ceil(data.length / (sampleRate * 2) * 1000);
-  if (durationMs > 120_000) throw invalid();
+  if (durationMs > maxDurationMs) throw invalid();
   return { sampleRate, durationMs, pcm: data };
 }
 
