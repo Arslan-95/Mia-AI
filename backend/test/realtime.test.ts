@@ -26,6 +26,95 @@ async function connect(url: string) {
     async close() { if (socket.readyState === WebSocket.OPEN) { socket.close(); await once(socket, 'close'); } } };
 }
 
+test('logout immediately revokes matching sockets and pending ASR while preserving another login', { timeout: 12_000 }, async (t) => {
+  let recognitionSignal: AbortSignal | undefined;
+  const speech: SpeechProvider = {
+    recognitionConfigured: true, synthesisConfigured: false,
+    transcribe: async () => '', async *synthesize() { yield new Uint8Array(2); },
+    recognize: async (_keywords, _events, _failure, signal) => {
+      recognitionSignal = signal;
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    },
+  };
+  const context = await testApp({ speech, provider: { configured: true, respond: async () => ({ text: 'Still signed in.', calls: [], output: [] }) } });
+  t.after(() => context.close());
+  const first = await phoneSignIn(context.app, '+15550000711', 'revocation');
+  const second = await phoneSignIn(context.app, '+15550000711');
+  const url = (await context.app.listen({ port: 0, host: '127.0.0.1' })).replace('http:', 'ws:') + '/v1/realtime';
+  const revoked = await connect(url); t.after(() => revoked.close());
+  const sameToken = await connect(url); t.after(() => sameToken.close());
+  const valid = await connect(url); t.after(() => valid.close());
+  for (const [client, token] of [[revoked, first.token], [sameToken, first.token], [valid, second.token]] as const) {
+    client.send({ type: 'auth', token, after: '0' }); await client.next('ready');
+  }
+  revoked.send({ type: 'voice.start', requestId: randomUUID(), sampleRate: 24000, format: 'pcm_s16le' });
+  await waitFor(() => recognitionSignal);
+  const closed = once(revoked.socket, 'close');
+  const alsoClosed = once(sameToken.socket, 'close');
+  const logout = await context.app.inject({ method: 'POST', url: '/v1/auth/logout', headers: { authorization: `Bearer ${first.token}` } });
+  assert.equal(logout.statusCode, 204);
+  assert.equal((await closed)[0], 1008); assert.equal((await alsoClosed)[0], 1008);
+  assert.equal(recognitionSignal?.aborted, true);
+  assert.equal((await context.app.inject({ url: '/v1/me', headers: { authorization: `Bearer ${first.token}` } })).statusCode, 401);
+  valid.send({ type: 'turn', clientTurnId: randomUUID(), text: 'My other login remains valid.' });
+  await valid.next('turn.accepted');
+  const turns = await context.db.query<{ text: string }>('SELECT user_text AS text FROM assistant_turns');
+  assert.deepEqual(turns.map(turn => turn.text), ['My other login remains valid.']);
+});
+
+test('WebSocket commands revalidate sessions revoked outside the current process', { timeout: 10_000 }, async (t) => {
+  const context = await testApp({ provider: { configured: true, respond: async () => ({ text: 'Unused.', calls: [], output: [] }) } });
+  t.after(() => context.close());
+  const identity = await phoneSignIn(context.app, '+15550000712', 'remote_revoke');
+  const url = (await context.app.listen({ port: 0, host: '127.0.0.1' })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: identity.token, after: '0' }); await client.next('ready');
+  const closed = once(client.socket, 'close');
+  await context.db.query('DELETE FROM auth_sessions WHERE user_id = $1', [identity.user.id]);
+  if (client.socket.readyState === WebSocket.OPEN) client.send({ type: 'turn', clientTurnId: randomUUID(), text: 'Rejected after revocation.' });
+  assert.equal((await closed)[0], 1008);
+  assert.equal((await context.db.query('SELECT id FROM assistant_turns')).length, 0);
+});
+
+test('HTTP stop closes existing recognition but leaves a later voice session usable', { timeout: 12_000 }, async (t) => {
+  let recognitionClosed = false;
+  let recognitionEvent: ((event: RecognitionEvent) => void) | undefined;
+  const speech: SpeechProvider = {
+    recognitionConfigured: true, synthesisConfigured: false,
+    transcribe: async () => '', async *synthesize() { yield new Uint8Array(2); },
+    recognize: async (_keywords, onEvent, _failure, signal) => {
+      recognitionEvent = onEvent;
+      signal.addEventListener('abort', () => { recognitionClosed = true; });
+      return { write() {}, end() {}, close() { recognitionClosed = true; } };
+    },
+  };
+  const context = await testApp({ speech, provider: { configured: true, respond: async () => ({ text: 'New voice request.', calls: [], output: [] }) } });
+  t.after(() => context.close());
+  const identity = await phoneSignIn(context.app, '+15550000713', 'http_stop_voice');
+  const url = (await context.app.listen({ port: 0, host: '127.0.0.1' })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: identity.token, after: '0' });
+  const ready = await client.next('ready');
+  const firstRequest = randomUUID();
+  client.send({ type: 'voice.start', requestId: firstRequest, sampleRate: 24000, format: 'pcm_s16le' });
+  await client.next('voice.ready');
+  const lateCallback = recognitionEvent;
+  const stopped = await context.app.inject({ method: 'POST', url: `/v1/assistant/sessions/${String(ready.sessionId)}/stop`,
+    headers: { authorization: `Bearer ${identity.token}` }, payload: {} });
+  assert.equal(stopped.statusCode, 200);
+  await waitFor(() => recognitionClosed || undefined);
+  lateCallback?.({ type: 'speechStart', turnId: 1 });
+  lateCallback?.({ type: 'speechComplete', turnId: 1, transcript: 'Obsolete voice request.' });
+  const secondRequest = randomUUID();
+  client.send({ type: 'voice.start', requestId: secondRequest, sampleRate: 24000, format: 'pcm_s16le' });
+  await client.next('voice.ready', frame => frame.requestId === secondRequest);
+  recognitionEvent?.({ type: 'speechStart', turnId: 1 });
+  recognitionEvent?.({ type: 'speechComplete', turnId: 1, transcript: 'Follow the new voice request.' });
+  await client.next('turn.accepted');
+  const turns = await context.db.query<{ text: string }>('SELECT user_text AS text FROM assistant_turns');
+  assert.deepEqual(turns.map(turn => turn.text), ['Follow the new voice request.']);
+});
+
 test('live websocket authenticates, replays scoped events and runs only final speech turns', { timeout: 25_000 }, async (t) => {
   let recognitionEvent: ((event: RecognitionEvent) => void) | undefined;
   let recognitionClosed = false;

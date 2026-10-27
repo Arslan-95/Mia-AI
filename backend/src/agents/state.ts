@@ -57,11 +57,12 @@ export class AssistantState {
     });
   }
 
-  async interrupt(userId: string, sessionId: string, signal?: AbortSignal) {
-    await this.db.transaction(async (sql) => {
+  async interrupt(userId: string, sessionId: string, signal?: AbortSignal, reason: 'user' | 'speech' = 'user') {
+    return this.db.transaction(async (sql) => {
       await this.requireSession(userId, sessionId, sql, true);
       throwIfAborted(signal);
-      await sql.query('UPDATE assistant_sessions SET generation = generation + 1,updated_at = now() WHERE id = $1', [sessionId]);
+      const [session] = await sql.query<{ generation: number }>(`UPDATE assistant_sessions SET generation = generation + 1,
+        updated_at = now() WHERE id = $1 RETURNING generation`, [sessionId]);
       const turns = await sql.query<{ id: string }>(`UPDATE assistant_turns SET status = 'interrupted',completed_at = now()
         WHERE session_id = $1 AND status IN ('queued','running') RETURNING id`, [sessionId]);
       for (const turn of turns) await publish(sql, userId, 'assistant.interrupted', { sessionId, turnId: turn.id });
@@ -69,6 +70,8 @@ export class AssistantState {
         WHERE session_id = $1 AND state = 'pending' RETURNING id`, [sessionId]);
       for (const action of actions) await publish(sql, userId, 'device.action_cancelled', { sessionId, actionId: action.id });
       await publish(sql, userId, 'assistant.audio_cancelled', { sessionId });
+      if (reason === 'user') await publish(sql, userId, 'assistant.stopped', { sessionId, generation: session!.generation });
+      return { sessionId, generation: session!.generation, stopped: true as const };
     });
   }
 

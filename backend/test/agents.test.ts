@@ -156,6 +156,37 @@ test('device actions from superseded turns reject stale results and isolate owne
   await assert.rejects(context.runtime.state.mutate(first.turn, new AbortController().signal, async () => 'stale'), { code: 'TURN_SUPERSEDED' });
 });
 
+test('a delayed stop acknowledgement cannot abort a newer accepted turn', async (t) => {
+  const signals = new Map<string, AbortSignal>();
+  let releaseModels!: () => void;
+  let releaseStop!: () => void;
+  const models = new Promise<void>(resolve => { releaseModels = resolve; });
+  const stopGate = new Promise<void>(resolve => { releaseStop = resolve; });
+  const context = await fixture({ configured: true, async respond(request) {
+    const text = String((request.input.at(-1)?.content as { text: string }[])[0]?.text);
+    signals.set(text, request.signal);
+    await models;
+    return answer('The current request completed.');
+  } });
+  t.after(async () => { releaseStop(); releaseModels(); await context.close(); });
+  await context.submit('First request.');
+  await waitFor(async () => signals.get('First request.'));
+  const interrupt = context.runtime.state.interrupt.bind(context.runtime.state);
+  let committed = false;
+  context.runtime.state.interrupt = async (...args) => {
+    const result = await interrupt(...args);
+    committed = true; await stopGate;
+    return result;
+  };
+  const stopping = context.runtime.interrupt(context.ids.alice, context.session.id);
+  await waitFor(async () => committed || undefined);
+  const next = await context.submit('New request.');
+  const newerSignal = await waitFor(async () => signals.get('New request.'));
+  releaseStop(); await stopping;
+  assert.equal(newerSignal.aborted, false);
+  releaseModels(); await context.completed(next.turn.id);
+});
+
 test('Meta Responses adapter uses actual tool items, private replay and cancellation', async () => {
   let payload: Record<string, unknown> = {};
   const config = readConfig({ META_API_KEY: 'test-key', NODE_ENV: 'test' });

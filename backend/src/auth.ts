@@ -13,6 +13,7 @@ const unauthorized = () => new AppError(401, 'UNAUTHORIZED', 'Authentication is 
 const invalidCode = () => new AppError(401, 'INVALID_OTP', 'The code is incorrect, expired, or already used. Request a new code if needed.');
 
 export class AuthService {
+  private readonly revocations = new Map<string, Set<() => void>>();
   constructor(private readonly db: Database, private readonly config: Pick<Config, 'environment' | 'developmentOtpCode'>) {}
 
   private requireDevelopmentProvider() {
@@ -88,7 +89,21 @@ export class AuthService {
 
   async logout(header?: string): Promise<void> {
     const token = header?.slice(7);
-    if (token) await this.db.query('DELETE FROM auth_sessions WHERE token_hash = $1', [this.tokenHash(token)]);
+    if (!token) return;
+    const hash = this.tokenHash(token);
+    await this.db.query('DELETE FROM auth_sessions WHERE token_hash = $1', [hash]);
+    for (const revoke of [...this.revocations.get(hash) ?? []]) revoke();
+  }
+
+  watchSession(token: string, revoke: () => void): () => void {
+    const hash = this.tokenHash(token);
+    const listeners = this.revocations.get(hash) ?? new Set<() => void>();
+    listeners.add(revoke);
+    this.revocations.set(hash, listeners);
+    return () => {
+      listeners.delete(revoke);
+      if (!listeners.size) this.revocations.delete(hash);
+    };
   }
 
   private codeHash(challengeId: string, phoneNumber: string, code: string) {

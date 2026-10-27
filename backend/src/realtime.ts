@@ -44,6 +44,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
     let cursor = '0';
     let authenticating = false;
     let stopped = false;
+    let unwatchSession: (() => void) | undefined;
     let reading = false;
     let alive = true;
     let queue = Promise.resolve();
@@ -52,6 +53,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
     let recognitionController: AbortController | undefined;
     let recognitionId: string | undefined;
     let voiceStartedAt = 0;
+    let voiceGeneration: number | undefined;
     let receivedBytes = 0;
     let voiceTimer: ReturnType<typeof setTimeout> | undefined;
     let voiceEndTimer: ReturnType<typeof setTimeout> | undefined;
@@ -77,6 +79,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
     const cancelSpeech = () => { synthesis?.abort(); synthesis = undefined; synthesisGeneration = undefined; };
     const cancelVoice = () => {
       recognitionId = undefined;
+      voiceGeneration = undefined;
       recognitionController?.abort(); recognitionController = undefined;
       recognition?.close(); recognition = undefined;
       if (voiceTimer) clearTimeout(voiceTimer);
@@ -88,25 +91,39 @@ export function registerRealtime(app: FastifyInstance, deps: {
     const heartbeat = setInterval(() => {
       if (!alive) { socket.terminate(); return; }
       alive = false; socket.ping();
-      if (user) void auth.authenticate(`Bearer ${token}`).catch(() => socket.close(1008, 'Session expired'));
+      if (user) void validateSession();
     }, 20_000);
     socket.on('pong', () => { alive = true; });
     socket.on('error', () => socket.close());
-    socket.on('close', () => {
+    const cleanup = () => {
       stopped = true; lifetime.abort(); cancelVoice(); cancelSpeech();
+      unwatchSession?.(); unwatchSession = undefined;
       clearTimeout(authTimeout); clearInterval(poll); clearInterval(heartbeat);
       if (user) {
         const group = connections.get(user.id); group?.delete(socket);
         if (group?.size === 0) connections.delete(user.id);
       }
-    });
+    };
+    const revoke = () => { cleanup(); socket.close(1008, 'Session expired'); };
+    socket.on('close', cleanup);
+
+    async function validateSession() {
+      if (!user || stopped) return false;
+      try { await auth.authenticate(`Bearer ${token}`); return !stopped; }
+      catch { revoke(); return false; }
+    }
 
     async function replay() {
       if (!user || reading || stopped) return;
       reading = true;
       try {
+        if (!await validateSession()) return;
         const events = await listEvents(db, user.id, cursor);
         for (const event of events) {
+          if (event.type === 'assistant.stopped') {
+            const payload = event.payload as { sessionId: string; generation: number };
+            if (payload.sessionId === sessionId && voiceGeneration !== undefined && payload.generation > voiceGeneration) cancelVoice();
+          }
           if (synthesis && ['assistant.accepted', 'assistant.interrupted', 'assistant.audio_cancelled'].includes(event.type)) {
             const session = await assistant.state.requireSession(user.id, sessionId);
             if (synthesisGeneration !== undefined && session.generation !== synthesisGeneration) cancelSpeech();
@@ -121,12 +138,13 @@ export function registerRealtime(app: FastifyInstance, deps: {
     function onRecognition(id: string, event: RecognitionEvent, signal: AbortSignal) {
       speechQueue = speechQueue.then(async () => {
         if (!user || recognitionId !== id || stopped || signal.aborted) return;
+        if (!await validateSession() || signal.aborted) return;
         if (event.type === 'speechStart') {
           if (starts.includes(event.turnId) || completedSpeech.has(event.turnId)) return;
           if (starts.length >= 8) throw new AppError(503, 'ASR_OVERFLOW', 'Too many unfinished speech turns. Please reconnect.');
           starts.push(event.turnId);
           cancelSpeech();
-          await assistant.interrupt(user.id, sessionId, signal);
+          await assistant.interrupt(user.id, sessionId, signal, 'speech');
         }
         throwIfAborted(signal);
         send({ type: 'voice.event', requestId: id, event });
@@ -199,23 +217,26 @@ export function registerRealtime(app: FastifyInstance, deps: {
           if (group.size >= 3) throw new AppError(429, 'CONNECTION_LIMIT', 'Too many active connections.');
           user = authenticated; token = frame.token; sessionId = session.id;
           group.add(socket); connections.set(user.id, group);
+          unwatchSession = auth.watchSession(token, revoke);
+          if (!await validateSession()) return;
           const [latest] = await db.query<{ id: string }>('SELECT COALESCE(max(id),0)::text AS id FROM events WHERE user_id = $1', [user.id]);
           cursor = BigInt(frame.after) > BigInt(latest!.id) ? '0' : frame.after;
           clearTimeout(authTimeout);
           send({ type: 'ready', sessionId, after: cursor, protocolVersion: 1 });
           await replay();
-        } catch (error) { failure(error); socket.close(1008, 'Authentication failed'); }
+        } catch (error) { failure(error); cleanup(); socket.close(1008, 'Authentication failed'); }
         finally { authenticating = false; }
         return;
       }
       if (!user) { socket.close(1008, 'Authenticate first'); return; }
+      if (!await validateSession()) return;
       if (frame.type === 'ping') { send({ type: 'pong' }); return; }
       if (frame.type === 'turn') {
         cancelSpeech(); cancelVoice();
         send({ type: 'turn.accepted', ...await assistant.submit(user.id, sessionId, frame.clientTurnId, frame.text) });
       } else if (frame.type === 'assistant.stop') {
-        cancelSpeech(); await assistant.interrupt(user.id, sessionId);
-        send({ type: 'assistant.stopped' });
+        cancelSpeech();
+        send({ type: 'assistant.stopped', ...await assistant.interrupt(user.id, sessionId) });
       } else if (frame.type === 'voice.cancel') {
         cancelVoice(); send({ type: 'voice.cancelled' });
       } else if (frame.type === 'voice.end') {
@@ -227,6 +248,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
         const controller = new AbortController(); recognitionController = controller;
         const contacts = await new MessagingService(db).contacts(user.id);
         try {
+          voiceGeneration = (await assistant.state.requireSession(user.id, sessionId)).generation;
           const stream = await speech.recognize(contacts.map((contact) => contact.name),
             (event) => onRecognition(frame.requestId, event, controller.signal),
             () => { if (recognitionId === frame.requestId) { send({ type: 'voice.failed', requestId: frame.requestId, code: 'ASR_UNAVAILABLE' }); cancelVoice(); } },

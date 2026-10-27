@@ -18,6 +18,11 @@ export function registerAssistantRoutes(app: FastifyInstance, assistant: Assista
     const result = await assistant.submit(request.user.id, sessionId, clientTurnId, text);
     return reply.code(result.duplicate ? 200 : 202).send(result);
   });
+  app.post('/v1/assistant/sessions/:sessionId/stop', async (request) => {
+    const { sessionId } = params.parse(request.params);
+    z.object({}).strict().parse(request.body ?? {});
+    return assistant.interrupt(request.user.id, sessionId);
+  });
   app.get('/v1/assistant/sessions/:sessionId/turns/:turnId', async (request) => {
     const { sessionId, turnId } = params.extend({ turnId: z.uuid() }).parse(request.params);
     return assistant.state.turn(request.user.id, sessionId, turnId);

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AccessibilityInfo, AppState } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { Api } from './api';
+import { AssistantControl } from './assistantControl';
 import { preferences, sessionStorage } from './storage';
 import { Realtime, type Frame } from './realtime';
 import { PresentationLease, isLiveAction, mergeMessages } from './coordination';
@@ -27,6 +28,7 @@ export function useMia() {
   const [recording, setRecording] = useState<Recording | null>(null); const [recordPurpose, setRecordPurpose] = useState<'note' | 'assistant'>('note');
   const [recordChatId, setRecordChatId] = useState<string | null>(null); const [devicePrompt, setDevicePrompt] = useState<DeviceAction | null>(null);
   const lease = useRef(new PresentationLease()).current; const audio = useRef<Engine | null>(null); if (!audio.current) audio.current = new Engine();
+  const assistantControl = useRef(new AssistantControl()).current;
   const socket = useRef<Realtime | null>(null); const state = useRef({ session, activeChatId, tab, assistantSession, chats, devicePrompt });
   state.current = { session, activeChatId, tab, assistantSession, chats, devicePrompt };
   const foreground = useRef(true); const authEpoch = useRef(0); const stopRef = useRef<() => Promise<void>>(async () => {});
@@ -110,7 +112,11 @@ export function useMia() {
     });
     return () => { subscription.remove(); void audio.current!.stop(); };
   }, []);
-  async function interrupt() { lease.revoke(); setDevicePrompt(null); socket.current?.send({ type: 'assistant.stop' }); await stopAudio(); }
+  async function interrupt() {
+    lease.revoke(); setDevicePrompt(null);
+    const current = state.current.assistantSession;
+    await Promise.all([stopAudio(), current && state.current.session ? assistantControl.stop(api, current.id) : Promise.resolve()]);
+  }
   async function navigate(next: Tab, chatId: string | null = null) {
     void interrupt().catch(fail); setTab(next); setActiveChatId(chatId);
     state.current = { ...state.current, tab: next, activeChatId: chatId };
@@ -205,7 +211,7 @@ export function useMia() {
   }
   async function logout() { try { await api.request('/v1/auth/logout', 'POST'); } finally { await clearSession(); } }
   async function saveSettings(server: string, voice: boolean) {
-    await interrupt();
+    await interrupt().catch(fail);
     if (server !== address && session) { try { await api.request('/v1/auth/logout', 'POST'); } catch { /* Local sign-out remains available while offline. */ } await clearSession(); }
     await preferences.set('mia.address', server); await preferences.set('mia.voice', String(voice)); setAddress(server); setVoiceMode(voice); setCapabilities(null);
   }
@@ -240,10 +246,14 @@ export function useMia() {
   }
   async function submitAssistant(retry?: { clientTurnId: string; text: string }) {
     const text = retry?.text ?? assistantText.trim(); if (!assistantSession || !text) return;
-    await stopAudio(); const item = retry ?? { text, clientTurnId: Crypto.randomUUID() };
+    const item = retry ?? { text, clientTurnId: Crypto.randomUUID() };
     lease.begin(item.clientTurnId); setDevicePrompt(null); setAssistantRetry(item); setAssistantText('');
     const epoch = lease.snapshot();
     try {
+      await assistantControl.beforeTurn(api, assistantSession.id);
+      if (!lease.current(epoch)) return;
+      await stopAudio();
+      if (!lease.current(epoch)) return;
       const response = await api.request<{ turn: Turn }>(`/v1/assistant/sessions/${assistantSession.id}/turns`, 'POST', item);
       if (lease.current(epoch)) lease.accept(item.clientTurnId, response.turn.id);
       if (lease.current(epoch)) setAssistantRetry(null); await syncAssistant();
