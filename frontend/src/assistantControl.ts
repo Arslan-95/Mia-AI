@@ -1,8 +1,9 @@
 import type { Api } from './api';
+import { UserFacingError } from './errors';
 
 type StopResult = { sessionId: string; generation: number; stopped: true };
 type RequestApi = Pick<Api, 'base' | 'session' | 'request'>;
-const stopFailure = 'Audio stopped on this device, but stopping Mia on the server could not be confirmed. Check your connection and try Stop Mia again.';
+const stopFailure = 'Audio is stopped on this iPhone, but Mia may still be working. Check your connection and try Stop Mia again.';
 
 export class AssistantControl {
   private pending?: { base: string; token?: string; sessionId: string; result: Promise<StopResult> };
@@ -11,10 +12,10 @@ export class AssistantControl {
     if (this.matches(api, sessionId)) return this.pending!.result;
     const result = api.request<StopResult>(`/v1/assistant/sessions/${sessionId}/stop`, 'POST', {}).then(value => {
       if (value?.stopped !== true || value.sessionId !== sessionId || !Number.isSafeInteger(value.generation) || value.generation < 0) {
-        throw new Error(stopFailure);
+        throw new UserFacingError(stopFailure);
       }
       return value;
-    }).catch(() => { throw new Error(stopFailure); }).finally(() => {
+    }).catch(() => { throw new UserFacingError(stopFailure); }).finally(() => {
       if (this.pending?.result === result) this.pending = undefined;
     });
     this.pending = { base: api.base, token: api.session?.token, sessionId, result };

@@ -1,11 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Api, ApiError, normalizeAddress } from '../src/api';
-test('server origin validation rejects embedded credentials, paths, and insecure public servers', () => {
-  assert.equal(normalizeAddress(' http://192.168.1.20:8080/ '), 'http://192.168.1.20:8080');
-  assert.equal(normalizeAddress('https://mia.example.com'), 'https://mia.example.com');
-  for (const value of ['http://example.com', 'https://me:secret@example.com', 'https://example.com/api', 'file:///test']) assert.throws(() => normalizeAddress(value));
-});
+import { Api, ApiError } from '../src/api';
 test('API preserves structured errors and invalidates expired authenticated sessions', async () => {
   const original = globalThis.fetch; let expired = false;
   globalThis.fetch = async () => new Response(JSON.stringify({ error: { code: 'UNAUTHORIZED', message: 'Session expired.' } }), { status: 401 });

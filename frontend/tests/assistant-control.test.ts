@@ -51,7 +51,7 @@ test('an undelivered stop is explicit, retryable and does not prevent a later su
     const api = new Api('https://mia.example.com', identity);
     const stop = control.stop(api, 'session-id');
     const beforeTurn = control.beforeTurn(api, 'session-id');
-    await assert.rejects(stop, /stopping Mia on the server could not be confirmed/);
+    await assert.rejects(stop, /Mia may still be working/);
     await beforeTurn;
     globalThis.fetch = async () => Response.json({ sessionId: 'session-id', generation: 6, stopped: true });
     assert.equal((await control.stop(api, 'session-id')).generation, 6);
@@ -65,7 +65,7 @@ test('a successful HTTP status alone does not count as a confirmed stop', async 
       { sessionId: 'session-id', generation: '4', stopped: true }]) {
       globalThis.fetch = async () => Response.json(acknowledgement);
       await assert.rejects(new AssistantControl().stop(new Api('https://mia.example.com', identity), 'session-id'),
-        /stopping Mia on the server could not be confirmed/);
+        /Mia may still be working/);
     }
   } finally { globalThis.fetch = original; }
 });

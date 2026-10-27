@@ -9,10 +9,14 @@ export type Message = { id: string; chatId: string; senderId: string; kind: 'tex
   text: string | null; mediaId: string | null; createdAt: Date };
 export type Draft = { id: string; recipientId: string; kind: 'text' | 'voice'; text: string | null;
   mediaId: string | null; version: number; state: 'editing' | 'ready' | 'sent' | 'discarded';
-  reviewedVersion: number | null; messageId: string | null; updatedAt: Date };
+  reviewedVersion: number | null; messageId: string | null; updatedAt: Date; recipient: Profile };
 type Content = { kind: 'text' | 'voice'; text?: string; mediaId?: string };
 const messageColumns = 'id, chat_id AS "chatId", sender_id AS "senderId", kind, text, media_id AS "mediaId", created_at AS "createdAt"';
-const draftColumns = 'id, recipient_id AS "recipientId", kind, text, media_id AS "mediaId", version, state, reviewed_version AS "reviewedVersion", message_id AS "messageId", updated_at AS "updatedAt"';
+const draftColumns = `id, recipient_id AS "recipientId", kind, text, media_id AS "mediaId", version, state,
+  reviewed_version AS "reviewedVersion", message_id AS "messageId", updated_at AS "updatedAt",
+  (SELECT json_build_object('id',u.id,'username',u.username,'displayName',COALESCE(c.name,u.display_name))
+   FROM users u LEFT JOIN contacts c ON c.user_id = u.id AND c.owner_id = message_drafts.owner_id
+   WHERE u.id = message_drafts.recipient_id) AS recipient`;
 
 export class MessagingService {
   constructor(private readonly db: Database) {}

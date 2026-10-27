@@ -6,7 +6,6 @@ import { ApiError } from '../api';
 import { Button, Field, Icon, Notice, colors, s } from '../ui';
 
 export function Auth({ mia }: { mia: Mia }) {
-  const [settings, setSettings] = useState(false);
   const [phoneNumber, setPhoneNumber] = useState('');
   const [challenge, setChallenge] = useState<OtpChallenge | null>(null);
   const [code, setCode] = useState('');
@@ -36,7 +35,7 @@ export function Auth({ mia }: { mia: Mia }) {
     try {
       const next = await mia.requestOtp(phone);
       if (requestEpoch.current !== epoch) return;
-      setChallenge(next); setCode(''); setLocked(false); setNow(Date.now()); setSettings(false);
+      setChallenge(next); setCode(''); setLocked(false); setNow(Date.now());
     } catch (reason) { if (requestEpoch.current === epoch) mia.fail(reason); }
     finally { if (requestEpoch.current === epoch) setPending(null); }
   }
@@ -57,9 +56,7 @@ export function Auth({ mia }: { mia: Mia }) {
     <ScrollView contentContainerStyle={a.container} keyboardShouldPersistTaps="handled">
       <View style={a.brand}>
         <Wordmark />
-        <Button quiet label="Connection" icon="options-outline" disabled={!!pending} onPress={() => setSettings(!settings)} />
       </View>
-      {settings && <Connection mia={mia} disabled={!!pending} />}
       <View style={a.hero}>
         <View style={a.orbit}>
           <View style={a.orbitInner}><Icon name="chatbubble-ellipses-outline" size={44} color={colors.green} /></View>
@@ -68,12 +65,11 @@ export function Auth({ mia }: { mia: Mia }) {
         </View>
         <Text style={s.eyebrow}>A LITTLE CLOSER</Text>
         <Text accessibilityRole="header" style={a.title}>{challenge ? 'One small step.' : 'Good conversations.\nYour way.'}</Text>
-        <Text style={[s.body, a.centered]}>{challenge ? 'Verify your number to make yourself at home.' : 'A calm place to connect. Start with your phone number.'}</Text>
+        <Text style={[s.body, a.centered]}>{challenge ? 'Enter your code to continue.' : 'A calm place to connect. Start with your phone number.'}</Text>
       </View>
 
       <View style={a.form}>
         <Text accessibilityRole="header" style={s.sectionTitle}>{challenge ? 'Enter verification code' : 'Your phone number'}</Text>
-        <Notice>Local development verification. No SMS is sent. Enter the development code configured for this Mia server.</Notice>
         {!challenge ? (
           <>
             <Field
@@ -114,8 +110,6 @@ export function Auth({ mia }: { mia: Mia }) {
             <Button quiet label="Use a different number" disabled={pending === 'verify'} onPress={changeNumber} />
           </>
         )}
-        <View style={s.divider} />
-        <Text style={[s.small, a.centered]}>Your sign-in is stored securely in your iPhone’s Keychain.{'\n'}Built for touch, larger text, and VoiceOver.</Text>
       </View>
       <Text style={[s.small, a.footer]}>YOUR PEOPLE. YOUR PACE.</Text>
     </ScrollView>
@@ -132,7 +126,7 @@ export function CompleteProfile({ mia }: { mia: Mia }) {
       <View style={a.hero}>
         <Text style={s.eyebrow}>MAKE YOURSELF AT HOME</Text>
         <Text accessibilityRole="header" style={a.title}>What should we{'\n'}call you?</Text>
-        <Text style={[s.body, a.centered]}>Your number is verified. Choose the name your people will see.</Text>
+        <Text style={[s.body, a.centered]}>Choose the name your people will see.</Text>
       </View>
       <View style={a.form}>
         <Field label="Your name" value={displayName} onChangeText={setDisplayName} autoComplete="name" textContentType="name" maxLength={80} editable={!mia.busy} />
@@ -148,16 +142,6 @@ export function CompleteProfile({ mia }: { mia: Mia }) {
 
 function Wordmark() {
   return <View style={a.wordmark}><Icon name="sparkles" size={25} color={colors.green} /><Text style={a.logo}>mia</Text></View>;
-}
-
-export function Connection({ mia, disabled = false }: { mia: Mia; disabled?: boolean }) {
-  const [server, setServer] = useState(mia.address); const [saved, setSaved] = useState(false);
-  return <View style={s.card}>
-    <Field label="Mia server address" value={server} onChangeText={value => { setServer(value); setSaved(false); }} autoCapitalize="none" autoCorrect={false} keyboardType="url" editable={!disabled} />
-    <Text style={s.small}>Use a server address your iPhone can reach. A public server requires HTTPS. Changing the server signs you out of this iPhone.</Text>
-    <Button secondary label="Save server" disabled={disabled} onPress={() => { void import('../api').then(({ normalizeAddress }) => mia.saveSettings(normalizeAddress(server), mia.voiceMode)).then(() => setSaved(true)).catch(mia.fail); }} />
-    {saved && <Notice>Server saved.</Notice>}
-  </View>;
 }
 
 const a = StyleSheet.create({

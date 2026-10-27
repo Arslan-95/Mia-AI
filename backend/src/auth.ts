@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Config } from './config.js';
 import type { Database, Sql } from './db/database.js';
-import { AppError, conflict, isDatabaseError, notFound } from './errors.js';
+import { AppError, isDatabaseError, notFound } from './errors.js';
 
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 const OTP_DURATION_MS = 5 * 60 * 1000;
@@ -71,7 +71,7 @@ export class AuthService {
       if (!user) throw notFound();
       return user;
     } catch (error) {
-      if (isDatabaseError(error, '23505')) throw conflict('That username is already taken. Choose another one.');
+      if (isDatabaseError(error, '23505')) throw new AppError(409, 'USERNAME_TAKEN', 'That username is already taken. Choose another one.');
       throw error;
     }
   }

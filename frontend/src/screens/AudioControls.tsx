@@ -8,9 +8,9 @@ export function AudioControls({ mia, elapsed }: { mia: Mia; elapsed: number }) {
     <>
       {mia.devicePrompt && (
         <View style={[s.card, a.prompt]}>
-          <Text accessibilityRole="alert" style={s.label}>Mia requested a voice note</Text>
-          <Text style={s.small}>Choose Record to start a voice note for the requested recipient. Stop to preview before sending.</Text>
-          <Button label="Record requested note" icon="mic-outline" onPress={() => void mia.acceptDeviceRecording()} />
+          <Text accessibilityRole="alert" style={s.label}>Record a voice note</Text>
+          <Text style={s.small}>Record your message, then listen before sending.</Text>
+          <Button label="Record voice note" icon="mic-outline" onPress={() => void mia.acceptDeviceRecording()} />
           <Button secondary label="Dismiss recording request" onPress={() => void mia.declineDevice().catch(mia.fail)} />
         </View>
       )}
@@ -25,18 +25,18 @@ export function AudioControls({ mia, elapsed }: { mia: Mia; elapsed: number }) {
       ) : mia.recording ? (
         <View style={a.recording}>
           <Text style={s.label}>{mia.recordPurpose === 'assistant' ? 'Review your spoken request' : 'Your voice note is ready'}</Text>
-          <Text style={s.small}>{Math.max(1, Math.round(mia.recording.durationMs / 1000))} seconds · {mia.recordPurpose === 'assistant' ? 'Transcribe, edit, then ask Mia.' : 'Preview before sending.'}</Text>
+          <Text style={s.small}>{Math.max(1, Math.round(mia.recording.durationMs / 1000))} seconds · {mia.recordPurpose === 'assistant' ? 'Review the words before asking Mia.' : 'Preview before sending.'}</Text>
           <View style={a.actions}>
             <Button secondary label="Preview" icon="play-outline" onPress={() => void mia.preview().catch(mia.fail)} />
-            <Button label={mia.recordPurpose === 'assistant' ? 'Transcribe' : 'Send voice note'} loading={mia.busy} onPress={() => void mia.useRecording().catch(mia.fail)} />
+            <Button label={mia.recordPurpose === 'assistant' ? 'Review request' : 'Send voice note'} loading={mia.busy} onPress={() => void mia.useRecording().catch(mia.fail)} />
             <Button quiet label="Discard recording" onPress={() => void mia.discardRecording().catch(mia.fail)} />
           </View>
         </View>
       ) : null}
       {(mia.audioState === 'playing' || mia.audioState === 'loading' || mia.voiceMode) && mia.audioState !== 'recording' && (
         <View style={a.audio}>
-          <Text style={[s.small, a.description]}>{mia.audioState === 'loading' ? 'Preparing spoken response…' : mia.audioState === 'playing' ? 'Playing on this iPhone' : 'Audio controls ready'}</Text>
-          <Button secondary label="Stop audio" icon="stop-outline" onPress={() => void mia.stopAudio().catch(mia.fail)} />
+          <Text style={[s.small, a.description]}>{mia.audioState === 'loading' ? 'Preparing audio…' : mia.audioState === 'playing' ? 'Playing' : 'Ready when you are'}</Text>
+          <Button secondary label="Stop audio" icon="stop-outline" disabled={mia.audioState === 'idle'} onPress={() => void mia.stopAudio().catch(mia.fail)} />
         </View>
       )}
     </>

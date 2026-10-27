@@ -43,14 +43,8 @@ function Application() {
             <ActivityIndicator color={colors.green} />
             <Text style={s.body}>Opening Mia…</Text>
           </View>
-        ) : !mia.session ? <Auth key={mia.address} mia={mia} /> : !mia.session.user.profileComplete ? <CompleteProfile mia={mia} /> : (
+        ) : !mia.session ? <Auth mia={mia} /> : !mia.session.user.profileComplete ? <CompleteProfile mia={mia} /> : (
           <View style={app.fill}>
-            <View style={app.connection}>
-              <View style={[app.statusDot, { backgroundColor: mia.connection === 'Connected' ? colors.green : '#A66C28' }]} />
-              <Text style={[s.small, app.statusText]}>{mia.connection === 'Connected' ? 'Connected to your people' : mia.connection}</Text>
-              <Text style={app.wordmark}>mia</Text>
-            </View>
-
             {!!mia.error && (
               <View style={app.error}>
                 <Notice error>{mia.error}</Notice>
@@ -113,10 +107,6 @@ export default function App() {
 const app = StyleSheet.create({
   fill: { flex: 1, minWidth: 0 },
   loading: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16 },
-  connection: { paddingHorizontal: 24, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.line, flexDirection: 'row', gap: 8, alignItems: 'center' },
-  statusDot: { width: 6, height: 6, borderRadius: 3 },
-  statusText: { flex: 1 },
-  wordmark: { color: colors.green, fontWeight: '700', fontSize: 19 },
   error: { paddingHorizontal: 20, paddingTop: 10 },
   tabs: { flexDirection: 'row', borderTopWidth: 1, borderTopColor: colors.line, paddingHorizontal: 8, paddingVertical: 6, backgroundColor: colors.background },
   nav: { flex: 1, minWidth: 0, alignItems: 'center', justifyContent: 'center', gap: 5, minHeight: 58, paddingVertical: 8, borderRadius: 12 },

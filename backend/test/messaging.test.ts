@@ -45,6 +45,10 @@ test('authenticated messaging, isolation, drafts and retry-safe delivery', async
   const draft = await app.inject({ method: 'POST', url: '/v1/drafts', headers,
     payload: { recipientId: anna.user.id, content: { kind: 'text', text: 'First draft' } } });
   assert.equal(draft.statusCode, 201, draft.body);
+  assert.deepEqual(draft.json().recipient, { id: anna.user.id, username: 'anna', displayName: 'Anna' });
+  const savedDrafts = await app.inject({ url: '/v1/drafts', headers });
+  assert.deepEqual(savedDrafts.json()[0].recipient, { id: anna.user.id, username: 'anna', displayName: 'Anna' });
+  assert.equal((await app.inject({ url: '/v1/drafts', headers: davidHeaders })).json().length, 0);
   const draftId = draft.json().id as string;
   assert.equal((await app.inject({ method: 'POST', url: `/v1/drafts/${draftId}/confirm`, headers, payload: { version: 1 } })).statusCode, 409);
   assert.equal((await app.inject({ method: 'POST', url: `/v1/drafts/${draftId}/review`, headers, payload: { version: 1 } })).statusCode, 200);
