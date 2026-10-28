@@ -52,7 +52,12 @@ static AVAudioPCMBuffer *MiaCopyRejected(unsigned reason, AVAudioPCMBuffer *inpu
   __block NSError *error = nil;
   NSError *exception = MiaGuard(@"configure_graph", ^{
     AVAudioInputNode *input = engine.inputNode;
-    if (![input setVoiceProcessingEnabled:YES error:&error] || !input.isVoiceProcessingEnabled) return;
+    if (![input setVoiceProcessingEnabled:YES error:&error] || !input.isVoiceProcessingEnabled) {
+      if (!error) error = [NSError errorWithDomain:@"MiaVoice" code:6 userInfo:nil];
+      return;
+    }
+    input.voiceProcessingBypassed = NO;
+    input.voiceProcessingInputMuted = NO;
     AVAudioFormat *format = [input inputFormatForBus:0];
     if (format.sampleRate <= 0 || format.channelCount == 0) {
       error = [NSError errorWithDomain:@"MiaVoice" code:2 userInfo:nil]; return;
@@ -71,9 +76,10 @@ static AVAudioPCMBuffer *MiaCopyRejected(unsigned reason, AVAudioPCMBuffer *inpu
     }];
     [engine prepare]; [engine startAndReturnError:&error];
   });
-  if (!exception && !error && !engine.isRunning) error = [NSError errorWithDomain:@"MiaVoice" code:3 userInfo:nil];
+  // isRunning can temporarily turn false while VPIO finishes changing the
+  // hardware graph. The owner handles that transition on its serial queue.
   if (exception || error) { MiaRecord(@"start_failed", @{@"code": @((exception ?: error).code)}); return exception ?: error; }
-  MiaRecord(@"running", @{@"voiceProcessing": @(engine.inputNode.isVoiceProcessingEnabled)}); return nil;
+  MiaRecord(@"start_requested", @{@"running": @(engine.isRunning), @"voiceProcessing": @(engine.inputNode.isVoiceProcessingEnabled), @"bypassed": @(engine.inputNode.isVoiceProcessingBypassed), @"inputMuted": @(engine.inputNode.isVoiceProcessingInputMuted)}); return nil;
 }
 + (NSError *)resumeEngine:(AVAudioEngine *)engine {
   __block NSError *error = nil;
@@ -157,6 +163,7 @@ static AVAudioPCMBuffer *MiaCopyRejected(unsigned reason, AVAudioPCMBuffer *inpu
 }
 - (void)reset { _converter = nil; }
 + (NSDictionary<NSString *,id> *)diagnostics {
-  return @{@"apiVersion": @2, @"implementation": @"graph-recovery-3", @"events": [[NSUserDefaults standardUserDefaults] arrayForKey:MiaDiagnosticsKey] ?: @[]};
+  return @{@"apiVersion": @3, @"implementation": @"epoch-audio-4", @"events": [[NSUserDefaults standardUserDefaults] arrayForKey:MiaDiagnosticsKey] ?: @[]};
 }
++ (void)recordEvent:(NSString *)stage detail:(NSDictionary<NSString *, id> *)detail { MiaRecord(stage, detail); }
 @end

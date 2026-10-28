@@ -144,9 +144,9 @@ test('Meta realtime recognizer authenticates in its handshake, streams PCM and e
       }
       if (binary) {
         assert.equal(Array.isArray(data) ? Buffer.concat(data).byteLength : data.byteLength, 3840);
-        socket.send(JSON.stringify({ type: 'speechStart', turnId: 1 }));
-        socket.send(JSON.stringify({ type: 'transcript', transcript: 'hello', final: false }));
-        socket.send(JSON.stringify({ type: 'speechComplete', turnId: 1, transcript: 'Hello.' }));
+        socket.send(JSON.stringify({ type: 'speechStart', turnId: 1, audioProcessedMs: 40 }));
+        socket.send(JSON.stringify({ type: 'transcript', transcript: 'hello', final: false, audioProcessedMs: 80 }));
+        socket.send(JSON.stringify({ type: 'speechComplete', turnId: 1, transcript: 'Hello.', audioProcessedMs: 80 }));
         return;
       }
       assert.equal((JSON.parse(data.toString()) as { type: string }).type, 'endStream');
@@ -162,6 +162,7 @@ test('Meta realtime recognizer authenticates in its handshake, streams PCM and e
   stream.write(Buffer.alloc(3840));
   await completed;
   assert.deepEqual(events.map((event) => event.type), ['speechStart', 'transcript', 'speechComplete']);
+  assert.deepEqual(events.map((event) => event.audioProcessedMs), [40, 80, 80]);
   assert.equal(failures, 0);
   stream.close();
 });

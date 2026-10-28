@@ -5,7 +5,8 @@
     "version": "1.0.0",
     "scheme": "mia",
     "orientation": "portrait",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#09090F",
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "app.mia.messenger",

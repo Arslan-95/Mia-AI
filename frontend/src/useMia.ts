@@ -11,6 +11,7 @@ import { PresentationLease, isLiveAction, mergeMessages } from './coordination';
 import { Engine } from './audio/engine';
 import { DuplexAudio } from './audio/duplex';
 import { concatBytes } from './audio/wav';
+import { pcmLevel } from './audio/level';
 import { VoiceConversation, checkVoice, voiceDelay, type VoicePhase, type VoiceRuntime } from './voiceConversation';
 import type { Recording } from './audio/types';
 import type { AssistantSession, Capabilities, Chat, ClientContext, Contact, DeviceAction, Draft, Message, OtpChallenge, PendingMessage, Profile, ServerEvent, Session, Turn, User } from './types';
@@ -19,6 +20,13 @@ const address = (process.env.EXPO_PUBLIC_API_URL ?? '').trim().replace(/\/+$/, '
 export function useMia() {
   const [booting, setBooting] = useState(true); const [session, setSession] = useState<Session | null>(null);
   const [aiMode, setAiMode] = useState(false);
+  const [microphoneMuted, setMicrophoneMuted] = useState(false);
+  const microphoneIntent = useRef(false);
+  const microphoneTransition = useRef<Promise<void>>(Promise.resolve());
+  const microphoneEpoch = useRef(0);
+  const [voiceLevel, setVoiceLevel] = useState(0);
+  const lastMeter = useRef(0);
+  const voiceEnvelope = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
   const [voicePhase, setVoicePhase] = useState<VoicePhase>('off');
   const [voiceFault, setVoiceFault] = useState(false);
   const [voiceRecoverable, setVoiceRecoverable] = useState(false);
@@ -154,6 +162,7 @@ export function useMia() {
   }, [session?.token, session?.user.profileComplete, address, booting]);
   const speech = useRef<{ requestId: string; turnId: string; epoch: number; parts: Uint8Array[]; bytes: number; settle(error?: unknown): void } | null>(null);
   async function stopNativeVoice() {
+    setVoiceLevel(0);
     clearTimeout(nativeConnectTimeout.current); nativeConnectTimeout.current = undefined;
     nativeResponse.current?.abort(); nativeResponse.current = null;
     if (nativeStream.current) socket.current?.send({ type: 'voice.cancel' });
@@ -167,7 +176,7 @@ export function useMia() {
   function startNativeRecognition(id: string) {
     clearTimeout(nativeConnectTimeout.current);
     nativeStream.current = id; nativeCapture.current = null;
-    if (!socket.current?.send({ type: 'voice.start', requestId: id, sampleRate: 24000, format: 'pcm_s16le', context: navigation.snapshot() })) {
+    if (!socket.current?.send({ type: 'voice.start', requestId: id, sampleRate: 24000, format: 'pcm_s16le', inputProcessing: 'aec-residual-v1', context: navigation.snapshot() })) {
       handleVoiceFailure(new ApiError(0, 'OFFLINE', '')); return;
     }
     nativeConnectTimeout.current = setTimeout(() => {
@@ -175,6 +184,7 @@ export function useMia() {
     }, 15000);
   }
   async function stopAudio() {
+    clearInterval(voiceEnvelope.current); voiceEnvelope.current = undefined; setVoiceLevel(0);
     speech.current?.settle(new CancelledError()); speech.current = null; socket.current?.send({ type: 'speech.cancel' });
     if (!nativeStream.current) socket.current?.send({ type: 'voice.cancel' });
     await duplex.stopPlayback();
@@ -285,6 +295,9 @@ export function useMia() {
       }
       void duplex.start(bytes => {
         if (!nativeStream.current) return;
+        if (state.current.voicePhase !== 'speaking' && Date.now() - lastMeter.current >= 80) {
+          lastMeter.current = Date.now(); setVoiceLevel(pcmLevel(bytes));
+        }
         if (nativeCapture.current !== nativeStream.current) {
           nativePCM.current.parts.push(bytes); nativePCM.current.bytes += bytes.length;
           while (nativePCM.current.bytes > 72000) nativePCM.current.bytes -= nativePCM.current.parts.shift()!.length;
@@ -346,8 +359,15 @@ export function useMia() {
       if (frame.chunks !== current.parts.length || frame.totalBytes !== current.bytes || !current.bytes) { current.settle(new UserFacingError('Mia’s audio was incomplete. Tap Mia to try again.')); void stopAudio(); return; }
       setAudioState('playing');
       socket.current?.send({ type: 'speech.playback', turnId: current.turnId, playing: true });
-      const playback = duplex.active ? duplex.playPcm(concatBytes(current.parts), current.requestId) : audio.current!.playPcm(concatBytes(current.parts));
+      const bytes = concatBytes(current.parts);
+      const startedAt = Date.now();
+      clearInterval(voiceEnvelope.current);
+      const envelope = setInterval(() => setVoiceLevel(pcmLevel(bytes, (Date.now() - startedAt) * 24)), 80);
+      voiceEnvelope.current = envelope;
+      const playback = duplex.active ? duplex.playPcm(bytes, current.requestId) : audio.current!.playPcm(bytes);
       void playback.then(() => current.settle(), error => current.settle(error)).finally(() => {
+        clearInterval(envelope);
+        if (voiceEnvelope.current === envelope) { voiceEnvelope.current = undefined; setVoiceLevel(0); }
         socket.current?.send({ type: 'speech.playback', turnId: current.turnId, playing: false });
       });
     } else if (frame.type === 'speech.failed' || frame.type === 'speech.cancelled') { current.settle(frame.type === 'speech.failed' ? new ApiError(503, 'TTS_UNAVAILABLE', '') : new CancelledError()); }
@@ -371,6 +391,8 @@ export function useMia() {
   }
   async function logout() { try { await api.request('/v1/auth/logout', 'POST'); } finally { await clearSession(); } }
   async function saveAiMode(enabled: boolean) {
+    microphoneEpoch.current++;
+    microphoneIntent.current = false; setMicrophoneMuted(false);
     aiModeRef.current = enabled; setAiMode(enabled); setVoiceFault(false); setVoiceRecoverable(false); setError('');
     if (!enabled) setVoicePhase('off');
     await Promise.all([preferences.set('mia.ai_mode', String(enabled)), enabled ? Promise.resolve() : interrupt()]);
@@ -380,6 +402,29 @@ export function useMia() {
     setVoiceFault(false); setVoiceRecoverable(false); setError('');
     await retryAssistant();
     setVoiceRevision(value => value + 1);
+  }
+  function toggleMicrophone() {
+    if (!aiModeRef.current) return Promise.resolve();
+    const epoch = microphoneEpoch.current;
+    const muted = !microphoneIntent.current;
+    microphoneIntent.current = muted;
+    // Reopening waits for the previous capture graph and assistant work to
+    // finish, including during rapid repeated taps.
+    if (muted) setMicrophoneMuted(true);
+    const transition = microphoneTransition.current.catch(() => {}).then(async () => {
+      if (epoch !== microphoneEpoch.current) return;
+      if (muted) await interrupt();
+      else {
+        await recoveryBarrier.current;
+        if (!aiModeRef.current || microphoneIntent.current || epoch !== microphoneEpoch.current) return;
+        if (voiceFault) await resumeAssistant();
+        if (!aiModeRef.current || microphoneIntent.current || epoch !== microphoneEpoch.current) return;
+        setMicrophoneMuted(false);
+        setVoiceRevision(value => value + 1);
+      }
+    });
+    microphoneTransition.current = transition;
+    return transition;
   }
   async function startChat(profile: Profile, add = false) {
     if (add) await api.request('/v1/contacts', 'POST', { userId: profile.id });
@@ -552,7 +597,9 @@ export function useMia() {
   voiceRuntime.current = {
     ready: () => deviceTasks.size === 0,
     phase: setVoicePhase,
-    capture: signal => audio.current!.captureCommand(signal),
+    capture: signal => audio.current!.captureCommand(signal, level => {
+      if (Date.now() - lastMeter.current >= 80) { lastMeter.current = Date.now(); setVoiceLevel(level); }
+    }),
     async transcribe(value, signal) {
       const media = await uploadRecording(value, signal);
       checkVoice(signal);
@@ -570,7 +617,7 @@ export function useMia() {
   };
   useEffect(() => {
     const configured = capabilities?.agent && capabilities.speechRecognition && capabilities.speechSynthesis;
-    if (!aiMode || !session?.user.profileComplete || !inForeground || manualAudio || (voiceFault && !voiceRecoverable)) return;
+    if (!aiMode || microphoneMuted || !session?.user.profileComplete || !inForeground || manualAudio || (voiceFault && !voiceRecoverable)) return;
     if (configured && assistantSession && !voiceRecoverable) return;
     const controller = new AbortController(); const { signal } = controller;
     const epoch = authEpoch.current;
@@ -602,10 +649,10 @@ export function useMia() {
       }
     })();
     return () => controller.abort();
-  }, [aiMode, session?.token, session?.user.profileComplete, inForeground, manualAudio, voiceFault, voiceRecoverable, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, assistantSession?.id]);
+  }, [aiMode, microphoneMuted, session?.token, session?.user.profileComplete, inForeground, manualAudio, voiceFault, voiceRecoverable, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, assistantSession?.id]);
   useEffect(() => {
     if (!aiMode || !session?.user.profileComplete) { setVoicePhase('off'); return; }
-    if (!inForeground || manualAudio) { setVoicePhase('paused'); return; }
+    if (microphoneMuted || !inForeground || manualAudio) { setVoicePhase('paused'); return; }
     if (voiceFault) { setVoicePhase(voiceRecoverable ? 'waiting' : 'error'); return; }
     if (!assistantSession || !realtimeReady || capabilities?.agent !== true || !capabilities.speechRecognition || !capabilities.speechSynthesis) {
       setVoicePhase('waiting'); return;
@@ -633,8 +680,8 @@ export function useMia() {
       handleVoiceFailure(reason);
     });
     return () => { cancelled = true; void conversation.stop(); };
-  }, [aiMode, session?.token, session?.user.profileComplete, assistantSession?.id, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, inForeground, manualAudio, voiceRevision, voiceFault, voiceRecoverable, realtimeReady]);
-  return { booting, session, aiMode, voicePhase, voiceFault, error, setError, busy, tab, capabilities, chats, contacts, drafts, messages, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, devicePrompt, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, startChat, sendText, sendPending, saveDraft, draftAction, interrupt, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice, acceptDeviceRecording,
+  }, [aiMode, microphoneMuted, session?.token, session?.user.profileComplete, assistantSession?.id, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, inForeground, manualAudio, voiceRevision, voiceFault, voiceRecoverable, realtimeReady]);
+  return { booting, session, aiMode, microphoneMuted, toggleMicrophone, voiceLevel, voicePhase, voiceFault, error, setError, busy, tab, capabilities, chats, contacts, drafts, messages, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, devicePrompt, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, startChat, sendText, sendPending, saveDraft, draftAction, interrupt, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice, acceptDeviceRecording,
     setComposer: (text: string) => { if (activeChatId) setComposers(previous => ({ ...previous, [activeChatId]: text })); },
   };
 }

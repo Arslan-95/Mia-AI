@@ -16,7 +16,7 @@ async function device() {
   const listeners = new Map<string, (value: any) => void>();
   let completeStart: (() => void) | undefined; let completeStop: (() => void) | undefined; let rejectPlayback: ((error: unknown) => void) | undefined;
   const native = {
-    apiVersion: 2,
+    apiVersion: 3,
     waitForPermission: false, waitForStop: false, failStop: false, startFailure: '', starts: 0, stopped: 0, encoded: '',
     addListener(name: string, listener: (value: any) => void) { listeners.set(name, listener); return { remove() { listeners.delete(name); } }; },
     async start() { native.starts++; if (native.waitForPermission) await new Promise<void>(resolve => { completeStart = resolve; }); if (native.startFailure) throw { code: native.startFailure }; },
@@ -50,8 +50,10 @@ test('audio-session ownership survives asynchronous native shutdown and excludes
   const stopped = audio.stop();
   assert.equal(audio.active, false); assert.equal(audio.ownsSession, true, 'another engine must not change the session while native teardown is pending');
   finishStop(); await stopped; assert.equal(audio.ownsSession, false);
-  native.apiVersion = 1; const legacy = createAudio(); assert.equal(legacy.available, false);
-  await assert.rejects(legacy.start(() => {}, () => {}, () => {}), /Update Mia/);
+  for (const version of [1, 2]) {
+    native.apiVersion = version; const legacy = createAudio(); assert.equal(legacy.available, false);
+    await assert.rejects(legacy.start(() => {}, () => {}, () => {}), /Update Mia/);
+  }
   delete (globalThis as any).__miaDuplexModule;
 });
 test('interruption cancels PCM playback without closing the input graph', async () => {
@@ -61,6 +63,22 @@ test('interruption cancels PCM playback without closing the input graph', async 
   assert.equal(native.encoded, 'AID/fw=='); await audio.stopPlayback(); await rejected;
   assert.equal(audio.active, true); assert.ok(listeners.has('pcm')); assert.equal(native.stopped, 0);
   await audio.stop(); delete (globalThis as any).__miaDuplexModule;
+});
+
+test('speaker PCM is filtered on the real capture path and input continues after barge-in', async () => {
+  const { audio, listeners } = await device(); const heard: Uint8Array[] = [];
+  await audio.start(bytes => heard.push(bytes), () => {}, () => {});
+  const source = new Uint8Array(3840), view = new DataView(source.buffer);
+  for (let i = 0; i < source.length / 2; i++) view.setInt16(i * 2, Math.round(4000 * Math.sin(i * .1)), true);
+  const playback = audio.playPcm(source, 'reply'); const cancelled = assert.rejects(playback, error => (error as Error).constructor.name === 'CancelledError');
+  listeners.get('pcm')!({ audio: Buffer.from(source).toString('base64') });
+  assert.equal(heard.length, 1); assert.equal(heard[0]!.every(byte => byte === 0), true);
+  await audio.stopPlayback(); await cancelled;
+  const user = new Uint8Array(3840), humanView = new DataView(user.buffer);
+  for (let i = 0; i < user.length / 2; i++) humanView.setInt16(i * 2, Math.round(4000 * Math.sin(i * .247)), true);
+  listeners.get('pcm')!({ audio: Buffer.from(user).toString('base64') });
+  assert.equal(Buffer.from(heard[1]!).equals(Buffer.from(user)), true);
+  assert.equal(audio.active, true); await audio.stop(); delete (globalThis as any).__miaDuplexModule;
 });
 
 test('native start waits for the previous graph and Expo cleanup, and cancellation during handoff never starts it', async () => {

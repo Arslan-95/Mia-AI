@@ -3,7 +3,8 @@ import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import type { Mia } from '../useMia';
 import type { OtpChallenge } from '../types';
 import { ApiError } from '../api';
-import { Button, Field, Icon, Notice, colors, s } from '../ui';
+import { Button, Field, Notice, colors, s } from '../ui';
+import { MiaCore } from './AssistantOrb';
 
 export function Auth({ mia }: { mia: Mia }) {
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -58,14 +59,10 @@ export function Auth({ mia }: { mia: Mia }) {
         <Wordmark />
       </View>
       <View style={a.hero}>
-        <View style={a.orbit}>
-          <View style={a.orbitInner}><Icon name="chatbubble-ellipses-outline" size={44} color={colors.green} /></View>
-          <View style={a.star}><Icon name="sparkles" size={22} color={colors.green} /></View>
-          <View style={a.dot} />
-        </View>
-        <Text style={s.eyebrow}>A LITTLE CLOSER</Text>
-        <Text accessibilityRole="header" style={a.title}>{challenge ? 'One small step.' : 'Good conversations.\nYour way.'}</Text>
-        <Text style={[s.body, a.centered]}>{challenge ? 'Enter your code to continue.' : 'A calm place to connect. Start with your phone number.'}</Text>
+        <MiaCore compact />
+        <Text style={s.eyebrow}>CONNECTED, NATURALLY</Text>
+        <Text accessibilityRole="header" style={a.title}>{challenge ? 'One small step.' : 'Your people.\nA new frequency.'}</Text>
+        <Text style={[s.body, a.centered]}>{challenge ? 'Enter your code to continue.' : 'Messages, voice, and a little help from Mia.'}</Text>
       </View>
 
       <View style={a.form}>
@@ -111,7 +108,7 @@ export function Auth({ mia }: { mia: Mia }) {
           </>
         )}
       </View>
-      <Text style={[s.small, a.footer]}>YOUR PEOPLE. YOUR PACE.</Text>
+      <Text style={[s.small, a.footer]}>SPACE TO CONNECT.</Text>
     </ScrollView>
   );
 }
@@ -124,7 +121,7 @@ export function CompleteProfile({ mia }: { mia: Mia }) {
     <ScrollView contentContainerStyle={a.container} keyboardShouldPersistTaps="handled">
       <View style={a.brand}><Wordmark /></View>
       <View style={a.hero}>
-        <Text style={s.eyebrow}>MAKE YOURSELF AT HOME</Text>
+        <Text style={s.eyebrow}>YOUR OWN SPACE</Text>
         <Text accessibilityRole="header" style={a.title}>What should we{'\n'}call you?</Text>
         <Text style={[s.body, a.centered]}>Choose the name your people will see.</Text>
       </View>
@@ -141,20 +138,16 @@ export function CompleteProfile({ mia }: { mia: Mia }) {
 }
 
 function Wordmark() {
-  return <View style={a.wordmark}><Icon name="sparkles" size={25} color={colors.green} /><Text style={a.logo}>mia</Text></View>;
+  return <View style={a.wordmark}><Text style={a.logo}>mia<Text style={{ color: colors.accent }}>.</Text></Text></View>;
 }
 
 const a = StyleSheet.create({
   container: { flexGrow: 1, backgroundColor: colors.background, paddingHorizontal: 24, paddingBottom: 20 },
   brand: { width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 20 },
   wordmark: { flexDirection: 'row', gap: 8, alignItems: 'center' },
-  logo: { fontSize: 33, letterSpacing: -2, fontWeight: '700', color: colors.green },
+  logo: { fontSize: 33, letterSpacing: -2, fontWeight: '700', color: colors.ink },
   hero: { alignItems: 'center', paddingTop: 14, paddingBottom: 32, gap: 14 },
-  orbit: { width: 128, height: 114, borderWidth: 1, borderColor: '#C9D5BD', borderRadius: 70, transform: [{ rotate: '-16deg' }], alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
-  orbitInner: { width: 88, height: 88, backgroundColor: colors.soft, borderRadius: 32, alignItems: 'center', justifyContent: 'center', transform: [{ rotate: '16deg' }] },
-  star: { position: 'absolute', right: -2, top: -4, backgroundColor: colors.yellow, width: 42, height: 42, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
-  dot: { width: 12, height: 12, borderRadius: 6, backgroundColor: '#9DAC88', position: 'absolute', left: 0, bottom: 10 },
-  title: { fontSize: 38, lineHeight: 44, letterSpacing: -1.8, fontWeight: '500', textAlign: 'center', color: colors.ink },
+  title: { fontSize: 40, lineHeight: 46, letterSpacing: -1.8, fontWeight: '500', textAlign: 'center', color: colors.ink },
   form: { width: '100%', gap: 17, padding: 24, borderRadius: 26, backgroundColor: colors.paper, borderWidth: 1, borderColor: colors.line },
   centered: { textAlign: 'center' },
   code: { fontSize: 26, letterSpacing: 8, textAlign: 'center' },

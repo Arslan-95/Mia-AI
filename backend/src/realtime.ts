@@ -13,12 +13,13 @@ import type { RecognitionEvent, RecognitionStream, SpeechProvider } from './spee
 import { eventQuery } from './routes/messaging.js';
 import { assertContextAccess, clientContextSchema, deviceResultSchema, type ClientContext } from './agents/context.js';
 import { WordBargeInGate } from './speech/barge-in.js';
+import { AcousticEvidence } from './speech/acoustic-evidence.js';
 
 const frameSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('auth'), token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), after: eventQuery.shape.after }).strict(),
   z.object({ type: z.literal('turn'), clientTurnId: z.uuid(), text: z.string().trim().min(1).max(8000), context: clientContextSchema.optional() }).strict(),
   z.object({ type: z.literal('assistant.stop') }).strict(),
-  z.object({ type: z.literal('voice.start'), requestId: z.uuid(), sampleRate: z.literal(24000), format: z.literal('pcm_s16le'), context: clientContextSchema.optional() }).strict(),
+  z.object({ type: z.literal('voice.start'), requestId: z.uuid(), sampleRate: z.literal(24000), format: z.literal('pcm_s16le'), context: clientContextSchema.optional(), inputProcessing: z.literal('aec-residual-v1').optional() }).strict(),
   z.object({ type: z.literal('voice.end') }).strict(),
   z.object({ type: z.literal('voice.cancel') }).strict(),
   z.object({ type: z.literal('voice.context'), context: clientContextSchema }).strict(),
@@ -85,9 +86,10 @@ export function registerRealtime(app: FastifyInstance, deps: {
     const utteranceContexts = new Map<number, ClientContext | undefined>();
     const completedSpeech = new Set<number>();
     const wordGate = new WordBargeInGate();
+    const stableWords = new Map<number, ReturnType<typeof setTimeout>>();
     let latestSpeechTurn: number | undefined;
-    let spokenEcho = '';
-    let playbackTurnId: string | undefined;
+    const acoustic = new AcousticEvidence();
+    let needsAudioEvidence = false;
 
     const send = (value: unknown) => {
       if (stopped || socket.readyState !== WebSocket.OPEN) return;
@@ -101,6 +103,9 @@ export function registerRealtime(app: FastifyInstance, deps: {
       recognitionId = undefined;
       voiceGeneration = undefined;
       voiceContext = undefined;
+      acoustic.reset(); needsAudioEvidence = false;
+      for (const timer of stableWords.values()) clearTimeout(timer);
+      stableWords.clear();
       recognitionController?.abort(); recognitionController = undefined;
       recognition?.close(); recognition = undefined;
       if (voiceTimer) clearTimeout(voiceTimer);
@@ -156,7 +161,30 @@ export function registerRealtime(app: FastifyInstance, deps: {
       finally { reading = false; }
     }
 
+    async function interruptRecognizedWord(id: string, speechId: number, signal: AbortSignal) {
+      cancelSpeech();
+      send({ type: 'voice.interruption', requestId: id, speechTurnId: speechId, clientTurnId: speechTurnId(id, speechId) });
+      const interrupted = await assistant.interrupt(user!.id, sessionId, signal, 'speech');
+      voiceGeneration = interrupted.generation;
+    }
+    function scheduleStableWord(id: string, speechId: number, signal: AbortSignal) {
+      clearTimeout(stableWords.get(speechId)); stableWords.delete(speechId);
+      const due = wordGate.due(speechId);
+      if (due === undefined) return;
+      stableWords.set(speechId, setTimeout(() => {
+        stableWords.delete(speechId);
+        speechQueue = speechQueue.then(async () => {
+          if (!user || recognitionId !== id || stopped || signal.aborted || !await validateSession() || signal.aborted) return;
+          if (wordGate.confirmStable(speechId, Date.now())) await interruptRecognizedWord(id, speechId, signal);
+        }).catch((error: unknown) => { if (!signal.aborted) { failure(error); cancelVoice(); } });
+      }, Math.max(0, due - Date.now())));
+    }
     function onRecognition(id: string, event: RecognitionEvent, signal: AbortSignal) {
+      // Database work below can delay this event while newer PCM arrives.
+      // Assess audio at event receipt, not against a later utterance's audio.
+      const receivedAt = Date.now();
+      const audioAt = Math.min(event.audioProcessedMs ?? acoustic.position, acoustic.position);
+      const audible = acoustic.hasSpeech(audioAt);
       speechQueue = speechQueue.then(async () => {
         if (!user || recognitionId !== id || stopped || signal.aborted) return;
         if (!await validateSession() || signal.aborted) return;
@@ -165,23 +193,23 @@ export function registerRealtime(app: FastifyInstance, deps: {
           if (starts.length >= 8) throw new AppError(503, 'ASR_OVERFLOW', 'Too many unfinished speech turns. Please reconnect.');
           starts.push(event.turnId);
           utteranceContexts.set(event.turnId, voiceContext ? { ...voiceContext } : undefined);
-          latestSpeechTurn = event.turnId; wordGate.start(event.turnId, spokenEcho);
+          latestSpeechTurn = event.turnId; wordGate.start(event.turnId, needsAudioEvidence, audible);
         }
         const speechId = event.type === 'speechComplete' ? event.turnId : event.type === 'transcript' ? latestSpeechTurn : undefined;
         if (speechId !== undefined && (event.type === 'transcript' || event.type === 'speechComplete')
-          && wordGate.observe(speechId, event.transcript, event.type === 'speechComplete' || event.final, Date.now())) {
+          && wordGate.observe(speechId, event.transcript, event.type === 'speechComplete' || event.final, receivedAt, audible)) {
           // VAD/speechStart alone never stops Mia. Cancel only after the
           // recognizer confirms a stable word or a final lexical utterance.
-          cancelSpeech();
-          send({ type: 'voice.interruption', requestId: id, speechTurnId: speechId, clientTurnId: speechTurnId(id, speechId) });
-          const interrupted = await assistant.interrupt(user.id, sessionId, signal, 'speech');
-          voiceGeneration = interrupted.generation;
+          await interruptRecognizedWord(id, speechId, signal);
         }
+        if (speechId !== undefined) scheduleStableWord(id, speechId, signal);
         throwIfAborted(signal);
         send({ type: 'voice.event', requestId: id, event });
         if (event.type !== 'speechComplete' || completedSpeech.has(event.turnId)) return;
         if (!starts.includes(event.turnId)) throw new AppError(503, 'INVALID_SPEECH_TURN', 'The speech turn has no start event.');
         finalTranscripts.set(event.turnId, wordGate.meaningful(event.turnId, event.transcript) ? event.transcript.trim() : '');
+        acoustic.consumeThrough(audioAt);
+        clearTimeout(stableWords.get(event.turnId)); stableWords.delete(event.turnId);
         wordGate.finish(event.turnId);
         if (starts.some((turnId) => !finalTranscripts.has(turnId))) return;
         const transcripts: string[] = [];
@@ -214,7 +242,6 @@ export function registerRealtime(app: FastifyInstance, deps: {
         if (turn.status !== 'completed' || !turn.assistantText || turn.generation !== session.generation) {
           throw new AppError(409, 'STALE_SPEECH', 'This response is not current.');
         }
-        spokenEcho = turn.assistantText; playbackTurnId = turn.id;
         synthesisGeneration = turn.generation;
         send({ type: 'speech.started', requestId, turnId, format: 'pcm_s16le', sampleRate: 24000, channels: 1 });
         let sequence = 0;
@@ -277,7 +304,8 @@ export function registerRealtime(app: FastifyInstance, deps: {
         await assertContextAccess(db, user.id, frame.context);
         voiceContext = frame.context;
       } else if (frame.type === 'speech.playback') {
-        if (!frame.playing && playbackTurnId === frame.turnId) { spokenEcho = ''; playbackTurnId = undefined; }
+        // Playback acknowledgement is retained for protocol compatibility.
+        // Echo rejection uses the actual PCM reference on the device, not text.
       } else if (frame.type === 'voice.end') {
         recognition?.end();
         voiceEndTimer = setTimeout(() => { cancelVoice(); send({ type: 'voice.closed' }); }, 10_000);
@@ -285,6 +313,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
         cancelVoice();
         await assertContextAccess(db, user.id, frame.context ?? null);
         recognitionId = frame.requestId;
+        needsAudioEvidence = frame.inputProcessing === 'aec-residual-v1';
         voiceContext = frame.context;
         const controller = new AbortController(); recognitionController = controller;
         const contacts = await new MessagingService(db).contacts(user.id);
@@ -325,6 +354,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
             || receivedBytes > 96_000 + (Date.now() - voiceStartedAt) * 60) {
             throw new AppError(400, 'INVALID_AUDIO_FRAME', 'Send realtime mono 24 kHz Int16 PCM in small ordered frames.');
           }
+          acoustic.observe(bytes);
           recognition.write(bytes);
         } catch (error) { failure(error); cancelVoice(); }
         return;

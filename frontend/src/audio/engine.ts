@@ -27,7 +27,7 @@ export class Engine implements AudioEngine {
     } catch (error) { if (this.recorder === recorder) this.recorder = undefined; recorder.release(); throw error; }
     });
   }
-  async captureCommand(signal: AbortSignal): Promise<Recording | null> {
+  async captureCommand(signal: AbortSignal, onLevel?: (level: number) => void): Promise<Recording | null> {
     checkVoice(signal);
     const cancel = () => { void this.stop(); };
     signal.addEventListener('abort', cancel, { once: true });
@@ -40,6 +40,7 @@ export class Engine implements AudioEngine {
         const status = this.recorder?.getStatus();
         if (!status?.isRecording || status.mediaServicesDidReset) throw new UserFacingError('Listening was interrupted. Tap Mia to try again.');
         if (status.metering === undefined) throw new UserFacingError('Mia could not access the microphone level. Tap Mia to try again.');
+        onLevel?.(Math.min(1, Math.pow(10, status.metering / 20) * 3));
         const result = detector.update(Date.now(), status.metering);
         if (result === 'speech') {
           const recording = await this.finish();

@@ -15,7 +15,11 @@ import type { ServerEvent, Turn } from '../src/types';
 const root = fileURLToPath(new URL('../', import.meta.url).toString()).replaceAll('\\', '/');
 const sources: Record<string, string> = {
   'react-native': `const n = globalThis.__miaNative;
-    export const AccessibilityInfo = { isScreenReaderEnabled: async () => false };
+    export const AccessibilityInfo = { isScreenReaderEnabled: async () => false, isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove() {} }) };
+    export const Keyboard = { dismiss() {} };
+    export const Easing = { inOut: value => value, sin: x => x, linear: x => x };
+    const animation = () => ({ start() {}, stop() {} });
+    export const Animated = { add: () => 0, Value: class { setValue() {} interpolate() { return 0; } }, View: 'AnimatedView', loop: animation, sequence: animation, timing: animation };
     export const ActivityIndicator='ActivityIndicator', KeyboardAvoidingView='KeyboardAvoidingView', Pressable='Pressable', StatusBar='StatusBar', Text='Text', View='View', ScrollView='ScrollView', TextInput='TextInput', FlatList='FlatList', Switch='Switch';
     export const StyleSheet = { create: value => value };
     export const Linking = { openSettings: async () => {} };
@@ -51,7 +55,7 @@ const sources: Record<string, string> = {
     const listeners = new Map();
     let heldStop;
     const native = {
-      apiVersion: 2,
+      apiVersion: 3,
       addListener(name, callback) { listeners.set(name, callback); return { remove() { if (listeners.get(name) === callback) listeners.delete(name); } }; },
       async start() {
         const revision = ++n.nativeRevision; n.nativeStarts++;
@@ -358,26 +362,79 @@ test('microphone permission failures remain actionable without automatically reo
   } finally { await h.close(); }
 });
 
-test('the real application shows one round Mia control between the two left and two right tabs on every screen', async () => {
+test('voice mode blocks the underlying screen, keeps Mia centered and toggles only the microphone until a hold exits', async () => {
   const h = await mount(false, true);
   try {
-    const controls = () => h.tree.findAll(node => node.type === 'Pressable' as any && (node.props.accessibilityRole === 'tab' || node.props.accessibilityRole === 'switch'));
-    assert.deepEqual(controls().map(node => node.props.accessibilityRole), ['tab', 'tab', 'switch', 'tab', 'tab']);
-    assert.deepEqual(controls().filter(node => node.props.accessibilityRole === 'tab').map(node => node.props.accessibilityLabel), ['Chats', 'People', 'Drafts', 'Settings']);
-    const orb = controls()[2]!;
-    const ring = orb.props.style({ pressed: false })[0];
-    assert.equal(ring.width, ring.height); assert.equal(ring.borderRadius, ring.width / 2);
-    await act(async () => { orb.props.onPress(); }); await h.wait(() => !!h.n.capture);
-    for (const label of ['People', 'Drafts', 'Settings', 'Chats']) {
-      await act(async () => { controls().find(node => node.props.accessibilityLabel === label)!.props.onPress(); });
+    const pressable = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
+    const overlay = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel?.startsWith('Mia voice mode.'))[0]!;
+    assert.deepEqual(h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityRole === 'tab').map(node => node.props.accessibilityLabel), ['Chats', 'People', 'Settings']);
+    for (const screen of ['People', 'Settings', 'Chats']) {
+      await act(async () => { pressable(screen).props.onPress(); });
+      await act(async () => { pressable('Mia voice mode').props.onPress(); });
       await h.wait(() => !!h.n.capture);
-      assert.equal(controls()[2]!.props.accessibilityState.checked, true);
-      assert.equal(controls().length, 5);
+      const blocked = h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.pointerEvents === 'none')[0]!;
+      assert.equal(blocked.props.accessibilityElementsHidden, true);
+      assert.equal(blocked.props.importantForAccessibility, 'no-hide-descendants');
+      assert.equal(overlay().props.accessibilityViewIsModal, true);
+      await act(async () => { await overlay().props.onPress(); });
+      await h.wait(() => h.n.capture === null);
+      assert.equal(overlay().props.accessibilityState.checked, false);
+      assert.equal(h.n.preferences.get('mia.ai_mode'), 'true');
+      await act(async () => { await overlay().props.onPress(); });
+      await h.wait(() => !!h.n.capture);
+      assert.equal(overlay().props.accessibilityState.checked, true);
+      await act(async () => { overlay().props.onLongPress(); });
+      await h.wait(() => h.n.capture === null);
+      assert.equal(overlay(), undefined);
+      assert.equal(h.n.preferences.get('mia.ai_mode'), 'false');
     }
-    await act(async () => { controls()[2]!.props.onPress(); });
-    await h.wait(() => h.n.capture === null);
-    assert.equal(controls()[2]!.props.accessibilityState.checked, false);
   } finally { await h.close(); }
+});
+
+test('muting releases the microphone across navigation and foreground changes; unmuting resumes in the current context', async () => {
+  const h = await mount(true);
+  try {
+    await h.wait(() => !!h.n.capture);
+    await act(async () => { await h.mia.toggleMicrophone(); });
+    assert.equal(h.mia.microphoneMuted, true); assert.equal(h.mia.aiMode, true);
+    assert.equal(h.mia.voicePhase, 'paused'); assert.equal(h.n.capture, null);
+    await act(async () => { await h.mia.navigate('people'); h.n.appState('background'); });
+    await act(async () => { h.n.appState('active'); });
+    assert.equal(h.n.capture, null);
+    await act(async () => { await h.mia.toggleMicrophone(); });
+    await h.wait(() => !!h.n.capture);
+    await h.say(); await h.wait(() => !!h.n.playback);
+    assert.equal(h.n.turns.at(-1)?.context?.route, '/contacts');
+    await act(async () => { await h.mia.toggleMicrophone(); });
+    assert.equal(h.n.playback, null); assert.equal(h.n.capture, null);
+  } finally { await h.close(); }
+});
+
+test('muting during transcription cancels the request without sending a turn', async () => {
+  const h = await mount(true);
+  try {
+    await h.wait(() => !!h.n.capture); h.n.holdRecognition = true; await h.say();
+    await act(async () => { await h.mia.toggleMicrophone(); });
+    assert.equal(h.n.recognitionCancelled, true); assert.equal(h.n.turns.length, 0);
+    assert.equal(h.mia.aiMode, true); assert.equal(h.mia.microphoneMuted, true);
+  } finally { await h.close(); }
+});
+
+test('rapid microphone taps serialize native shutdown and never open Expo audio over the native graph', async () => {
+  const h = await mount(true, false, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    h.n.holdNativeStop = true;
+    let first!: Promise<void>; let second!: Promise<void>;
+    await act(async () => { first = h.mia.toggleMicrophone(); second = h.mia.toggleMicrophone(); });
+    assert.equal(h.mia.microphoneMuted, true);
+    assert.equal(h.n.nativePCM, null);
+    await act(async () => { h.n.holdNativeStop = false; h.n.releaseNativeStop?.(); await Promise.all([first, second]); });
+    await h.wait(() => !!h.n.nativePCM);
+    assert.equal(h.mia.microphoneMuted, false); assert.equal(h.n.audioConflicts, 0);
+    await act(async () => { await h.mia.toggleMicrophone(); });
+    assert.equal(h.n.nativePCM, null); assert.equal(h.n.nativeSession, false);
+  } finally { h.n.holdNativeStop = false; h.n.releaseNativeStop?.(); await h.close(); }
 });
 
 test('replaying a backlog of service events does not fan out into per-event HTTP requests or interrupt listening', async () => {
@@ -415,7 +472,7 @@ test('the native voice graph keeps capture running through playback and stops on
     requestId = h.n.frames.filter(frame => frame.type === 'voice.start').at(-1)!.requestId;
     assert.equal(h.n.nativeStarts, 1); assert.ok(h.n.playback, 'recognition rotation must not cut off the reply');
     await act(async () => {
-      h.n.nativePCM!(new Uint8Array([0, 0]));
+      h.n.nativePCM!(new Uint8Array(3840));
       h.n.frame({ type: 'voice.event', requestId, event: { type: 'speechStart', turnId: 2 } });
       h.n.frame({ type: 'voice.event', requestId, event: { type: 'transcript', transcript: '[noise]', final: false } });
     });

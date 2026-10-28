@@ -1,8 +1,9 @@
 import MiaVoice from '../../modules/mia-voice';
 import { CancelledError, UserFacingError, VoiceCaptureUnavailable } from '../errors';
+import { ResidualEchoGuard } from './echo';
 
 export class DuplexAudio {
-  readonly available = Boolean(MiaVoice && MiaVoice.apiVersion >= 2);
+  readonly available = Boolean(MiaVoice && MiaVoice.apiVersion >= 3);
   active = false;
   hasInput = false;
   ownsSession = false;
@@ -10,6 +11,7 @@ export class DuplexAudio {
   private stopBarrier: Promise<void> = Promise.resolve();
   private subscriptions: { remove(): void }[] = [];
   private inputWatchdog?: ReturnType<typeof setTimeout>;
+  private echo = new ResidualEchoGuard();
   constructor(private prepareSession: () => Promise<void> = async () => {}) {}
   async start(onPCM: (bytes: Uint8Array) => void, onInterrupted: () => void, onFailure: (error: unknown) => void) {
     if (!MiaVoice || !this.available) throw new UserFacingError('Update Mia to use voice interruption.');
@@ -24,7 +26,8 @@ export class DuplexAudio {
       MiaVoice.addListener('pcm', ({ audio }) => {
         if (this.active && revision === this.revision && audio.length) {
           lastInput = Date.now(); this.hasInput = true;
-          onPCM(Uint8Array.from(atob(audio), char => char.charCodeAt(0)));
+          const bytes = Uint8Array.from(atob(audio), char => char.charCodeAt(0));
+          for (const part of this.echo.process(bytes)) onPCM(part);
         }
       }),
       MiaVoice.addListener('interrupted', () => { if (revision === this.revision) onInterrupted(); }),
@@ -71,15 +74,17 @@ export class DuplexAudio {
     if (!MiaVoice || !this.active) throw new CancelledError();
     let binary = '';
     for (let offset = 0; offset < bytes.length; offset += 16384) binary += String.fromCharCode(...bytes.subarray(offset, offset + 16384));
+    this.echo.begin(bytes, requestId);
     try { await MiaVoice.play(btoa(binary), requestId); }
     catch (error) {
       if ((error as { code?: string }).code === 'CANCELLED') throw new CancelledError();
       throw new UserFacingError('Mia could not play that response. Please try again.');
     }
+    finally { this.echo.end(requestId); }
   }
   async stopPlayback() { if (MiaVoice) await MiaVoice.stopPlayback(); }
   async stop() {
-    const revision = ++this.revision; this.active = false; this.hasInput = false; this.removeListeners();
+    const revision = ++this.revision; this.active = false; this.hasInput = false; this.removeListeners(); this.echo.reset();
     const stopped = MiaVoice ? MiaVoice.stop() : Promise.resolve();
     this.stopBarrier = stopped;
     await stopped;
