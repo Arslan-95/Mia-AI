@@ -61,6 +61,16 @@ export class MessagingService {
     return contact;
   }
 
+  async renameContact(ownerId: string, contactId: string, name: string) {
+    const current = await this.contact(ownerId, contactId);
+    return this.db.transaction(async sql => {
+      const updated = await sql.query('UPDATE contacts SET name=$3 WHERE owner_id=$1 AND id=$2 RETURNING id', [ownerId, contactId, name]);
+      if (!updated.length) throw notFound();
+      await publish(sql, ownerId, 'contact.updated', { contactId });
+      return { ...current, name };
+    });
+  }
+
   async profile(userId: string): Promise<Profile> {
     const [user] = await this.db.query<Profile>('SELECT id, username, display_name AS "displayName" FROM users WHERE id = $1', [userId]);
     if (!user) throw notFound();
