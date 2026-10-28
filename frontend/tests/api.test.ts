@@ -50,3 +50,19 @@ test('request timeouts abort pending fetches and are cleared after a completed r
     assert.equal(signal?.aborted, true);
   } finally { globalThis.fetch = original; t.mock.timers.reset(); }
 });
+
+test('turning voice mode off aborts its in-flight upload or recognition request immediately', async () => {
+  const original = globalThis.fetch;
+  let fetchedSignal: AbortSignal | undefined;
+  globalThis.fetch = (_url, init) => new Promise((_resolve, reject) => {
+    fetchedSignal = init?.signal ?? undefined;
+    init?.signal?.addEventListener('abort', () => reject(new Error('Cancelled by user')), { once: true });
+  });
+  try {
+    const controller = new AbortController();
+    const request = new Api('http://localhost:8082', null).request('/v1/speech/transcriptions', 'POST', { mediaId: 'recording' }, controller.signal);
+    const rejected = assert.rejects(request, /Cancelled by user/);
+    controller.abort(); await rejected;
+    assert.equal(fetchedSignal?.aborted, true);
+  } finally { globalThis.fetch = original; }
+});

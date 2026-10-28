@@ -3,14 +3,14 @@ import { test } from 'node:test';
 import { NavigationContext, sameContext, viewRoute } from '../src/navigationContext';
 import { PresentationLease } from '../src/coordination';
 
-test('Mia requests retain the actual route and the view immediately preceding the assistant', () => {
+test('Mia requests retain the open conversation without a separate assistant route', () => {
   const navigation = new NavigationContext();
   navigation.move(viewRoute('chats', 'anna-chat'));
-  const snapshot = navigation.move(viewRoute('mia'));
-  assert.deepEqual(snapshot, { route: '/mia', revision: 2, previousRoute: '/chat/anna-chat' });
-  assert.deepEqual(navigation.move('/mia'), snapshot);
+  const snapshot = navigation.snapshot();
+  assert.deepEqual(snapshot, { route: '/chat/anna-chat', revision: 1, previousRoute: '/chats' });
+  assert.deepEqual(navigation.move(viewRoute('chats', 'anna-chat')), snapshot);
   snapshot.route = '/settings';
-  assert.equal(navigation.snapshot().route, '/mia');
+  assert.equal(navigation.snapshot().route, '/chat/anna-chat');
   assert.equal(viewRoute('people'), '/contacts');
 });
 

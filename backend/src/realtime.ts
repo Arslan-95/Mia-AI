@@ -12,6 +12,7 @@ import { MessagingService } from './messaging.js';
 import type { RecognitionEvent, RecognitionStream, SpeechProvider } from './speech/providers.js';
 import { eventQuery } from './routes/messaging.js';
 import { assertContextAccess, clientContextSchema, deviceResultSchema, type ClientContext } from './agents/context.js';
+import { WordBargeInGate } from './speech/barge-in.js';
 
 const frameSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('auth'), token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), after: eventQuery.shape.after }).strict(),
@@ -20,6 +21,8 @@ const frameSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('voice.start'), requestId: z.uuid(), sampleRate: z.literal(24000), format: z.literal('pcm_s16le'), context: clientContextSchema.optional() }).strict(),
   z.object({ type: z.literal('voice.end') }).strict(),
   z.object({ type: z.literal('voice.cancel') }).strict(),
+  z.object({ type: z.literal('voice.context'), context: clientContextSchema }).strict(),
+  z.object({ type: z.literal('speech.playback'), turnId: z.uuid(), playing: z.boolean() }).strict(),
   z.object({ type: z.literal('speech.request'), requestId: z.uuid(), turnId: z.uuid() }).strict(),
   z.object({ type: z.literal('speech.cancel') }).strict(),
   z.object({ type: z.literal('device.result'), actionId: z.uuid(), success: z.boolean(),
@@ -36,7 +39,17 @@ export function registerRealtime(app: FastifyInstance, deps: {
     for (const sockets of connections.values()) for (const socket of sockets) socket.close(1001, 'Server restarting');
   });
   app.get('/v1/realtime', { websocket: true, config: { public: true } }, (socket, request) => {
-    if (request.headers.origin && !config.corsOrigins.includes(request.headers.origin)) {
+    // SocketRocket/React Native supplies the API's own HTTP(S) origin even
+    // though this is a native client. Browser origins still require an exact
+    // allowlist match or the same origin as this request; never use '*'.
+    const origin = request.headers.origin;
+    let sameOrigin = false;
+    if (origin && request.headers.host) {
+      try { sameOrigin = origin === new URL(`${request.protocol}://${request.headers.host}`).origin; }
+      catch { /* Malformed origins/hosts do not bypass the allowlist. */ }
+    }
+    if (origin && !sameOrigin && !config.corsOrigins.includes(origin)) {
+      request.log.warn({ code: 'WS_ORIGIN_REJECTED' }, 'Realtime connection rejected');
       socket.close(1008, 'Origin is not allowed'); return;
     }
     let user: User | undefined;
@@ -69,7 +82,12 @@ export function registerRealtime(app: FastifyInstance, deps: {
     const requestedSpeech = new Set<string>();
     const starts: number[] = [];
     const finalTranscripts = new Map<number, string>();
+    const utteranceContexts = new Map<number, ClientContext | undefined>();
     const completedSpeech = new Set<number>();
+    const wordGate = new WordBargeInGate();
+    let latestSpeechTurn: number | undefined;
+    let spokenEcho = '';
+    let playbackTurnId: string | undefined;
 
     const send = (value: unknown) => {
       if (stopped || socket.readyState !== WebSocket.OPEN) return;
@@ -87,7 +105,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
       recognition?.close(); recognition = undefined;
       if (voiceTimer) clearTimeout(voiceTimer);
       if (voiceEndTimer) clearTimeout(voiceEndTimer);
-      starts.length = 0; finalTranscripts.clear(); completedSpeech.clear();
+      starts.length = 0; finalTranscripts.clear(); utteranceContexts.clear(); completedSpeech.clear(); wordGate.clear(); latestSpeechTurn = undefined;
     };
     const authTimeout = setTimeout(() => { if (!user) socket.close(1008, 'Authentication timed out'); }, 5000);
     const poll = setInterval(() => { void replay(); }, 250);
@@ -146,27 +164,39 @@ export function registerRealtime(app: FastifyInstance, deps: {
           if (starts.includes(event.turnId) || completedSpeech.has(event.turnId)) return;
           if (starts.length >= 8) throw new AppError(503, 'ASR_OVERFLOW', 'Too many unfinished speech turns. Please reconnect.');
           starts.push(event.turnId);
+          utteranceContexts.set(event.turnId, voiceContext ? { ...voiceContext } : undefined);
+          latestSpeechTurn = event.turnId; wordGate.start(event.turnId, spokenEcho);
+        }
+        const speechId = event.type === 'speechComplete' ? event.turnId : event.type === 'transcript' ? latestSpeechTurn : undefined;
+        if (speechId !== undefined && (event.type === 'transcript' || event.type === 'speechComplete')
+          && wordGate.observe(speechId, event.transcript, event.type === 'speechComplete' || event.final, Date.now())) {
+          // VAD/speechStart alone never stops Mia. Cancel only after the
+          // recognizer confirms a stable word or a final lexical utterance.
           cancelSpeech();
-          await assistant.interrupt(user.id, sessionId, signal, 'speech');
+          send({ type: 'voice.interruption', requestId: id, speechTurnId: speechId, clientTurnId: speechTurnId(id, speechId) });
+          const interrupted = await assistant.interrupt(user.id, sessionId, signal, 'speech');
+          voiceGeneration = interrupted.generation;
         }
         throwIfAborted(signal);
         send({ type: 'voice.event', requestId: id, event });
         if (event.type !== 'speechComplete' || completedSpeech.has(event.turnId)) return;
         if (!starts.includes(event.turnId)) throw new AppError(503, 'INVALID_SPEECH_TURN', 'The speech turn has no start event.');
-        finalTranscripts.set(event.turnId, event.transcript.trim());
+        finalTranscripts.set(event.turnId, wordGate.meaningful(event.turnId, event.transcript) ? event.transcript.trim() : '');
+        wordGate.finish(event.turnId);
         if (starts.some((turnId) => !finalTranscripts.has(turnId))) return;
         const transcripts: string[] = [];
         let lastTurnId = event.turnId;
+        let utteranceContext = utteranceContexts.get(lastTurnId);
         while (starts.length && finalTranscripts.has(starts[0]!)) {
           const turnId = starts.shift()!;
           const text = finalTranscripts.get(turnId)!;
           finalTranscripts.delete(turnId); completedSpeech.add(turnId);
           if (completedSpeech.size > 256) throw new AppError(503, 'VOICE_SESSION_LIMIT', 'Start a new speech session.');
           if (text) transcripts.push(text);
-          lastTurnId = turnId;
+          lastTurnId = turnId; utteranceContext = utteranceContexts.get(turnId); utteranceContexts.delete(turnId);
         }
         if (transcripts.length) {
-          const result = await assistant.submit(user.id, sessionId, speechTurnId(id, lastTurnId), transcripts.join(' '), signal, voiceContext);
+          const result = await assistant.submit(user.id, sessionId, speechTurnId(id, lastTurnId), transcripts.join(' '), signal, utteranceContext);
           send({ type: 'turn.accepted', ...result });
         }
       }).catch((error: unknown) => { if (!signal.aborted) { failure(error); cancelVoice(); } });
@@ -184,6 +214,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
         if (turn.status !== 'completed' || !turn.assistantText || turn.generation !== session.generation) {
           throw new AppError(409, 'STALE_SPEECH', 'This response is not current.');
         }
+        spokenEcho = turn.assistantText; playbackTurnId = turn.id;
         synthesisGeneration = turn.generation;
         send({ type: 'speech.started', requestId, turnId, format: 'pcm_s16le', sampleRate: 24000, channels: 1 });
         let sequence = 0;
@@ -225,7 +256,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
           const [latest] = await db.query<{ id: string }>('SELECT COALESCE(max(id),0)::text AS id FROM events WHERE user_id = $1', [user.id]);
           cursor = BigInt(frame.after) > BigInt(latest!.id) ? '0' : frame.after;
           clearTimeout(authTimeout);
-          send({ type: 'ready', sessionId, after: cursor, protocolVersion: 1 });
+          send({ type: 'ready', sessionId, after: cursor, replayThrough: latest!.id, protocolVersion: 1 });
           await replay();
         } catch (error) { failure(error); cleanup(); socket.close(1008, 'Authentication failed'); }
         finally { authenticating = false; }
@@ -242,6 +273,11 @@ export function registerRealtime(app: FastifyInstance, deps: {
         send({ type: 'assistant.stopped', ...await assistant.interrupt(user.id, sessionId) });
       } else if (frame.type === 'voice.cancel') {
         cancelVoice(); send({ type: 'voice.cancelled' });
+      } else if (frame.type === 'voice.context') {
+        await assertContextAccess(db, user.id, frame.context);
+        voiceContext = frame.context;
+      } else if (frame.type === 'speech.playback') {
+        if (!frame.playing && playbackTurnId === frame.turnId) { spokenEcho = ''; playbackTurnId = undefined; }
       } else if (frame.type === 'voice.end') {
         recognition?.end();
         voiceEndTimer = setTimeout(() => { cancelVoice(); send({ type: 'voice.closed' }); }, 10_000);
@@ -260,7 +296,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
             AbortSignal.any([controller.signal, lifetime.signal]));
           if (stopped || recognitionId !== frame.requestId) { stream.close(); return; }
           recognition = stream; voiceStartedAt = Date.now(); receivedBytes = 0;
-          voiceTimer = setTimeout(() => { cancelVoice(); send({ type: 'voice.closed' }); }, 300_000);
+          voiceTimer = setTimeout(() => { const requestId = recognitionId; cancelVoice(); send({ type: 'voice.closed', requestId }); }, 300_000);
           send({ type: 'voice.ready', requestId: frame.requestId, sampleRate: 24000, format: 'pcm_s16le' });
         } catch (error) {
           const cancelled = controller.signal.aborted;

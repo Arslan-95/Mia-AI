@@ -4,7 +4,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { useMia, type Tab } from './useMia';
 import { Auth, CompleteProfile } from './screens/Auth';
 import { Chats } from './screens/Chats';
-import { Assistant } from './screens/Assistant';
+import { AssistantOrb } from './screens/AssistantOrb';
 import { People } from './screens/People';
 import { Drafts } from './screens/Drafts';
 import { Settings } from './screens/Settings';
@@ -13,7 +13,6 @@ import { Button, Icon, Notice, colors, s } from './ui';
 
 const tabs: { id: Tab; label: string; icon: React.ComponentProps<typeof Icon>['name'] }[] = [
   { id: 'chats', label: 'Chats', icon: 'chatbubbles-outline' },
-  { id: 'mia', label: 'Mia', icon: 'sparkles-outline' },
   { id: 'people', label: 'People', icon: 'people-outline' },
   { id: 'drafts', label: 'Drafts', icon: 'document-text-outline' },
   { id: 'settings', label: 'Settings', icon: 'options-outline' },
@@ -54,7 +53,6 @@ function Application() {
 
             <View style={app.fill}>
               {mia.tab === 'chats' ? <Chats mia={mia} />
-                : mia.tab === 'mia' ? <Assistant mia={mia} />
                 : mia.tab === 'people' ? <People mia={mia} />
                 : mia.tab === 'drafts' ? <Drafts mia={mia} />
                 : <Settings mia={mia} />}
@@ -63,14 +61,16 @@ function Application() {
             <AudioControls mia={mia} elapsed={elapsed} />
 
             <View style={app.tabs}>
-              {tabs.map(item => (
-                <Nav
-                  key={item.id}
-                  item={item}
-                  selected={mia.tab === item.id}
-                  onPress={() => void mia.navigate(item.id)}
-                  count={item.id === 'drafts' ? mia.drafts.length : item.id === 'chats' ? mia.chats.reduce((total, chat) => total + chat.unreadCount, 0) : 0}
-                />
+              {tabs.map((item, index) => (
+                <React.Fragment key={item.id}>
+                  {index === 2 && <AssistantOrb mia={mia} />}
+                  <Nav
+                    item={item}
+                    selected={mia.tab === item.id}
+                    onPress={() => void mia.navigate(item.id)}
+                    count={item.id === 'drafts' ? mia.drafts.length : item.id === 'chats' ? mia.chats.reduce((total, chat) => total + chat.unreadCount, 0) : 0}
+                  />
+                </React.Fragment>
               ))}
             </View>
           </View>
@@ -108,7 +108,7 @@ const app = StyleSheet.create({
   fill: { flex: 1, minWidth: 0 },
   loading: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16 },
   error: { paddingHorizontal: 20, paddingTop: 10 },
-  tabs: { flexDirection: 'row', borderTopWidth: 1, borderTopColor: colors.line, paddingHorizontal: 8, paddingVertical: 6, backgroundColor: colors.background },
+  tabs: { flexDirection: 'row', alignItems: 'center', borderTopWidth: 1, borderTopColor: colors.line, paddingHorizontal: 6, paddingVertical: 4, backgroundColor: colors.background },
   nav: { flex: 1, minWidth: 0, alignItems: 'center', justifyContent: 'center', gap: 5, minHeight: 58, paddingVertical: 8, borderRadius: 12 },
   selectedNav: { backgroundColor: colors.soft },
   navLabel: { fontSize: 12, textAlign: 'center' },

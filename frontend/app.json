@@ -10,7 +10,8 @@
       "supportsTablet": false,
       "bundleIdentifier": "app.mia.messenger",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Record a voice note or speak a request to Mia, only when you choose."
+        "NSMicrophoneUsageDescription": "Record a voice note or speak a request to Mia, only when you choose.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "plugins": [
@@ -28,6 +29,12 @@
     ],
     "platforms": [
       "ios"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "4e9da75b-6212-4954-9933-3149997c7f8c"
+      }
+    },
+    "owner": "s_arslan"
   }
 }

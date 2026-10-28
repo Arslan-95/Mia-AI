@@ -41,8 +41,8 @@ export function registerMessagingRoutes(app: FastifyInstance, deps: {
     const input = z.object({ username, displayName: z.string().trim().min(1).max(80) }).strict().parse(request.body);
     return auth.updateProfile(request.user.id, input.username, input.displayName);
   });
-  app.get('/v1/users', async (request) => {
-    const { query } = z.object({ query: z.string().trim().min(2).max(30) }).parse(request.query);
+  app.get('/v1/users', { preHandler: app.rateLimit({ max: 30, timeWindow: '1 minute' }) }, async (request) => {
+    const { query } = z.object({ query: z.string().trim().min(2).max(50) }).parse(request.query);
     return messaging.searchUsers(request.user.id, query);
   });
   app.get('/v1/contacts', async (request) => {

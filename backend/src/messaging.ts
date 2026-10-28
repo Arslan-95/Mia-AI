@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Database, Sql } from './db/database.js';
 import { AppError, conflict, notFound, throwIfAborted } from './errors.js';
 import { publish } from './events.js';
+import { isPhoneSearch, normalizePhoneSearch } from './phone.js';
 
 export type Profile = { id: string; username: string; displayName: string };
 export type Contact = Profile & { contactId: string; name: string };
@@ -22,16 +23,23 @@ export class MessagingService {
   constructor(private readonly db: Database) {}
 
   async searchUsers(ownerId: string, query: string) {
+    if (isPhoneSearch(query)) {
+      return this.db.query<Profile>(`SELECT id, username, display_name AS "displayName" FROM users
+        WHERE id <> $1 AND profile_complete = true AND phone_number = $2 LIMIT 1`,
+      [ownerId, normalizePhoneSearch(query)]);
+    }
     return this.db.query<Profile>(`SELECT id, username, display_name AS "displayName" FROM users
-      WHERE id <> $1 AND username LIKE $2 ESCAPE '\\' ORDER BY username LIMIT 20`,
-    [ownerId, `${escapeLike(query.toLowerCase())}%`]);
+      WHERE id <> $1 AND profile_complete = true AND username LIKE $2 ESCAPE '\\' ORDER BY username LIMIT 20`,
+    [ownerId, `${escapeLike(query.trim().replace(/^@/, '').toLowerCase())}%`]);
   }
 
   async contacts(ownerId: string, query = '') {
+    const phone = isPhoneSearch(query) ? normalizePhoneSearch(query) : null;
     return this.db.query<Contact>(`SELECT u.id, u.username, u.display_name AS "displayName", c.id AS "contactId", c.name
       FROM contacts c JOIN users u ON u.id = c.user_id WHERE c.owner_id = $1
-      AND (c.name ILIKE $2 ESCAPE '\\' OR u.username ILIKE $2 ESCAPE '\\' OR u.display_name ILIKE $2 ESCAPE '\\')
-      ORDER BY c.name, c.id LIMIT 50`, [ownerId, `%${escapeLike(query)}%`]);
+      AND (($3::text IS NOT NULL AND u.phone_number = $3) OR ($3::text IS NULL
+        AND (c.name ILIKE $2 ESCAPE '\\' OR u.username ILIKE $2 ESCAPE '\\' OR u.display_name ILIKE $2 ESCAPE '\\')))
+      ORDER BY c.name, c.id LIMIT 50`, [ownerId, `%${escapeLike(query)}%`, phone]);
   }
 
   async addContact(ownerId: string, userId: string, name?: string) {

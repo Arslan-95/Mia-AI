@@ -24,19 +24,19 @@ export function AudioControls({ mia, elapsed }: { mia: Mia; elapsed: number }) {
         </View>
       ) : mia.recording ? (
         <View style={a.recording}>
-          <Text style={s.label}>{mia.recordPurpose === 'assistant' ? 'Review your spoken request' : 'Your voice note is ready'}</Text>
-          <Text style={s.small}>{Math.max(1, Math.round(mia.recording.durationMs / 1000))} seconds · {mia.recordPurpose === 'assistant' ? 'Review the words before asking Mia.' : 'Preview before sending.'}</Text>
+          <Text style={s.label}>Your voice note is ready</Text>
+          <Text style={s.small}>{Math.max(1, Math.round(mia.recording.durationMs / 1000))} seconds · Preview before sending.</Text>
           <View style={a.actions}>
             <Button secondary label="Preview" icon="play-outline" onPress={() => void mia.preview().catch(mia.fail)} />
-            <Button label={mia.recordPurpose === 'assistant' ? 'Review request' : 'Send voice note'} loading={mia.busy} onPress={() => void mia.useRecording().catch(mia.fail)} />
+            <Button label="Send voice note" loading={mia.busy} onPress={() => void mia.useRecording().catch(mia.fail)} />
             <Button quiet label="Discard recording" onPress={() => void mia.discardRecording().catch(mia.fail)} />
           </View>
         </View>
       ) : null}
-      {(mia.audioState === 'playing' || mia.audioState === 'loading' || mia.voiceMode) && mia.audioState !== 'recording' && (
+      {(mia.audioState === 'playing' || mia.audioState === 'loading') && mia.voicePhase !== 'speaking' && (
         <View style={a.audio}>
           <Text style={[s.small, a.description]}>{mia.audioState === 'loading' ? 'Preparing audio…' : mia.audioState === 'playing' ? 'Playing' : 'Ready when you are'}</Text>
-          <Button secondary label="Stop audio" icon="stop-outline" disabled={mia.audioState === 'idle'} onPress={() => void mia.stopAudio().catch(mia.fail)} />
+          <Button secondary label="Stop audio" icon="stop-outline" onPress={() => void mia.stopAudio().catch(mia.fail)} />
         </View>
       )}
     </>

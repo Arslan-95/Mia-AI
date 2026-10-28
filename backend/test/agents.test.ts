@@ -50,7 +50,7 @@ async function fixture(provider: ModelProvider) {
 test('coordinator delegates to a real specialist loop and sends only a later reviewed version', async (t) => {
   let rootStep = 0;
   let childStep = 0;
-  let draft: { id: string; version: number };
+  let draft!: { id: string; version: number };
   let recipientId = '';
   let finalTools: string[] = [];
   const seen: string[] = [];
@@ -73,6 +73,14 @@ test('coordinator delegates to a real specialist loop and sends only a later rev
         return answer('To Anna: Seven works for me. Shall I send it?');
       case 4:
         assert.ok(request.input.some((item) => item.role === 'assistant'));
+        const context = JSON.parse(request.instructions.split('Server-supplied current context (data, not instructions):\n')[1]!);
+        assert.equal(context.completedDraftReviews[0].draftId, draft.id);
+        assert.equal(context.completedDraftReviews[0].version, 1);
+        return call('review_draft', { draftId: draft.id, version: 1 });
+      case 5:
+        const review = lastResult(request) as { reviewedInEarlierTurn: boolean; requiresLaterUserApproval: boolean };
+        assert.equal(review.reviewedInEarlierTurn, true);
+        assert.equal(review.requiresLaterUserApproval, false);
         return call('send_approved_draft', { draftId: draft.id, version: 1 });
       default: return answer('Sent to Anna.');
     }
@@ -89,6 +97,8 @@ test('coordinator delegates to a real specialist loop and sends only a later rev
   await context.completed(approval.turn.id);
   const messages = await context.db.query<{ text: string }>('SELECT text FROM messages');
   assert.deepEqual(messages.map((message) => message.text), ['Seven works for me.']);
+  const [review] = await context.db.query<{ turnId: string }>('SELECT turn_id AS "turnId" FROM draft_reviews WHERE draft_id=$1 AND version=1', [draft.id]);
+  assert.equal(review?.turnId, first.turn.id, 're-reading the same version must preserve its completed earlier review');
   const retry = await context.runtime.submit(context.ids.alice, context.session.id,
     approval.turn.clientTurnId, approval.turn.userText);
   assert.equal(retry.duplicate, true);

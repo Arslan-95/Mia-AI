@@ -1,7 +1,7 @@
 import type { ClientContext } from './types';
 
-export type View = 'chats' | 'mia' | 'people' | 'settings' | 'drafts';
-const routes: Record<View, string> = { chats: '/chats', mia: '/mia', people: '/contacts', settings: '/settings', drafts: '/drafts' };
+export type View = 'chats' | 'people' | 'settings' | 'drafts';
+const routes: Record<View, string> = { chats: '/chats', people: '/contacts', settings: '/settings', drafts: '/drafts' };
 export function viewRoute(view: View, chatId: string | null = null) {
   return view === 'chats' && chatId ? `/chat/${chatId}` : routes[view];
 }

@@ -2,21 +2,40 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AccessibilityInfo, AppState } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { Api, ApiError } from './api';
-import { CancelledError, UserFacingError, userErrorMessage } from './errors';
+import { CancelledError, UserFacingError, VoiceCaptureUnavailable, userErrorMessage } from './errors';
 import { AssistantControl } from './assistantControl';
 import { NavigationContext, sameContext, viewRoute } from './navigationContext';
 import { preferences, sessionStorage } from './storage';
 import { Realtime, type Frame } from './realtime';
 import { PresentationLease, isLiveAction, mergeMessages } from './coordination';
 import { Engine } from './audio/engine';
+import { DuplexAudio } from './audio/duplex';
 import { concatBytes } from './audio/wav';
+import { VoiceConversation, checkVoice, voiceDelay, type VoicePhase, type VoiceRuntime } from './voiceConversation';
 import type { Recording } from './audio/types';
-import type { AssistantRequest, AssistantSession, Capabilities, Chat, ClientContext, Contact, Content, DeviceAction, Draft, Message, OtpChallenge, PendingMessage, Profile, ServerEvent, Session, Turn, User } from './types';
-export type Tab = 'chats' | 'mia' | 'people' | 'settings' | 'drafts';
+import type { AssistantSession, Capabilities, Chat, ClientContext, Contact, DeviceAction, Draft, Message, OtpChallenge, PendingMessage, Profile, ServerEvent, Session, Turn, User } from './types';
+export type Tab = 'chats' | 'people' | 'settings' | 'drafts';
 const address = (process.env.EXPO_PUBLIC_API_URL ?? '').trim().replace(/\/+$/, '');
 export function useMia() {
   const [booting, setBooting] = useState(true); const [session, setSession] = useState<Session | null>(null);
-  const [voiceMode, setVoiceMode] = useState(false);
+  const [aiMode, setAiMode] = useState(false);
+  const [voicePhase, setVoicePhase] = useState<VoicePhase>('off');
+  const [voiceFault, setVoiceFault] = useState(false);
+  const [voiceRecoverable, setVoiceRecoverable] = useState(false);
+  const [realtimeReady, setRealtimeReady] = useState(false);
+  const recoveryBarrier = useRef<Promise<unknown>>(Promise.resolve());
+  const voiceFailureMessage = useRef('');
+  const [inForeground, setInForeground] = useState(AppState.currentState !== 'background' && AppState.currentState !== 'inactive');
+  const [manualAudio, setManualAudio] = useState(false);
+  const [voiceRevision, setVoiceRevision] = useState(0);
+  const conversation = useRef(new VoiceConversation()).current;
+  const duplex = useRef(new DuplexAudio(() => audio.current!.stop())).current;
+  const nativeStream = useRef<string | null>(null);
+  const nativeCandidate = useRef<string | null>(null);
+  const nativeResponse = useRef<AbortController | null>(null);
+  const nativeCapture = useRef<string | null>(null);
+  const nativePCM = useRef<{ parts: Uint8Array[]; bytes: number }>({ parts: [], bytes: 0 });
+  const aiModeRef = useRef(false);
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Tab>('chats');
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
@@ -25,31 +44,34 @@ export function useMia() {
   const [hasOlder, setHasOlder] = useState<Record<string, boolean>>({}); const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [composers, setComposers] = useState<Record<string, string>>({}); const [pending, setPending] = useState<PendingMessage[]>([]);
   const [assistantSession, setAssistantSession] = useState<AssistantSession | null>(null); const [turns, setTurns] = useState<Turn[]>([]);
-  const [assistantText, setAssistantText] = useState(''); const [assistantRetry, setAssistantRetry] = useState<AssistantRequest | null>(null);
   const [audioState, setAudioState] = useState<'idle' | 'recording' | 'loading' | 'playing'>('idle');
-  const [recording, setRecording] = useState<Recording | null>(null); const [recordPurpose, setRecordPurpose] = useState<'note' | 'assistant'>('note');
+  const [recording, setRecording] = useState<Recording | null>(null);
   const [recordChatId, setRecordChatId] = useState<string | null>(null); const [devicePrompt, setDevicePrompt] = useState<DeviceAction | null>(null);
   const lease = useRef(new PresentationLease()).current; const audio = useRef<Engine | null>(null); if (!audio.current) audio.current = new Engine();
   const assistantControl = useRef(new AssistantControl()).current;
   const navigation = useRef(new NavigationContext()).current;
   const requestContext = useRef<ClientContext | null>(null);
-  const socket = useRef<Realtime | null>(null); const state = useRef({ session, activeChatId, tab, assistantSession, chats, devicePrompt });
-  state.current = { session, activeChatId, tab, assistantSession, chats, devicePrompt };
-  const foreground = useRef(true); const authEpoch = useRef(0); const stopRef = useRef<() => Promise<void>>(async () => {});
+  const socket = useRef<Realtime | null>(null); const state = useRef({ session, activeChatId, tab, assistantSession, chats, devicePrompt, audioState, voicePhase });
+  state.current = { session, activeChatId, tab, assistantSession, chats, devicePrompt, audioState, voicePhase };
+  const foreground = useRef(inForeground); const authEpoch = useRef(0); const stopRef = useRef<() => Promise<void>>(async () => {});
   const identityRevision = useRef(0);
   const startingDeviceRecording = useRef<string | null>(null);
+  const deviceTasks = useRef(new Map<string, Promise<void>>()).current;
+  const nativeConnectTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const fail = useCallback((reason: unknown) => { const message = userErrorMessage(reason); if (message) setError(message); }, []);
   const api = useMemo(() => new Api(address, session, () => { void clearSession(); }), [address, session]);
   async function clearSession() {
+    void conversation.stop(); await stopNativeVoice();
+    setManualAudio(false); setVoiceFault(false); setVoiceRecoverable(false); setRealtimeReady(false);
     navigation.reset(); requestContext.current = null; setTab('chats');
     authEpoch.current++; lease.revoke(); socket.current?.dispose(); await audio.current!.stop();
-    await sessionStorage.write(null).catch(fail); setSession(null); setChats([]); setContacts([]); setDrafts([]); setMessages({}); setTurns([]); setPending([]); setComposers({}); setActiveChatId(null); setAssistantSession(null); setAssistantRetry(null); setAssistantText(''); setDevicePrompt(null); setAudioState('idle');
+    await sessionStorage.write(null).catch(fail); setSession(null); setChats([]); setContacts([]); setDrafts([]); setMessages({}); setTurns([]); setPending([]); setComposers({}); setActiveChatId(null); setAssistantSession(null); setDevicePrompt(null); setAudioState('idle');
     if (recording) await audio.current!.disposeRecording(recording); setRecording(null);
   }
   useEffect(() => { void (async () => {
     try {
-      const [stored, mode] = await Promise.all([sessionStorage.read(), preferences.get('mia.voice')]);
-      setVoiceMode(mode === 'true'); setSession(stored);
+      const [stored, mode] = await Promise.all([sessionStorage.read(), preferences.get('mia.ai_mode')]);
+      aiModeRef.current = mode === 'true'; setAiMode(aiModeRef.current); setSession(stored);
     } catch (reason) { fail(reason); } finally { setBooting(false); }
   })(); }, []);
   async function checkHealth() {
@@ -80,13 +102,13 @@ export function useMia() {
     setHasOlder(previous => ({ ...previous, [chatId]: list.length === 30 }));
     if (!before && foreground.current && state.current.activeChatId === chatId && state.current.tab === 'chats' && list[0]) await api.request(`/v1/chats/${chatId}/read`, 'POST', { messageId: list[0].id });
   }
-  async function syncAssistant() {
+  async function syncAssistant(signal?: AbortSignal) {
     const current = state.current.assistantSession; if (!current) return;
     const epoch = authEpoch.current;
-    const result = await api.request<{ turns: Turn[] }>(`/v1/assistant/sessions/${current.id}`);
+    const result = await api.request<{ turns: Turn[] }>(`/v1/assistant/sessions/${current.id}`, 'GET', undefined, signal);
     if (epoch === authEpoch.current) setTurns(result.turns);
   }
-  const handlers = useRef({ onEvent: async (_: ServerEvent, __: number) => {}, onFrame: (_: Frame) => {} });
+  const handlers = useRef({ onEvent: async (_: ServerEvent, __: number, _replayed?: boolean) => {}, onFrame: (_: Frame) => {} });
   useEffect(() => {
     if (!session || booting) return;
     const epoch = authEpoch.current; const revision = identityRevision.current; let cancelled = false;
@@ -110,34 +132,79 @@ export function useMia() {
         setAssistantSession(current); setTurns(history.turns);
       } catch (reason) { if (!cancelled) fail(reason); }
     })();
-    const realtime = new Realtime(address, session, (event, time) => handlers.current.onEvent(event, time), frame => handlers.current.onFrame(frame), () => {}, preferences);
+    setRealtimeReady(false);
+    let snapshot = Promise.resolve<unknown>(undefined);
+    const realtime = new Realtime(address, session, async (event, time, replayed) => {
+      // Do not acknowledge replayed events until the replacement snapshot has
+      // loaded. A failed snapshot can then reconnect without losing updates.
+      await snapshot;
+      await handlers.current.onEvent(event, time, replayed);
+    }, frame => handlers.current.onFrame(frame), status => {
+      if (cancelled) return;
+      setRealtimeReady(status === 'Connected');
+      if (status === 'Connected') {
+        // Refresh one current snapshot instead of issuing REST requests for
+        // every historical event replayed after a reconnect.
+        snapshot = Promise.all([refresh(), syncAssistant(), state.current.activeChatId ? loadMessages(state.current.activeChatId) : Promise.resolve()]);
+        void snapshot.catch(fail);
+      }
+    }, preferences);
     socket.current = realtime; void realtime.connect();
-    return () => { cancelled = true; realtime.dispose(); lease.revoke(); void audio.current!.stop(); };
+    return () => { cancelled = true; realtime.dispose(); lease.revoke(); void stopRef.current().catch(fail); };
   }, [session?.token, session?.user.profileComplete, address, booting]);
-  const speech = useRef<{ requestId: string; turnId: string; epoch: number; parts: Uint8Array[]; bytes: number } | null>(null);
+  const speech = useRef<{ requestId: string; turnId: string; epoch: number; parts: Uint8Array[]; bytes: number; settle(error?: unknown): void } | null>(null);
+  async function stopNativeVoice() {
+    clearTimeout(nativeConnectTimeout.current); nativeConnectTimeout.current = undefined;
+    nativeResponse.current?.abort(); nativeResponse.current = null;
+    if (nativeStream.current) socket.current?.send({ type: 'voice.cancel' });
+    nativeStream.current = null; nativeCandidate.current = null; nativeCapture.current = null;
+    nativePCM.current = { parts: [], bytes: 0 };
+    await duplex.stop();
+  }
+  function idleNativePhase(): VoicePhase {
+    return duplex.hasInput && nativeStream.current !== null && nativeCapture.current === nativeStream.current ? 'listening' : 'waiting';
+  }
+  function startNativeRecognition(id: string) {
+    clearTimeout(nativeConnectTimeout.current);
+    nativeStream.current = id; nativeCapture.current = null;
+    if (!socket.current?.send({ type: 'voice.start', requestId: id, sampleRate: 24000, format: 'pcm_s16le', context: navigation.snapshot() })) {
+      handleVoiceFailure(new ApiError(0, 'OFFLINE', '')); return;
+    }
+    nativeConnectTimeout.current = setTimeout(() => {
+      if (nativeStream.current === id && nativeCapture.current !== id) handleVoiceFailure(new ApiError(503, 'ASR_UNAVAILABLE', ''));
+    }, 15000);
+  }
   async function stopAudio() {
-    speech.current = null; socket.current?.send({ type: 'speech.cancel' }); socket.current?.send({ type: 'voice.cancel' });
-    await audio.current!.stop(); setAudioState('idle');
+    speech.current?.settle(new CancelledError()); speech.current = null; socket.current?.send({ type: 'speech.cancel' });
+    if (!nativeStream.current) socket.current?.send({ type: 'voice.cancel' });
+    await duplex.stopPlayback();
+    if (!duplex.ownsSession) await audio.current!.stop();
+    setAudioState('idle');
   }
   stopRef.current = stopAudio;
   useEffect(() => {
     const subscription = AppState.addEventListener('change', next => {
       foreground.current = next === 'active';
-      if (next !== 'active') { lease.revoke(); setDevicePrompt(null); void stopRef.current(); }
+      setInForeground(next === 'active');
+      if (next !== 'active') { void conversation.stop(); void stopNativeVoice(); lease.revoke(); setDevicePrompt(null); void stopRef.current(); }
     });
-    return () => { subscription.remove(); void audio.current!.stop(); };
+    return () => { subscription.remove(); void stopRef.current().catch(fail); };
   }, []);
   async function interrupt() {
+    const stopped = Promise.all([conversation.stop(), stopNativeVoice()]);
     lease.revoke(); requestContext.current = null; setDevicePrompt(null);
     const current = state.current.assistantSession;
-    await Promise.all([stopAudio(), current && state.current.session ? assistantControl.stop(api, current.id) : Promise.resolve()]);
+    try { await Promise.all([stopAudio(), stopped, current && state.current.session ? assistantControl.stop(api, current.id) : Promise.resolve()]); }
+    finally { if (!recording) setManualAudio(false); setVoiceRevision(value => value + 1); }
   }
   function setView(next: Tab, chatId: string | null = null) {
     navigation.move(viewRoute(next, chatId)); setTab(next); setActiveChatId(chatId);
+    if (nativeStream.current) socket.current?.send({ type: 'voice.context', context: navigation.snapshot() });
     state.current = { ...state.current, tab: next, activeChatId: chatId };
   }
   async function navigate(next: Tab, chatId: string | null = null) {
-    void interrupt().catch(fail); setView(next, chatId);
+    const stopped = interrupt(); setView(next, chatId);
+    await stopped.catch(fail);
     if (next === 'chats' && chatId) await loadMessages(chatId).catch(fail);
   }
   async function acknowledge(action: DeviceAction, success: boolean, result: { message?: string; mediaId?: string }) {
@@ -153,7 +220,7 @@ export function useMia() {
         const list = await api.request<Chat[]>('/v1/chats');
         if (!valid()) throw new Error('This device request is no longer current.');
         const chat = list.find(item => item.id === action.payload.chatId); if (!chat) throw new Error('The requested chat is unavailable.');
-        await stopAudio();
+        if (state.current.audioState === 'playing' || state.current.audioState === 'loading') await stopAudio();
         if (!valid()) throw new Error('This device request is no longer current.');
         setChats(list); setView('chats', chat.id);
         // Acknowledge after history is actually loaded for the visible chat.
@@ -161,22 +228,26 @@ export function useMia() {
         if (!lease.current(epoch)) throw new Error('A newer conversation is active.');
         await acknowledge(action, true, { message: 'Chat opened.' });
       } else if (action.kind === 'stop_audio') {
-        await stopAudio(); await acknowledge(action, true, { message: 'Audio stopped on this device.' });
+        if (state.current.audioState === 'playing' || state.current.audioState === 'loading') await stopAudio();
+        await acknowledge(action, true, { message: 'Audio stopped on this device.' });
       } else if (action.kind === 'play_audio' && typeof action.payload.mediaId === 'string') {
         let acknowledged = false;
-        await playMedia(action.payload.mediaId, () => {
+        const captureActive = state.current.voicePhase === 'listening' || state.current.voicePhase === 'transcribing';
+        if (captureActive) { setManualAudio(true); await conversation.stop(); }
+        try { await playMedia(action.payload.mediaId, () => {
           if (valid()) {
             acknowledged = true;
             void acknowledge(action, true, { message: 'Playback started on this device.' }).catch(fail);
           }
-        }, valid);
+        }, valid); } finally { if (captureActive) setManualAudio(false); }
         if (!acknowledged) throw new Error('Playback did not start.');
       } else if (action.kind === 'record_voice') {
         setDevicePrompt(action);
       } else throw new Error('This device action is not supported.');
     } catch (reason) { await acknowledge(action, false, { message: userErrorMessage(reason) ?? 'The action was cancelled.' }).catch(fail); }
   }
-  handlers.current.onEvent = async (event, connectedAt) => {
+  handlers.current.onEvent = async (event, connectedAt, replayed) => {
+    if (replayed) return;
     const p = event.payload;
     if (event.type === 'message.created') {
       const message = p as unknown as Message;
@@ -194,23 +265,92 @@ export function useMia() {
       if (event.type === 'assistant.failed' && lease.owns(p.turnId)) setError('Mia could not finish that request. Your drafts are still saved.');
     }
     if (event.type === 'device.action_cancelled' && state.current.devicePrompt?.actionId === p.actionId) setDevicePrompt(null);
-    if (event.type === 'device.action_requested' && isLiveAction(event, connectedAt) && foreground.current && lease.owns(p.turnId)) void performAction({ ...p, createdAt: event.createdAt } as DeviceAction);
+    if (event.type === 'device.action_requested' && isLiveAction(event, connectedAt) && foreground.current && lease.owns(p.turnId)) {
+      const id = String(p.actionId);
+      const task = performAction({ ...p, createdAt: event.createdAt } as DeviceAction).finally(() => deviceTasks.delete(id));
+      deviceTasks.set(id, task);
+    }
   };
   handlers.current.onFrame = frame => {
+    if (nativeStream.current && frame.type === 'voice.ready' && frame.requestId === nativeStream.current) {
+      const id = nativeStream.current;
+      if (nativeCapture.current === id) return;
+      clearTimeout(nativeConnectTimeout.current); nativeConnectTimeout.current = undefined;
+      nativeCapture.current = id;
+      if (duplex.active) {
+        for (const part of nativePCM.current.parts) if (!socket.current?.sendAudio(part)) { handleVoiceFailure(new ApiError(0, 'OFFLINE', '')); break; }
+        nativePCM.current = { parts: [], bytes: 0 };
+        if (nativeStream.current === id && state.current.voicePhase === 'waiting') setVoicePhase(idleNativePhase());
+        return;
+      }
+      void duplex.start(bytes => {
+        if (!nativeStream.current) return;
+        if (nativeCapture.current !== nativeStream.current) {
+          nativePCM.current.parts.push(bytes); nativePCM.current.bytes += bytes.length;
+          while (nativePCM.current.bytes > 72000) nativePCM.current.bytes -= nativePCM.current.parts.shift()!.length;
+        } else {
+          if (!socket.current?.sendAudio(bytes)) { handleVoiceFailure(new ApiError(0, 'OFFLINE', '')); return; }
+          if (state.current.voicePhase === 'waiting') setVoicePhase('listening');
+        }
+      }, () => { if (nativeStream.current) setVoiceRevision(value => value + 1); }, reason => {
+        if (nativeStream.current) handleVoiceFailure(reason);
+      }).catch(reason => {
+        if (nativeStream.current && !(reason instanceof CancelledError)) handleVoiceFailure(reason);
+      });
+      return;
+    }
+    if (nativeStream.current && frame.type === 'voice.interruption' && frame.requestId === nativeStream.current && typeof frame.clientTurnId === 'string') {
+      nativeResponse.current?.abort(); nativeResponse.current = null;
+      nativeCandidate.current = frame.clientTurnId;
+      lease.begin(frame.clientTurnId); requestContext.current = navigation.snapshot(); setDevicePrompt(null);
+      void stopAudio().catch(fail); setVoicePhase(idleNativePhase());
+      return;
+    }
+    if (nativeStream.current && frame.type === 'turn.accepted') {
+      const turn = frame.turn as Turn;
+      if (turn?.clientTurnId !== nativeCandidate.current) return;
+      lease.accept(turn.clientTurnId, turn.id); requestContext.current = turn.context ?? navigation.snapshot();
+      nativeResponse.current?.abort(); const controller = nativeResponse.current = new AbortController();
+      setVoicePhase('thinking');
+      void respondToTurn(turn, controller.signal).then(() => {
+        if (nativeResponse.current === controller && !controller.signal.aborted) setVoicePhase(idleNativePhase());
+      }).catch(reason => { if (!controller.signal.aborted && !(reason instanceof CancelledError)) handleVoiceFailure(reason); });
+      return;
+    }
+    if (nativeStream.current && ['voice.failed', 'voice.closed'].includes(String(frame.type))) {
+      if (frame.requestId && frame.requestId !== nativeStream.current) return;
+      if (frame.type === 'voice.closed') {
+        // ASR sessions expire periodically. Rotate recognition while retaining
+        // the AEC/capture graph, playback and up to 1.5 seconds of input.
+        if (state.current.voicePhase === 'listening') setVoicePhase('waiting');
+        startNativeRecognition(Crypto.randomUUID());
+      }
+      else handleVoiceFailure(new ApiError(503, 'ASR_UNAVAILABLE', ''));
+      return;
+    }
     const current = speech.current;
-    if (frame.type === 'error') { const error = frame.error as { code?: string }; fail(new ApiError(0, error?.code ?? 'REQUEST_FAILED', '')); }
+    if (frame.type === 'error') {
+      const error = frame.error as { code?: string };
+      const reason = new ApiError(0, error?.code ?? 'REQUEST_FAILED', '');
+      if (current && current.requestId === frame.requestId) current.settle(reason);
+      else if (nativeStream.current) handleVoiceFailure(reason); else fail(reason);
+    }
     if (!current || current.requestId !== frame.requestId || !lease.current(current.epoch)) return;
     if (frame.type === 'speech.chunk') {
-      if (frame.sequence !== current.parts.length) { void stopAudio(); fail(new Error('Speech arrived out of order. Try again.')); return; }
+      if (frame.sequence !== current.parts.length) { current.settle(new UserFacingError('Mia’s audio was interrupted. Tap Mia to try again.')); void stopAudio(); return; }
       const bytes = Uint8Array.from(atob(String(frame.audio)), c => c.charCodeAt(0));
       current.bytes += bytes.length;
-      if (current.bytes > 12000000) { void stopAudio(); fail(new Error('This spoken response is too long.')); return; }
+      if (current.bytes > 12000000) { current.settle(new UserFacingError('Mia’s spoken response was too long. Tap Mia to try again.')); void stopAudio(); return; }
       current.parts.push(bytes);
     } else if (frame.type === 'speech.completed') {
-      if (frame.chunks !== current.parts.length || frame.totalBytes !== current.bytes || !current.bytes) { void stopAudio(); fail(new Error('The spoken response was incomplete.')); return; }
+      if (frame.chunks !== current.parts.length || frame.totalBytes !== current.bytes || !current.bytes) { current.settle(new UserFacingError('Mia’s audio was incomplete. Tap Mia to try again.')); void stopAudio(); return; }
       setAudioState('playing');
-      void audio.current!.playPcm(concatBytes(current.parts)).catch(fail).finally(() => { if (speech.current === current) { speech.current = null; setAudioState('idle'); } });
-    } else if (frame.type === 'speech.failed' || frame.type === 'speech.cancelled') { speech.current = null; setAudioState('idle'); if (frame.type === 'speech.failed') setError('We could not play the response. You can still read it here.'); }
+      socket.current?.send({ type: 'speech.playback', turnId: current.turnId, playing: true });
+      const playback = duplex.active ? duplex.playPcm(concatBytes(current.parts), current.requestId) : audio.current!.playPcm(concatBytes(current.parts));
+      void playback.then(() => current.settle(), error => current.settle(error)).finally(() => {
+        socket.current?.send({ type: 'speech.playback', turnId: current.turnId, playing: false });
+      });
+    } else if (frame.type === 'speech.failed' || frame.type === 'speech.cancelled') { current.settle(frame.type === 'speech.failed' ? new ApiError(503, 'TTS_UNAVAILABLE', '') : new CancelledError()); }
   };
   async function requestOtp(phoneNumber: string) {
     return api.request<OtpChallenge>('/v1/auth/otp/request', 'POST', { phoneNumber });
@@ -230,8 +370,16 @@ export function useMia() {
     } catch (reason) { fail(reason); } finally { setBusy(false); }
   }
   async function logout() { try { await api.request('/v1/auth/logout', 'POST'); } finally { await clearSession(); } }
-  async function saveVoicePreference(voice: boolean) {
-    await preferences.set('mia.voice', String(voice)); setVoiceMode(voice);
+  async function saveAiMode(enabled: boolean) {
+    aiModeRef.current = enabled; setAiMode(enabled); setVoiceFault(false); setVoiceRecoverable(false); setError('');
+    if (!enabled) setVoicePhase('off');
+    await Promise.all([preferences.set('mia.ai_mode', String(enabled)), enabled ? Promise.resolve() : interrupt()]);
+  }
+  async function resumeAssistant() {
+    await recoveryBarrier.current;
+    setVoiceFault(false); setVoiceRecoverable(false); setError('');
+    await retryAssistant();
+    setVoiceRevision(value => value + 1);
   }
   async function startChat(profile: Profile, add = false) {
     if (add) await api.request('/v1/contacts', 'POST', { userId: profile.id });
@@ -262,75 +410,95 @@ export function useMia() {
     await api.request(`/v1/drafts/${draft.id}${action === 'review' || action === 'confirm' ? `/${action}` : ''}`, action === 'discard' ? 'DELETE' : action === 'edit' ? 'PATCH' : 'POST', { version: draft.version, ...(action === 'edit' ? { content: { kind: 'text', text } } : {}) });
     await refresh();
   }
-  async function submitAssistant(retry?: AssistantRequest) {
-    const text = retry?.text ?? assistantText.trim(); if (!assistantSession || !text) return;
-    if (retry && !sameContext(retry.context, navigation.snapshot())) { fail(new UserFacingError('You have moved to another conversation. Please ask Mia again.')); return; }
-    const item = retry ?? { text, clientTurnId: Crypto.randomUUID(), context: navigation.snapshot() };
-    lease.begin(item.clientTurnId); setDevicePrompt(null); setAssistantRetry(item); setAssistantText('');
+  async function submitAssistant(text: string, signal: AbortSignal) {
+    if (!assistantSession || !text.trim()) return;
+    checkVoice(signal);
+    const item = { text, clientTurnId: Crypto.randomUUID(), context: navigation.snapshot() };
+    lease.begin(item.clientTurnId); setDevicePrompt(null);
     requestContext.current = item.context;
     const epoch = lease.snapshot();
-    try {
-      await assistantControl.beforeTurn(api, assistantSession.id);
-      if (!lease.current(epoch)) return;
-      await stopAudio();
-      if (!lease.current(epoch)) return;
-      const response = await api.request<{ turn: Turn }>(`/v1/assistant/sessions/${assistantSession.id}/turns`, 'POST', item);
-      if (lease.current(epoch)) lease.accept(item.clientTurnId, response.turn.id);
-      if (lease.current(epoch)) setAssistantRetry(null); await syncAssistant();
-    } catch (reason) { if (lease.current(epoch)) fail(reason); }
+    await assistantControl.beforeTurn(api, assistantSession.id);
+    checkVoice(signal);
+    if (!lease.current(epoch)) return;
+    await stopAudio();
+    checkVoice(signal);
+    if (!lease.current(epoch)) return;
+    const response = await api.request<{ turn: Turn }>(`/v1/assistant/sessions/${assistantSession.id}/turns`, 'POST', item, signal);
+    checkVoice(signal);
+    if (lease.current(epoch)) lease.accept(item.clientTurnId, response.turn.id);
+    await syncAssistant(signal);
+    return response.turn;
   }
-  async function speak(turn: Turn) {
+  async function speak(turn: Turn, signal?: AbortSignal) {
     const epoch = lease.snapshot();
     await stopAudio();
+    if (signal) checkVoice(signal);
     if (!lease.current(epoch) || !foreground.current || turn.status !== 'completed') return;
     const requestId = Crypto.randomUUID();
-    speech.current = { requestId, turnId: turn.id, epoch, parts: [], bytes: 0 };
-    if (!socket.current?.send({ type: 'speech.request', requestId, turnId: turn.id })) { speech.current = null; throw new UserFacingError('Audio is unavailable right now. Please try again shortly.'); }
-    setAudioState('loading');
+    await new Promise<void>((resolve, reject) => {
+      const cancel = () => { void stopAudio(); };
+      const timer = setTimeout(() => {
+        current.settle(new UserFacingError('Mia’s audio did not finish. Tap Mia to try again.'));
+        void stopAudio();
+      }, 145000);
+      const current = { requestId, turnId: turn.id, epoch, parts: [] as Uint8Array[], bytes: 0,
+        settle(reason?: unknown) {
+          clearTimeout(timer); signal?.removeEventListener('abort', cancel);
+          if (speech.current === current) { speech.current = null; setAudioState('idle'); }
+          if (reason) reject(reason); else resolve();
+        },
+      };
+      speech.current = current;
+      signal?.addEventListener('abort', cancel, { once: true });
+      if (!socket.current?.send({ type: 'speech.request', requestId, turnId: turn.id })) current.settle(new ApiError(0, 'OFFLINE', ''));
+      else setAudioState('loading');
+    });
   }
   async function playMedia(mediaId: string, onStarted?: () => void, allowed = () => true) {
-    await stopAudio(); if (!allowed() || !foreground.current) throw new CancelledError(); setAudioState('playing');
-    try { await audio.current!.play(`${address}/v1/media/${mediaId}`, { Authorization: `Bearer ${session!.token}` }, onStarted); }
-    finally { setAudioState('idle'); }
-  }
-  async function startRecording(purpose: 'note' | 'assistant') {
-    const epoch = lease.snapshot();
-    await stopAudio();
-    if (await AccessibilityInfo.isScreenReaderEnabled()) {
-      // Explicit half duplex: no automatic spoken announcements while the microphone is open.
-      await new Promise(resolve => setTimeout(resolve, 350));
+    const pauseNative = duplex.ownsSession;
+    if (!onStarted || pauseNative) { setManualAudio(true); await Promise.all([conversation.stop(), stopNativeVoice()]); }
+    try {
+      await stopAudio(); if (!allowed() || !foreground.current) throw new CancelledError(); setAudioState('playing');
+      await audio.current!.play(`${address}/v1/media/${mediaId}`, { Authorization: `Bearer ${session!.token}` }, onStarted);
     }
-    if (!lease.current(epoch) || !foreground.current) throw new CancelledError();
-    await audio.current!.start();
-    if (!lease.current(epoch) || !foreground.current) { await stopAudio(); throw new CancelledError(); }
-    setRecordPurpose(purpose); setRecordChatId(activeChatId); setRecording(null); setAudioState('recording');
+    finally { setAudioState('idle'); if (!onStarted || pauseNative) setManualAudio(false); }
+  }
+  async function startRecording() {
+    setManualAudio(true); await Promise.all([conversation.stop(), stopNativeVoice()]);
+    const epoch = lease.snapshot();
+    try {
+      await stopAudio();
+      if (await AccessibilityInfo.isScreenReaderEnabled()) await new Promise(resolve => setTimeout(resolve, 350));
+      if (!lease.current(epoch) || !foreground.current) throw new CancelledError();
+      await audio.current!.start();
+      if (!lease.current(epoch) || !foreground.current) { await stopAudio(); throw new CancelledError(); }
+      setRecordChatId(activeChatId); setRecording(null); setAudioState('recording');
+    } catch (error) { setManualAudio(false); throw error; }
   }
   async function finishRecording() {
-    try { const result = await audio.current!.finish(); setRecording(result); } finally { setAudioState('idle'); }
+    try { const result = await audio.current!.finish(); setRecording(result); }
+    catch (reason) { setManualAudio(false); throw reason; }
+    finally { setAudioState('idle'); }
   }
-  async function uploadRecording(value: Recording) {
+  async function uploadRecording(value: Recording, signal?: AbortSignal) {
     const data = new FormData();
     data.append('file', { uri: value.uri, name: 'voice.wav', type: 'audio/wav' } as unknown as Blob);
-    return api.request<{ id: string }>('/v1/media', 'POST', data);
+    return api.request<{ id: string }>('/v1/media', 'POST', data, signal);
   }
   async function useRecording() {
     if (!recording) return;
-    const epoch = lease.snapshot(); const userEpoch = authEpoch.current;
+    const userEpoch = authEpoch.current;
     setBusy(true);
     try {
       const media = await uploadRecording(recording);
       if (userEpoch !== authEpoch.current) return;
-      if (recordPurpose === 'assistant') {
-        const result = await api.request<{ text: string }>('/v1/speech/transcriptions', 'POST', { mediaId: media.id });
-        if (userEpoch !== authEpoch.current) return;
-        setAssistantText(result.text); if (lease.current(epoch)) setView('mia');
-      } else if (recordChatId) await sendPending({ chatId: recordChatId, content: { kind: 'voice', mediaId: media.id }, clientMessageId: Crypto.randomUUID(), status: 'sending' });
-      await audio.current!.disposeRecording(recording); setRecording(null);
+      if (recordChatId) await sendPending({ chatId: recordChatId, content: { kind: 'voice', mediaId: media.id }, clientMessageId: Crypto.randomUUID(), status: 'sending' });
+      await audio.current!.disposeRecording(recording); setRecording(null); setManualAudio(false);
     } finally { setBusy(false); }
   }
-  async function discardRecording() { await stopAudio(); if (recording) await audio.current!.disposeRecording(recording); setRecording(null); }
+  async function discardRecording() { await stopAudio(); if (recording) await audio.current!.disposeRecording(recording); setRecording(null); setManualAudio(false); }
   async function preview() { if (!recording) return; await stopAudio(); setAudioState('playing'); try { await audio.current!.play(recording.uri); } finally { setAudioState('idle'); } }
-  async function declineDevice() { const action = devicePrompt; setDevicePrompt(null); if (action && startingDeviceRecording.current === action.actionId) { startingDeviceRecording.current = null; await stopAudio(); } if (action) await acknowledge(action, false, { message: 'The user declined this recording request.' }); }
+  async function declineDevice() { const action = devicePrompt; setDevicePrompt(null); if (action && startingDeviceRecording.current === action.actionId) { startingDeviceRecording.current = null; await stopAudio(); setManualAudio(false); } if (action) await acknowledge(action, false, { message: 'The user declined this recording request.' }); }
   async function acceptDeviceRecording() {
     const action = devicePrompt; if (!action || !lease.owns(action.turnId) || !sameContext(action.context ?? null, requestContext.current) || startingDeviceRecording.current) return;
     startingDeviceRecording.current = action.actionId;
@@ -342,19 +510,131 @@ export function useMia() {
       const chat = await api.request<{ id: string }>('/v1/chats', 'POST', { recipientId });
       if (!valid()) throw new Error('This recording request has expired.');
       await refresh();
-      await startRecording('note');
+      await startRecording();
       if (!valid()) { await stopAudio(); throw new CancelledError(); }
       setRecordChatId(chat.id); setView('chats', chat.id); setDevicePrompt(null);
       await acknowledge(action, true, { message: 'Recording started after the user chose Record. The recording is not yet uploaded or sent.' });
-    } catch (reason) { setDevicePrompt(null); await acknowledge(action, false, { message: userErrorMessage(reason) ?? 'Recording was cancelled.' }).catch(fail); fail(reason); }
+    } catch (reason) { setDevicePrompt(null); setManualAudio(false); await acknowledge(action, false, { message: userErrorMessage(reason) ?? 'Recording was cancelled.' }).catch(fail); fail(reason); }
     finally { if (startingDeviceRecording.current === action.actionId) startingDeviceRecording.current = null; }
   }
   useEffect(() => {
     if (!devicePrompt) return;
-    const timer = setTimeout(() => { setDevicePrompt(null); if (startingDeviceRecording.current === devicePrompt.actionId) { startingDeviceRecording.current = null; void stopRef.current(); } }, Math.max(0, 18000 - (Date.now() - Date.parse(devicePrompt.createdAt))));
+    const timer = setTimeout(() => { setDevicePrompt(null); if (startingDeviceRecording.current === devicePrompt.actionId) { startingDeviceRecording.current = null; void stopRef.current(); setManualAudio(false); } }, Math.max(0, 18000 - (Date.now() - Date.parse(devicePrompt.createdAt))));
     return () => clearTimeout(timer);
   }, [devicePrompt]);
-  return { booting, session, voiceMode, error, setError, busy, tab, capabilities, chats, contacts, drafts, messages, hasOlder, activeChatId, composers, pending, turns, assistantText, setAssistantText, assistantRetry, assistantSession, audioState, recording, recordPurpose, devicePrompt, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveVoicePreference, retryAssistant, refresh, loadMessages, navigate, startChat, sendText, sendPending, saveDraft, draftAction, submitAssistant, interrupt, speak, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice, acceptDeviceRecording,
+  async function respondToTurn(accepted: Turn, signal: AbortSignal) {
+    const deadline = Date.now() + 90000;
+    let turn = accepted;
+    while (turn.status === 'queued' || turn.status === 'running') {
+      await voiceDelay(1000, signal);
+      if (!lease.owns(turn.id)) throw new CancelledError();
+      if (Date.now() > deadline) throw new UserFacingError('Mia is taking longer than usual. Tap Mia to try again.');
+      turn = await api.request<Turn>(`/v1/assistant/sessions/${turn.sessionId}/turns/${turn.id}`, 'GET', undefined, signal);
+      checkVoice(signal);
+    }
+    if (!lease.owns(turn.id) || turn.status === 'interrupted') throw new CancelledError();
+    if (turn.status === 'failed') throw new UserFacingError('Mia could not finish that request. Tap Mia to try again.');
+    while (deviceTasks.size) await voiceDelay(100, signal);
+    checkVoice(signal);
+    if (!lease.owns(turn.id)) throw new CancelledError();
+    setTurns(previous => [...previous.filter(item => item.id !== turn.id), turn]);
+    setVoicePhase('speaking'); await speak(turn, signal);
+  }
+  function handleVoiceFailure(reason: unknown) {
+    const recoverable = reason instanceof VoiceCaptureUnavailable || reason instanceof ApiError && (reason.status === 0 || reason.status === 429 || reason.status >= 500);
+    voiceFailureMessage.current = userErrorMessage(reason) ?? '';
+    setVoiceFault(true); setVoiceRecoverable(recoverable); setVoicePhase(recoverable ? 'waiting' : 'error'); fail(reason);
+    recoveryBarrier.current = interrupt().catch(reason => {
+      voiceFailureMessage.current = userErrorMessage(reason) ?? ''; fail(reason);
+    });
+  }
+  const voiceRuntime = useRef<VoiceRuntime>(null!);
+  voiceRuntime.current = {
+    ready: () => deviceTasks.size === 0,
+    phase: setVoicePhase,
+    capture: signal => audio.current!.captureCommand(signal),
+    async transcribe(value, signal) {
+      const media = await uploadRecording(value, signal);
+      checkVoice(signal);
+      const result = await api.request<{ text: string }>('/v1/speech/transcriptions', 'POST', { mediaId: media.id }, signal);
+      checkVoice(signal);
+      return result.text;
+    },
+    discard: value => audio.current!.disposeRecording(value),
+    async respond(text, signal) {
+      const accepted = await submitAssistant(text, signal);
+      checkVoice(signal);
+      if (!accepted) throw new CancelledError();
+      await respondToTurn(accepted, signal);
+    },
+  };
+  useEffect(() => {
+    const configured = capabilities?.agent && capabilities.speechRecognition && capabilities.speechSynthesis;
+    if (!aiMode || !session?.user.profileComplete || !inForeground || manualAudio || (voiceFault && !voiceRecoverable)) return;
+    if (configured && assistantSession && !voiceRecoverable) return;
+    const controller = new AbortController(); const { signal } = controller;
+    const epoch = authEpoch.current;
+    void (async () => {
+      let delay = 2000;
+      while (!signal.aborted) {
+        try {
+          await voiceDelay(delay, signal);
+          await recoveryBarrier.current;
+          checkVoice(signal);
+          const health = await api.request<{ capabilities: Capabilities }>('/health/ready', 'GET', undefined, signal);
+          if (!health.capabilities.agent || !health.capabilities.speechRecognition || !health.capabilities.speechSynthesis) {
+            delay = Math.min(delay * 2, 15000); continue;
+          }
+          const current = await api.request<AssistantSession>('/v1/assistant/sessions', 'POST', {}, signal);
+          if (voiceRecoverable) await assistantControl.stop(api, current.id);
+          checkVoice(signal);
+          const history = await api.request<{ turns: Turn[] }>(`/v1/assistant/sessions/${current.id}`, 'GET', undefined, signal);
+          checkVoice(signal);
+          if (epoch !== authEpoch.current) return;
+          setCapabilities(health.capabilities); setAssistantSession(current); setTurns(history.turns);
+          setVoiceFault(false); setVoiceRecoverable(false);
+          setError(previous => previous === voiceFailureMessage.current ? '' : previous);
+          return;
+        } catch {
+          if (signal.aborted || epoch !== authEpoch.current) return;
+          delay = Math.min(delay * 2, 15000);
+        }
+      }
+    })();
+    return () => controller.abort();
+  }, [aiMode, session?.token, session?.user.profileComplete, inForeground, manualAudio, voiceFault, voiceRecoverable, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, assistantSession?.id]);
+  useEffect(() => {
+    if (!aiMode || !session?.user.profileComplete) { setVoicePhase('off'); return; }
+    if (!inForeground || manualAudio) { setVoicePhase('paused'); return; }
+    if (voiceFault) { setVoicePhase(voiceRecoverable ? 'waiting' : 'error'); return; }
+    if (!assistantSession || !realtimeReady || capabilities?.agent !== true || !capabilities.speechRecognition || !capabilities.speechSynthesis) {
+      setVoicePhase('waiting'); return;
+    }
+    let cancelled = false;
+    if (duplex.available) {
+      const id = Crypto.randomUUID(); nativeStream.current = id; nativeCandidate.current = null;
+      setVoicePhase('waiting');
+      void assistantControl.beforeTurn(api, assistantSession.id).then(() => {
+        if (cancelled || nativeStream.current !== id) return;
+        startNativeRecognition(id);
+      });
+      return () => { cancelled = true; void stopNativeVoice(); };
+    }
+    void conversation.start({
+      ready: () => voiceRuntime.current.ready(),
+      phase: phase => { if (!cancelled) setVoicePhase(phase); },
+      capture: signal => voiceRuntime.current.capture(signal),
+      transcribe: (value, signal) => voiceRuntime.current.transcribe(value, signal),
+      discard: value => voiceRuntime.current.discard(value),
+      respond: (text, signal) => voiceRuntime.current.respond(text, signal),
+    }).catch(reason => {
+      if (cancelled || conversation.stopped) return;
+      if (reason instanceof CancelledError) { setVoiceRevision(value => value + 1); return; }
+      handleVoiceFailure(reason);
+    });
+    return () => { cancelled = true; void conversation.stop(); };
+  }, [aiMode, session?.token, session?.user.profileComplete, assistantSession?.id, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, inForeground, manualAudio, voiceRevision, voiceFault, voiceRecoverable, realtimeReady]);
+  return { booting, session, aiMode, voicePhase, voiceFault, error, setError, busy, tab, capabilities, chats, contacts, drafts, messages, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, devicePrompt, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, startChat, sendText, sendPending, saveDraft, draftAction, interrupt, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice, acceptDeviceRecording,
     setComposer: (text: string) => { if (activeChatId) setComposers(previous => ({ ...previous, [activeChatId]: text })); },
   };
 }

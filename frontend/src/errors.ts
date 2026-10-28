@@ -2,6 +2,7 @@ import { ApiError } from './api';
 
 export class UserFacingError extends Error {}
 export class CancelledError extends Error {}
+export class VoiceCaptureUnavailable extends UserFacingError {}
 
 const messages: Record<string, string> = {
   OFFLINE: 'Unable to connect to Mia. Check your internet connection and try again.',
@@ -10,6 +11,7 @@ const messages: Record<string, string> = {
   OTP_LOCKED: 'Too many incorrect attempts. Request a new code to continue.',
   OTP_RATE_LIMIT: 'Please wait a little before requesting another code.',
   USERNAME_TAKEN: 'That username is already taken. Choose another one.',
+  INVALID_PHONE_NUMBER: 'Enter the full phone number with country code, for example +1 202 555 0101.',
   PHONE_AUTH_UNAVAILABLE: 'Sign-in is temporarily unavailable. Please try again later.',
   AGENT_UNAVAILABLE: 'Mia is temporarily unavailable. Please try again shortly.',
   MODEL_UNAVAILABLE: 'Mia is temporarily unavailable. Please try again shortly.',
