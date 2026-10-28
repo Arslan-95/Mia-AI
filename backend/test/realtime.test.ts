@@ -96,6 +96,47 @@ test('voice onset and noise preserve a spoken reply; a recognized word cancels i
   assert.equal(client.frames.filter(frame => frame.type === 'voice.interruption').length, interruptions, 'cancelled recognition must revoke a pending stable-word timer');
 });
 
+test('Mia’s echo during reported playback neither interrupts nor submits a turn, while a person still can', { timeout: 12000 }, async t => {
+  let emit!: (event: RecognitionEvent) => void; let synthesisSignal!: AbortSignal; let audioPackets = 0;
+  const speech: SpeechProvider = {
+    recognitionConfigured: true, synthesisConfigured: true, transcribe: async () => '',
+    async *synthesize(_text, signal) {
+      synthesisSignal = signal; yield new Uint8Array(2);
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+    },
+    async recognize(_keywords, events) { emit = events; return { write() { audioPackets++; }, end() {}, close() {} }; },
+  };
+  const context = await testApp({ speech, provider: { configured: true, respond: async () => ({ text: 'Anna said the meeting starts at six.', calls: [], output: [] }) } });
+  t.after(() => context.close());
+  const identity = await phoneSignIn(context.app, '+15550000903', 'echo_filter');
+  const url = (await context.app.listen({ port: 0, host: '127.0.0.1' })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: identity.token, after: '0' }); await client.next('ready');
+  client.send({ type: 'turn', clientTurnId: randomUUID(), text: 'Read my message.' });
+  const accepted = await client.next('turn.accepted'); const turnId = (accepted.turn as { id: string }).id;
+  await client.next('event', frame => (frame.event as { type: string }).type === 'assistant.completed');
+  client.send({ type: 'speech.request', requestId: randomUUID(), turnId }); await client.next('speech.chunk');
+  const requestId = randomUUID(); client.send({ type: 'voice.start', requestId, sampleRate: 24000, format: 'pcm_s16le', inputProcessing: 'aec-residual-v1' });
+  await client.next('voice.ready');
+  client.send({ type: 'speech.playback', turnId, playing: true });
+  const echo = new Uint8Array(3840), pcm = new DataView(echo.buffer);
+  for (let i = 0; i < echo.length / 2; i++) pcm.setInt16(i * 2, Math.round(2000 * Math.sin(i * .1)), true);
+  client.socket.send(echo); await waitFor(() => audioPackets === 1 ? true : undefined);
+  emit({ type: 'speechStart', turnId: 1 });
+  for (const transcript of ['Anna', 'Anna said', 'Anna said the meet']) emit({ type: 'transcript', transcript, final: false });
+  emit({ type: 'speechComplete', turnId: 1, transcript: 'Anna said the meeting starts at six.' });
+  await client.next('voice.event', frame => (frame.event as { type: string }).type === 'speechComplete'); await delay(300);
+  assert.equal(synthesisSignal.aborted, false);
+  assert.equal(client.frames.some(frame => frame.type === 'voice.interruption'), false);
+  assert.equal(client.frames.filter(frame => frame.type === 'turn.accepted').length, 1, 'echo is not submitted as the person’s turn');
+  client.socket.send(echo); await waitFor(() => audioPackets === 2 ? true : undefined);
+  emit({ type: 'speechStart', turnId: 2 }); emit({ type: 'transcript', transcript: 'starts at six no open Boris', final: false });
+  await client.next('voice.interruption'); assert.equal(synthesisSignal.aborted, true);
+  emit({ type: 'speechComplete', turnId: 2, transcript: 'Starts at six. No, open Boris.' });
+  await client.next('turn.accepted', frame => (frame.turn as { userText: string }).userText === 'No, open Boris.');
+  client.send({ type: 'speech.playback', turnId, playing: false });
+});
+
 test('logout immediately revokes matching sockets and pending ASR while preserving another login', { timeout: 12_000 }, async (t) => {
   let recognitionSignal: AbortSignal | undefined;
   const speech: SpeechProvider = {

@@ -65,20 +65,31 @@ test('interruption cancels PCM playback without closing the input graph', async 
   await audio.stop(); delete (globalThis as any).__miaDuplexModule;
 });
 
-test('speaker PCM is filtered on the real capture path and input continues after barge-in', async () => {
+test('speaker PCM is gated on the real capture path and input resumes unchanged after playback', async t => {
   const { audio, listeners } = await device(); const heard: Uint8Array[] = [];
   await audio.start(bytes => heard.push(bytes), () => {}, () => {});
-  const source = new Uint8Array(3840), view = new DataView(source.buffer);
-  for (let i = 0; i < source.length / 2; i++) view.setInt16(i * 2, Math.round(4000 * Math.sin(i * .1)), true);
-  const playback = audio.playPcm(source, 'reply'); const cancelled = assert.rejects(playback, error => (error as Error).constructor.name === 'CancelledError');
-  listeners.get('pcm')!({ audio: Buffer.from(source).toString('base64') });
-  assert.equal(heard.length, 1); assert.equal(heard[0]!.every(byte => byte === 0), true);
-  await audio.stopPlayback(); await cancelled;
-  const user = new Uint8Array(3840), humanView = new DataView(user.buffer);
-  for (let i = 0; i < user.length / 2; i++) humanView.setInt16(i * 2, Math.round(4000 * Math.sin(i * .247)), true);
-  listeners.get('pcm')!({ audio: Buffer.from(user).toString('base64') });
-  assert.equal(Buffer.from(heard[1]!).equals(Buffer.from(user)), true);
-  assert.equal(audio.active, true); await audio.stop(); delete (globalThis as any).__miaDuplexModule;
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  try {
+    const source = new Uint8Array(48000), view = new DataView(source.buffer);
+    for (let i = 0; i < source.length / 2; i++) view.setInt16(i * 2, Math.round(4000 * Math.sin(i * .1)), true);
+    const playback = audio.playPcm(source, 'reply'); const cancelled = assert.rejects(playback, error => (error as Error).constructor.name === 'CancelledError');
+    const echo = new Uint8Array(3840), echoView = new DataView(echo.buffer);
+    for (let i = 0; i < echo.length / 2; i++) echoView.setInt16(i * 2, Math.round(400 * Math.sin(i * .1)), true);
+    for (let packet = 0; packet < 10; packet++) { t.mock.timers.tick(80); listeners.get('pcm')!({ audio: Buffer.from(echo).toString('base64') }); }
+    assert.equal(Buffer.concat(heard).length, 10 * 3840 - 10 * 960, 'all but the decision lookahead is forwarded, as silence');
+    assert.equal(heard.every(part => part.every(byte => byte === 0)), true);
+    await audio.stopPlayback(); await cancelled;
+    t.mock.timers.tick(600); heard.length = 0;
+    const user = new Uint8Array(3840), humanView = new DataView(user.buffer);
+    for (let i = 0; i < user.length / 2; i++) humanView.setInt16(i * 2, Math.round(4000 * Math.sin(i * .247)), true);
+    listeners.get('pcm')!({ audio: Buffer.from(user).toString('base64') });
+    const flushed = Buffer.concat(heard);
+    assert.equal(flushed.subarray(0, 10 * 960).every(byte => byte === 0), true, 'held echo is released as silence');
+    assert.equal(flushed.subarray(10 * 960).equals(Buffer.from(user)), true, 'speech after playback is forwarded unchanged');
+    heard.length = 0; listeners.get('pcm')!({ audio: Buffer.from(user).toString('base64') });
+    assert.equal(Buffer.from(heard[0]!).equals(Buffer.from(user)), true);
+    assert.equal(audio.active, true);
+  } finally { await audio.stop(); t.mock.timers.reset(); delete (globalThis as any).__miaDuplexModule; }
 });
 
 test('native start waits for the previous graph and Expo cleanup, and cancellation during handoff never starts it', async () => {

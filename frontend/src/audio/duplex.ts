@@ -1,6 +1,6 @@
 import MiaVoice from '../../modules/mia-voice';
 import { CancelledError, UserFacingError, VoiceCaptureUnavailable } from '../errors';
-import { ResidualEchoGuard } from './echo';
+import { PlaybackEchoGate } from './echo';
 
 export class DuplexAudio {
   readonly available = Boolean(MiaVoice && MiaVoice.apiVersion >= 3);
@@ -11,7 +11,7 @@ export class DuplexAudio {
   private stopBarrier: Promise<void> = Promise.resolve();
   private subscriptions: { remove(): void }[] = [];
   private inputWatchdog?: ReturnType<typeof setTimeout>;
-  private echo = new ResidualEchoGuard();
+  private echo = new PlaybackEchoGate();
   constructor(private prepareSession: () => Promise<void> = async () => {}) {}
   async start(onPCM: (bytes: Uint8Array) => void, onInterrupted: () => void, onFailure: (error: unknown) => void) {
     if (!MiaVoice || !this.available) throw new UserFacingError('Update Mia to use voice interruption.');
@@ -74,8 +74,10 @@ export class DuplexAudio {
     if (!MiaVoice || !this.active) throw new CancelledError();
     let binary = '';
     for (let offset = 0; offset < bytes.length; offset += 16384) binary += String.fromCharCode(...bytes.subarray(offset, offset + 16384));
+    // Encoding a long reply takes time; the reference starts with playback.
+    const audio = btoa(binary);
     this.echo.begin(bytes, requestId);
-    try { await MiaVoice.play(btoa(binary), requestId); }
+    try { await MiaVoice.play(audio, requestId); }
     catch (error) {
       if ((error as { code?: string }).code === 'CANCELLED') throw new CancelledError();
       throw new UserFacingError('Mia could not play that response. Please try again.');

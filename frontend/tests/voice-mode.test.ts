@@ -472,7 +472,8 @@ test('the native voice graph keeps capture running through playback and stops on
     requestId = h.n.frames.filter(frame => frame.type === 'voice.start').at(-1)!.requestId;
     assert.equal(h.n.nativeStarts, 1); assert.ok(h.n.playback, 'recognition rotation must not cut off the reply');
     await act(async () => {
-      h.n.nativePCM!(new Uint8Array(3840));
+      // During playback the echo gate holds 200 ms while deciding.
+      for (let packet = 0; packet < 3; packet++) h.n.nativePCM!(new Uint8Array(3840));
       h.n.frame({ type: 'voice.event', requestId, event: { type: 'speechStart', turnId: 2 } });
       h.n.frame({ type: 'voice.event', requestId, event: { type: 'transcript', transcript: '[noise]', final: false } });
     });

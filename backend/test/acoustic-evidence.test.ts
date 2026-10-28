@@ -26,8 +26,8 @@ test('words require audio evidence, and repeating Mia verbatim is allowed with r
   const gate = new WordBargeInGate(); gate.start(1, true);
   for (const text of ['I', 'I can', 'I can help you']) {
     assert.equal(gate.observe(1, text, true, 1000, false), false);
-    assert.equal(gate.meaningful(1, text), false);
+    assert.equal(gate.userText(1, text), '');
   }
   assert.equal(gate.observe(1, 'I can help you', true, 1200, true), true);
-  assert.equal(gate.meaningful(1, 'I can help you'), true);
+  assert.equal(gate.userText(1, 'I can help you'), 'I can help you');
 });
