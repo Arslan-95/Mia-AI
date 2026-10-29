@@ -16,17 +16,20 @@ import { pressGesture } from './pressability';
 const root = fileURLToPath(new URL('../', import.meta.url).toString()).replaceAll('\\', '/');
 const sources: Record<string, string> = {
   'react-native': `const n = globalThis.__miaNative;
-    export const AccessibilityInfo = { isScreenReaderEnabled: async () => false, isReduceMotionEnabled: async () => false, addEventListener: () => ({ remove() {} }), announceForAccessibility: text => n.announcements.push(text) };
+    export const AccessibilityInfo = { isScreenReaderEnabled: async () => false, isReduceMotionEnabled: async () => n.reducedMotion, addEventListener: (name, callback) => {
+      if (name === 'reduceMotionChanged') n.motionHandlers.add(callback);
+      return { remove() { n.motionHandlers.delete(callback); } };
+    }, announceForAccessibility: text => n.announcements.push(text) };
     export const Vibration = { vibrate: () => { n.vibrations++; } };
     export const Keyboard = { dismiss() {}, isVisible: () => false, addListener: (name, callback) => {
       n.keyboardHandlers.set(name, callback); return { remove() { n.keyboardHandlers.delete(name); } };
     } };
     export const Platform = { OS: 'ios' };
-    export const useWindowDimensions = () => ({ width: 390, height: 844, scale: 3, fontScale: 1 });
+    export const useWindowDimensions = () => n.dimensions;
     export const PanResponder = { create: handlers => { n.backGesture = handlers; return { panHandlers: {} }; } };
     export const Easing = { inOut: value => value, sin: x => x, linear: x => x };
     const animation = () => ({ start(callback) { if (callback) { const finish = () => callback({ finished: true }); if (n.holdAnimation) n.finishAnimation = finish; else finish(); } }, stop() {} });
-    export const Animated = { add: () => 0, Value: class { setValue() {} stopAnimation() {} interpolate() { return 0; } }, View: 'AnimatedView', loop: animation, sequence: animation, timing: animation, spring: animation };
+    export const Animated = { add: () => 0, Value: class { constructor(value) { this.value = value; } setValue(value) { this.value = value; } stopAnimation() {} interpolate() { return 0; } }, View: 'AnimatedView', loop: animation, sequence: animation, timing: (value, config) => { n.animations.push(config); return animation(); }, spring: animation };
     export const ActivityIndicator='ActivityIndicator', KeyboardAvoidingView='KeyboardAvoidingView', Pressable='Pressable', Modal='Modal', StatusBar='StatusBar', Text='Text', View='View', ScrollView='ScrollView', TextInput='TextInput', FlatList='FlatList', Switch='Switch';
     export const StyleSheet = { create: value => value };
     export const Linking = { openSettings: async () => {} };
@@ -141,6 +144,8 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     releaseNativeStart: null as (() => void) | null, releaseNativeStop: null as (() => void) | null,
     holdASR: false,
     appStateHandlers: new Set<(state: string) => void>(), announcements: [] as string[], vibrations: 0,
+    dimensions: { width: 390, height: 844, scale: 3, fontScale: 1 }, reducedMotion: false,
+    motionHandlers: new Set<(value: boolean) => void>(), animations: [] as { duration: number; useNativeDriver: boolean; toValue: number }[],
     keyboardHandlers: new Map<string, () => void>(), insets: { top: 47, bottom: 34, left: 0, right: 0 },
     backGesture: null as Record<string, (...args: any[]) => any> | null, holdAnimation: false, finishAnimation: null as (() => void) | null,
     savedContacts: [] as Contact[],
@@ -248,8 +253,8 @@ test('startup waits for both saved credentials and mode, then opens assistant ho
       await h.wait(() => !loading());
       assert.equal(h.mia.aiMode, enabled); assert.equal(voice(), enabled);
       const root = h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.edges)[0]!;
-      assert.notEqual(root.props.pointerEvents, 'none');
-      assert.notEqual(root.props.accessibilityElementsHidden, true);
+      assert.equal(root.props.pointerEvents, enabled ? 'none' : 'auto');
+      assert.equal(root.props.accessibilityElementsHidden, enabled);
       assert.equal(h.mia.tab, enabled ? 'assistant' : 'chats');
       assert.equal(h.tree.findAll(node => node.type === 'ScrollView' as any && node.props.testID === 'agent-home').length, enabled ? 1 : 0);
       assert.equal(h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'agent-dock').length, enabled ? 1 : 0);
@@ -341,7 +346,7 @@ test('agent page actions switch visible views and retain the native voice sessio
       const reported = await open(`page-${tab}`, 'open_page', { route });
       assert.equal(h.mia.tab, tab); assert.equal(h.mia.activeChatId, null); assert.equal(reported.route, route);
       assert.ok(h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'agent-dock').length);
-      assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.accessibilityElementsHidden === true).length, 0);
+      assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.accessibilityElementsHidden === true).length, 1);
       if (tab === 'drafts') {
         assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Saved messages').length);
         assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Keep this message for Anna.').length);
@@ -547,9 +552,9 @@ test('voice activation requires Settings confirmation; exit requires a five-seco
       await act(async () => { pressable('Enable voice mode now').props.onPress(); });
       await h.wait(() => !!h.n.capture);
       assert.equal(h.mia.tab, 'assistant');
-      assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.pointerEvents === 'none').length, 0);
-      assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && (node.props.accessibilityElementsHidden === true || node.props.importantForAccessibility === 'no-hide-descendants')).length, 0);
-      assert.equal(h.tree.findAll(node => node.props.accessibilityViewIsModal === true).length, 0);
+      assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.pointerEvents === 'none').length, 1);
+      assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.accessibilityElementsHidden === true && node.props.importantForAccessibility === 'no-hide-descendants').length, 1);
+      assert.equal(h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityViewIsModal === true).length, 1);
       assert.ok(h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'agent-dock').length);
       await act(async () => { await overlay().props.onPress(); });
       await h.wait(() => h.n.capture === null);
@@ -558,9 +563,9 @@ test('voice activation requires Settings confirmation; exit requires a five-seco
       await act(async () => { await overlay().props.onPress(); });
       await h.wait(() => !!h.n.capture);
       assert.equal(overlay().props.accessibilityState.checked, true);
-      const exit = () => pressable('Hold for 5 seconds to exit voice mode');
-      await act(async () => { exit().props.onPress(); overlay().props.onAccessibilityEscape(); });
-      assert.equal(h.mia.aiMode, true); assert.ok(h.n.announcements.length >= 2);
+      const exit = overlay;
+      await act(async () => { overlay().props.onAccessibilityEscape(); });
+      assert.equal(h.mia.aiMode, true); assert.ok(h.n.announcements.length >= 1);
       const aborted = pressGesture(overlay().props);
       await act(async () => { aborted.begin(); });
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 700)); aborted.release(); });
@@ -568,7 +573,9 @@ test('voice activation requires Settings confirmation; exit requires a five-seco
       assert.equal(h.mia.aiMode, true, 'the previous short hold must not exit');
       assert.equal(h.mia.microphoneMuted, false, 'release must not become a mic tap');
       assert.equal(h.n.vibrations, 0);
-      await act(async () => { exit().props.onPressIn(); h.n.appState('background'); });
+      const backgroundHold = pressGesture(exit().props);
+      await act(async () => { backgroundHold.begin(); h.n.appState('background'); });
+      backgroundHold.dispose();
       await act(async () => { h.n.appState('active'); });
       await h.wait(() => !!h.n.capture);
       const fullHold = pressGesture(exit().props);
@@ -615,6 +622,49 @@ test('native touch releases preserve mic state after aborted holds, while short 
     assert.equal(h.mia.microphoneMuted, true, 'accessibility activation without a physical touch sequence still works');
     assert.equal(h.mia.aiMode, true); assert.equal(h.n.vibrations, 0);
   } finally { for (const gesture of gestures) gesture.dispose(); await h.close(); }
+});
+
+test('the transparent global layer owns every page and consumes taps, swipes and multi-touch without activating content', async () => {
+  const h = await mount(true, true);
+  const layer = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'agent-interaction-layer')[0]!;
+  const event = (x: number, y: number, timestamp: number, fingers = 1) => ({ nativeEvent: {
+    pageX: x, pageY: y, timestamp, touches: Array.from({ length: fingers }, () => ({ pageX: x, pageY: y })), changedTouches: [{ pageX: x, pageY: y }],
+  } });
+  try {
+    await h.wait(() => !!h.n.capture);
+    const bounds = layer().props.style;
+    for (const edge of ['top', 'left', 'right', 'bottom']) assert.equal(bounds[edge], 0);
+    assert.equal(bounds.backgroundColor, 'transparent');
+    assert.ok(layer().parent?.parent === h.tree.findAll(node => node.type === 'View' as any)[0], 'the layer is a sibling of the blocked content');
+    for (const [tab, chatId] of [['assistant', null], ['chats', 'anna'], ['people', null], ['settings', null]] as const) {
+      await act(async () => { await h.mia.navigate(tab, chatId); });
+      const content = h.tree.findAll(node => node.type === 'SafeAreaView' as any)[0]!;
+      assert.equal(content.props.pointerEvents, 'none'); assert.equal(content.props.accessibilityElementsHidden, true);
+      assert.equal(content.props.importantForAccessibility, 'no-hide-descendants');
+      const dock = h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'agent-dock')[0]!;
+      assert.equal(dock.findAll(node => node.type === 'Pressable' as any).length, 0, 'footer is presentation only');
+      for (const [x, y] of [[12, 24], [195, 400], [375, 820]]) {
+        const muted = h.mia.microphoneMuted;
+        await act(async () => { layer().props.onTouchStart(event(x!, y!, 1000)); layer().props.onPressOut(); layer().props.onPress(event(x!, y!, 1100)); });
+        assert.equal(h.mia.microphoneMuted, !muted); assert.equal(h.mia.tab, tab); assert.equal(h.mia.activeChatId, chatId);
+      }
+      const muted = h.mia.microphoneMuted;
+      await act(async () => { layer().props.onTouchStart(event(30, 120, 2000)); layer().props.onTouchMove(event(30, 240, 2100)); layer().props.onPressOut(); layer().props.onPress(event(30, 240, 2200)); });
+      assert.equal(h.mia.microphoneMuted, muted, 'a swallowed scroll gesture is not a mic tap');
+      await act(async () => { layer().props.onTouchStart(event(30, 120, 3000)); layer().props.onTouchStart(event(30, 120, 3050, 2)); layer().props.onPressOut(); layer().props.onPress(event(30, 120, 3100)); });
+      assert.equal(h.mia.microphoneMuted, muted, 'multi-touch never becomes a tap');
+    }
+    assert.equal(h.n.vibrations, 0); assert.equal(h.mia.aiMode, true);
+    await act(async () => { layer().props.onTouchStart(event(80, 240, 4000)); layer().props.onLongPress(); });
+    assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Hold…').length);
+    await act(async () => { await h.mia.saveAiMode(false); });
+    assert.equal(layer(), undefined);
+    const content = h.tree.findAll(node => node.type === 'SafeAreaView' as any)[0]!;
+    assert.equal(content.props.pointerEvents, 'auto'); assert.equal(content.props.accessibilityElementsHidden, false);
+    await act(async () => { await h.mia.saveAiMode(true); });
+    assert.ok(layer());
+    assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Hold…').length, 0, 'a new activation cannot inherit an abandoned exit hold');
+  } finally { await h.close(); }
 });
 
 test('muting releases the microphone across navigation and foreground changes; unmuting resumes in the current context', async () => {
@@ -1014,14 +1064,15 @@ test('Contacts and Chats share header geometry and row height; chat back swipe r
     const chatRow = flatten(button('Anna. No messages yet').props.style({ pressed: false }));
     const tabs = h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityRole === 'tab');
     assert.deepEqual(tabs.map(node => node.props.accessibilityLabel), ['Contacts', 'Chats', 'Settings']);
-    const selectedIcon = tabs[1]!.findAll(node => node.type === 'View' as any && flatten(node.props.style).borderRadius === 18)[0]!;
-    const iconStyle = flatten(selectedIcon.props.style); assert.equal(iconStyle.width, iconStyle.height);
+    const selectedIcon = tabs[1]!.findAll(node => node.type === 'AnimatedView' as any && flatten(node.props.style).borderRadius === 12)[0]!;
+    const iconStyle = flatten(selectedIcon.props.style); assert.equal(iconStyle.width, 40); assert.equal(iconStyle.height, 32);
+    assert.equal(tabs[1]!.props.accessibilityState.selected, true);
     h.n.savedContacts.push({ ...chat.recipient, contactId: 'contact-anna', name: 'Anna' });
     await act(async () => { await h.mia.refresh(); button('Contacts').props.onPress(); });
     assert.deepEqual(flatten(header('Contacts').props.style), chatHeader, 'the search row has the same header above it on both tabs');
     const contactRow = flatten(button('Anna, @anna').props.style({ pressed: false }));
     for (const key of ['minHeight', 'paddingVertical', 'paddingHorizontal', 'gap']) assert.equal(contactRow[key], chatRow[key]);
-    assert.equal(h.tree.findAll(node => node.type === 'Text' as any && String(node.props.children).includes('SAVED CONTACTS')).length, 0);
+    assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Saved contacts').length, 1);
     await act(async () => { button('Anna, @anna').props.onPress(); });
     await h.wait(() => h.mia.activeChatId === 'anna');
     const back = h.n.backGesture!;
@@ -1048,9 +1099,10 @@ test('agent home shows the newest conversation and active Settings returns home 
     assert.ok(texts().includes('My newest request.')); assert.ok(texts().includes('My newest reply.'));
     assert.equal(texts().includes('An older request.'), false);
     const modeWrites = h.n.preferences.get('mia.ai_mode');
-    await act(async () => { button('Open agent settings').props.onPress(); });
+    await act(async () => { await h.mia.navigate('settings'); });
     assert.equal(h.mia.tab, 'settings'); assert.equal(h.mia.microphoneMuted, true);
-    await act(async () => { button('Mia voice mode').props.onPress(); });
+    assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.pointerEvents === 'none').length, 1);
+    await act(async () => { await h.mia.navigate('assistant'); });
     assert.equal(h.mia.tab, 'assistant'); assert.equal(h.mia.aiMode, true); assert.equal(h.mia.microphoneMuted, true);
     assert.equal(h.tree.findAll(node => node.type === 'Modal' as any).length, 0);
     assert.equal(h.n.preferences.get('mia.ai_mode'), modeWrites);
@@ -1282,4 +1334,65 @@ test('chat entry starts at the latest message and restores a native initial offs
     await act(async () => { await restarted.mia.navigate('chats', 'anna'); });
     assert.deepEqual(restarted.tree.findAll(node => node.type === 'FlatList' as any)[0]!.props.contentOffset, { x: 0, y: 0 });
   } finally { await restarted.close(); }
+});
+
+test('shared motion follows Reduce Motion changes, keeps modal static, and releases its native subscription', async () => {
+  const h = await mount(false, true);
+  const button = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
+  try {
+    assert.equal(h.n.motionHandlers.size, 1, 'page and all normal buttons share one device subscription');
+    assert.ok(h.n.animations.some(animation => animation.duration === 140 && animation.useNativeDriver));
+    await act(async () => { button('Settings').props.onPress(); });
+    await act(async () => { button('Mia voice mode').props.onPress(); });
+    assert.equal(h.tree.findAll(node => node.type === 'Modal' as any)[0]!.props.animationType, 'fade');
+    await act(async () => { h.n.reducedMotion = true; for (const handler of h.n.motionHandlers) handler(true); });
+    assert.equal(h.tree.findAll(node => node.type === 'Modal' as any)[0]!.props.animationType, 'none');
+    h.n.animations.length = 0;
+    await act(async () => { button('Keep voice mode off').props.onPressIn(); button('Keep voice mode off').props.onPressOut(); button('Keep voice mode off').props.onPress(); });
+    await act(async () => { button('Contacts').props.onPress(); });
+    assert.equal(h.n.animations.length, 0, 'page reveal and press effects remain static under Reduce Motion');
+    await act(async () => { h.n.reducedMotion = false; for (const handler of h.n.motionHandlers) handler(false); });
+    h.n.animations.length = 0;
+    await act(async () => { button('Chats').props.onPressIn(); button('Chats').props.onPressOut(); });
+    assert.deepEqual(h.n.animations.map(animation => [animation.duration, animation.useNativeDriver]), [[80, true], [120, true]]);
+  } finally { await h.close(); }
+  assert.equal(h.n.motionHandlers.size, 0);
+});
+
+test('compact screens retain readable large-text identity, expanded conversation names and a usable composer', async () => {
+  const h = await mount(false, true);
+  const flatten = (value: any): Record<string, any> => Array.isArray(value) ? Object.assign({}, ...value.filter(Boolean).map(flatten)) : value ?? {};
+  const button = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
+  try {
+    h.n.dimensions = { width: 320, height: 568, scale: 2, fontScale: 1.8 };
+    await act(async () => { button('Settings').props.onPress(); });
+    const page = h.tree.findAll(node => node.type === 'ScrollView' as any)[0]!;
+    assert.equal(flatten(page.props.contentContainerStyle).paddingHorizontal, 16);
+    const name = h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Me')[0]!;
+    assert.equal(flatten(name.parent!.props.style).flex, 0, 'stacked identity has natural content height');
+    assert.equal(flatten(name.parent!.parent!.props.style).flexDirection, 'column');
+    assert.equal(name.props.numberOfLines, undefined, 'profile identity remains fully readable');
+    assert.equal(name.props.allowFontScaling, undefined, 'actual identity text respects the device text size');
+    const initials = h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'M')[0]!;
+    assert.equal(initials.props.allowFontScaling, false, 'decorative initials fit their fixed artwork without changing real content text');
+    assert.equal(button('Mia voice mode').findAll(node => node.type === 'Icon' as any && node.props.name === 'chevron-forward').length, 0, 'the stacked card has no orphan decorative arrow');
+    assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === '+15550000000').length);
+    await act(async () => { button('Chats').props.onPress(); });
+    const rowName = h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Anna')[0]!;
+    assert.equal(rowName.props.numberOfLines, 2);
+    await act(async () => { button('Anna. No messages yet').props.onPress(); });
+    await h.wait(() => h.mia.activeChatId === 'anna');
+    const title = h.tree.findAll(node => node.type === 'Text' as any && node.props.accessibilityRole === 'header' && node.props.children === 'Anna')[0]!;
+    assert.equal(title.props.numberOfLines, 2);
+    const input = h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Message Anna')[0]!;
+    assert.equal(flatten(input.props.style).flex, 1); assert.equal(flatten(input.props.style).maxHeight, 120);
+    assert.equal(input.props.maxLength, 8000); assert.equal(input.props.multiline, true);
+    const timeline = h.tree.findAll(node => node.type === 'FlatList' as any)[0]!;
+    const item = { id: 'large', senderId: 'user', createdAt: '2026-10-30T12:00:00Z', kind: 'text', text: 'A long message stays fully readable.' };
+    const row = timeline.props.renderItem({ item, index: 0, separators: {} });
+    const bubble = row.props.children[1].props.children[0];
+    assert.equal(flatten(bubble.props.style).maxWidth, '94%');
+    assert.equal(bubble.props.children[1].props.numberOfLines, undefined);
+    assert.deepEqual(timeline.props.contentOffset, { x: 0, y: 0 }); assert.equal(timeline.props.inverted, true);
+  } finally { await h.close(); }
 });

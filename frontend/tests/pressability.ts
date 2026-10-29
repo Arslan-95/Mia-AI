@@ -31,10 +31,12 @@ export function pressGesture(props: PressableProps) {
     ...point, timestamp: Date.now(), touches: [point], changedTouches: [point],
   } });
   return {
-    begin: () => { const touch = event(); props.onTouchStart?.(touch as any); handlers.onResponderGrant!(touch); },
-    move: (x: number, y: number) => { point = { pageX: x, pageY: y, locationX: x, locationY: y }; handlers.onResponderMove!(event()); },
-    release: () => handlers.onResponderRelease!(event()),
-    cancel: () => handlers.onResponderTerminate!(event()),
+    // Native RN grants the responder during extraction, before dispatching
+    // the ordinary bubbling touch-start callback.
+    begin: () => { const touch = event(); handlers.onResponderGrant!(touch); props.onTouchStart?.(touch as any); },
+    move: (x: number, y: number) => { point = { pageX: x, pageY: y, locationX: x, locationY: y }; const touch = event(); handlers.onResponderMove!(touch); props.onTouchMove?.(touch as any); },
+    release: () => { const touch = event(); handlers.onResponderRelease!(touch); props.onTouchEnd?.(touch as any); },
+    cancel: () => { const touch = event(); handlers.onResponderTerminate!(touch); props.onTouchCancel?.(touch as any); },
     activate: () => handlers.onClick!({ currentTarget: 1, target: 1, nativeEvent: { timestamp: Date.now() } }),
     dispose: () => responder.reset(),
   };

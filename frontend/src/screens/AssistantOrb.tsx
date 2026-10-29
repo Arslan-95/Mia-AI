@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AccessibilityInfo, AppState, Animated, Easing, Pressable, ScrollView, StyleSheet, Text, Vibration, View, useWindowDimensions, type GestureResponderEvent } from 'react-native';
+import { AccessibilityInfo, Animated, Easing, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import type { Mia } from '../useMia';
 import type { VoicePhase } from '../voiceConversation';
 import { Icon, colors, s } from '../ui';
@@ -9,7 +9,6 @@ const labels: Record<VoicePhase, string> = {
   transcribing: 'Understanding', thinking: 'Thinking it through', speaking: 'Mia is speaking',
   paused: 'On standby', error: 'Let’s reconnect',
 };
-const longPressMs = 500;
 function voiceStatus(mia: Mia) {
   const working = mia.voicePhase === 'thinking' || mia.voicePhase === 'speaking';
   const phase = mia.microphoneMuted && !working ? 'paused' : mia.voicePhase;
@@ -75,7 +74,7 @@ export function AgentHome({ mia }: { mia: Mia }) {
       <Text style={home.subtitle}>Your people. Your conversations.{ '\n' }Just say what’s on your mind.</Text>
     </View>
     <View style={home.liveCard}>
-      <View style={home.liveHeader}><View style={home.liveIcon}><Icon name={phase === 'error' ? 'refresh-outline' : mia.microphoneMuted ? 'mic-off-outline' : 'sparkles-outline'} size={19} color={colors.accentLight} /></View><View style={home.liveText}><Text style={home.liveTitle}>{status}</Text><Text style={s.small}>{mia.microphoneMuted ? 'Tap the orb below whenever you’re ready.' : phase === 'listening' ? 'Ask me to open a chat or help with a reply.' : phase === 'error' ? 'Use Reconnect Mia below to try again.' : 'I’ll keep the right screen open as we go.'}</Text></View></View>
+      <View style={home.liveHeader}><View style={home.liveIcon}><Icon name={phase === 'error' ? 'refresh-outline' : mia.microphoneMuted ? 'mic-off-outline' : 'sparkles-outline'} size={19} color={colors.accentLight} /></View><View style={home.liveText}><Text style={home.liveTitle}>{status}</Text><Text style={s.small}>{mia.microphoneMuted ? 'Tap anywhere whenever you’re ready.' : phase === 'listening' ? 'Ask me to open a chat or help with a reply.' : phase === 'error' ? 'Mute, then unmute to try again.' : 'I’ll keep the right screen open as we go.'}</Text></View></View>
       <View style={home.cardRule} />
       <Text style={home.example}>Try saying</Text>
       <Text style={home.prompt}>“Show me my unread messages.”</Text>
@@ -91,7 +90,7 @@ export function AgentHome({ mia }: { mia: Mia }) {
       <Text selectable style={home.userText}>{latest.userText}</Text>
       {latest.assistantText ? <Text selectable style={s.body}>{latest.assistantText}</Text> : <Text style={s.small}>{latest.status === 'failed' ? 'That request couldn’t be completed.' : latest.status === 'interrupted' ? 'Conversation interrupted.' : 'Working on your request…'}</Text>}
     </View>}
-    <View style={home.privacy}><Icon name="mic-outline" size={14} color={colors.muted} /><Text style={home.privacyText}>You’re in control. Tap the orb to mute your microphone.</Text></View>
+    <View style={home.privacy}><Icon name="mic-outline" size={14} color={colors.muted} /><Text style={home.privacyText}>You’re in control. Tap anywhere to mute your microphone.</Text></View>
   </ScrollView>;
 }
 function HomeLink({ icon, title, detail, onPress }: { icon: React.ComponentProps<typeof Icon>['name']; title: string; detail: string; onPress(): void }) {
@@ -101,68 +100,26 @@ function HomeLink({ icon, title, detail, onPress }: { icon: React.ComponentProps
   </Pressable>;
 }
 
-/** This dock participates in layout, so the active page stays visible and usable. */
-export function VoiceMode({ mia, bottomInset = 0 }: { mia: Mia; bottomInset?: number }) {
-  const held = useRef(false);
-  const touchStartedAt = useRef<number | null>(null);
-  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const [holding, setHolding] = useState(false);
-  const [focused, setFocused] = useState<string | null>(null);
-  const exitRef = useRef(mia);
+/** The dock stays visible while the full-screen interaction layer owns gestures. */
+export function VoiceMode({ mia, bottomInset = 0, holding = false }: { mia: Mia; bottomInset?: number; holding?: boolean }) {
   const { height, fontScale } = useWindowDimensions();
-  exitRef.current = mia;
-  const explainExit = () => AccessibilityInfo.announceForAccessibility('To leave voice mode, hold the exit control for five seconds until it vibrates, or ask Mia and confirm.');
-  const cancelHold = () => { held.current = false; clearTimeout(timer.current); timer.current = undefined; setHolding(false); };
-  // RN suppresses onPress after recognizing a long press. Releasing a short
-  // hold must not toggle the microphone; the actual exit deadline is 5 seconds.
-  const recognizeHold = () => { if (held.current) setHolding(true); };
-  const pressMicrophone = (event?: GestureResponderEvent) => {
-    if (event?.nativeEvent.changedTouches?.length && touchStartedAt.current !== null
-      && event.nativeEvent.timestamp - touchStartedAt.current >= longPressMs) return;
-    void mia.toggleMicrophone().catch(mia.fail);
-  };
-  const beginHold = () => {
-    cancelHold(); held.current = true;
-    timer.current = setTimeout(() => {
-      if (!held.current || AppState.currentState !== 'active' || !exitRef.current.aiMode) return;
-      held.current = false; timer.current = undefined; setHolding(false); Vibration.vibrate();
-      void exitRef.current.saveAiMode(false).catch(exitRef.current.fail);
-    }, 5000);
-  };
-  useEffect(() => {
-    const listener = AppState.addEventListener('change', next => { if (next !== 'active') cancelHold(); });
-    return () => { held.current = false; clearTimeout(timer.current); listener.remove(); };
-  }, []);
   const { phase, status } = voiceStatus(mia);
   const chat = mia.chats.find(item => item.id === mia.activeChatId);
   const context = chat && mia.tab === 'chats' ? chat.recipient.displayName : mia.tab === 'people' ? 'Contacts' : mia.tab === 'settings' ? 'Settings' : mia.tab === 'drafts' ? 'Saved messages' : mia.tab === 'assistant' ? 'Your assistant' : 'Chats';
   const small = height < 670 || fontScale > 1.4;
-  return <View testID="agent-dock" style={[orb.dock, { paddingBottom: Math.max(bottomInset, 10) }]} onAccessibilityEscape={explainExit}>
+  return <View testID="agent-dock" style={[orb.dock, { paddingBottom: Math.max(bottomInset, 10) }]}>
     <View pointerEvents="none" style={orb.dockShine} />
-    <View style={orb.dockHeading}><View style={[home.dot, phase === 'error' && { backgroundColor: colors.red }, phase === 'paused' && { backgroundColor: colors.muted }]} /><Text accessibilityLiveRegion="polite" style={orb.statusText}>{status}</Text><Text numberOfLines={1} style={orb.contextText}>· {context}</Text></View>
+    <View style={orb.dockHeading}><View style={[home.dot, phase === 'error' && { backgroundColor: colors.red }, phase === 'paused' && { backgroundColor: colors.muted }]} /><Text style={orb.statusText}>{status}</Text><Text numberOfLines={1} style={orb.contextText}>· {context}</Text></View>
     <View style={orb.controls}>
-      <Pressable accessibilityRole="button" accessibilityLabel="Open Mia home" accessibilityState={{ selected: mia.tab === 'assistant' }} onPress={() => void mia.navigate('assistant')} onFocus={() => setFocused('home')} onBlur={() => setFocused(null)} style={({ pressed }) => [orb.sideControl, pressed && orb.pressed, focused === 'home' && s.focus]}>
-        <View style={[orb.controlIcon, mia.tab === 'assistant' && orb.selectedIcon]}><Icon name="grid-outline" size={20} color={colors.accentLight} /></View><Text style={orb.controlLabel}>Home</Text>
-      </Pressable>
-      <Pressable style={[orb.coreControl, focused === 'core' && s.focus]} accessibilityRole="switch"
-        accessibilityLabel={`Mia voice mode. ${status}. Tap to ${mia.microphoneMuted ? 'unmute' : 'mute'} microphone.`}
-        accessibilityHint="Double tap to mute or unmute input. Mia can keep speaking. Hold for five seconds until it vibrates to exit."
-        accessibilityState={{ checked: !mia.microphoneMuted }} onAccessibilityEscape={explainExit}
-        onFocus={() => setFocused('core')} onBlur={() => setFocused(null)}
-        onTouchStart={event => { if (event.nativeEvent.touches.length === 1) touchStartedAt.current = event.nativeEvent.timestamp; }}
-        onPress={pressMicrophone} onPressIn={beginHold} onPressOut={cancelHold} onLongPress={recognizeHold} delayLongPress={longPressMs}>
-        <MiaCore phase={phase} diameter={small ? 62 : 74} level={phase === 'paused' ? 0 : mia.voiceLevel} />
-      </Pressable>
-      <Pressable accessibilityRole="button" accessibilityLabel="Hold for 5 seconds to exit voice mode"
-        accessibilityHint="Keep holding until the phone vibrates. Releasing early keeps voice mode on. With VoiceOver, double tap and hold."
-        onFocus={() => setFocused('exit')} onBlur={() => setFocused(null)}
-        onPressIn={beginHold} onPressOut={cancelHold} onPress={explainExit} onLongPress={recognizeHold} delayLongPress={longPressMs}
-        style={({ pressed }) => [orb.sideControl, pressed && orb.pressed, focused === 'exit' && s.focus]}>
-        <View style={[orb.controlIcon, holding && orb.selectedIcon]}><Icon name={holding ? 'hourglass-outline' : 'power-outline'} size={20} color={holding ? colors.ink : colors.muted} /></View><Text style={orb.controlLabel}>{holding ? 'Hold…' : 'Hold to exit'}</Text>
-      </Pressable>
+      <View style={orb.sideControl}>
+        <View style={[orb.controlIcon, mia.microphoneMuted && orb.selectedIcon]}><Icon name={mia.microphoneMuted ? 'mic-off-outline' : 'mic-outline'} size={20} color={colors.accentLight} /></View><Text style={orb.controlLabel}>Tap anywhere</Text>
+      </View>
+      <View style={orb.coreControl}><MiaCore phase={phase} diameter={small ? 62 : 74} level={phase === 'paused' ? 0 : mia.voiceLevel} /></View>
+      <View style={orb.sideControl}>
+        <View style={[orb.controlIcon, holding && orb.selectedIcon]}><Icon name={holding ? 'hourglass-outline' : 'power-outline'} size={20} color={holding ? colors.ink : colors.muted} /></View><Text style={orb.controlLabel}>{holding ? 'Hold…' : 'Hold 5s to exit'}</Text>
+      </View>
     </View>
-    {phase === 'error' ? <Pressable accessibilityRole="button" accessibilityLabel="Reconnect Mia" onPress={() => void mia.resumeAssistant().catch(mia.fail)} onFocus={() => setFocused('retry')} onBlur={() => setFocused(null)} style={({ pressed }) => [orb.retry, pressed && orb.pressed, focused === 'retry' && s.focus]}><Icon name="refresh-outline" size={15} color={colors.accentLight} /><Text style={orb.retryText}>Reconnect Mia</Text></Pressable>
-      : <Text style={orb.hint}>{holding ? 'Keep holding for 5 seconds to leave' : mia.microphoneMuted ? 'Tap the orb to unmute' : 'Tap the orb to mute'}</Text>}
+    <Text style={orb.hint}>{holding ? 'Keep holding for 5 seconds to leave' : mia.devicePrompt ? 'Hold anywhere for 5 seconds to use recording controls' : phase === 'error' ? 'Mute, then unmute to reconnect' : mia.microphoneMuted ? 'Tap anywhere to unmute' : 'Tap anywhere to mute'}</Text>
   </View>;
 }
 
@@ -190,8 +147,6 @@ const orb = StyleSheet.create({
   coreControl: { alignItems: 'center', justifyContent: 'center', borderRadius: 60, minWidth: 88, minHeight: 88 },
   hint: { color: '#A99ABF', fontSize: 10, textAlign: 'center', paddingTop: 1, paddingBottom: 2 },
   pressed: { opacity: .6 },
-  retry: { minHeight: 44, alignSelf: 'center', flexDirection: 'row', gap: 7, alignItems: 'center', justifyContent: 'center', borderRadius: 12, paddingHorizontal: 15 },
-  retryText: { color: colors.accentLight, fontSize: 12, fontWeight: '600' },
 });
 const home = StyleSheet.create({
   content: { flexGrow: 1, paddingHorizontal: 24, paddingTop: 14, paddingBottom: 28, gap: 18, width: '100%', maxWidth: 680, alignSelf: 'center' },

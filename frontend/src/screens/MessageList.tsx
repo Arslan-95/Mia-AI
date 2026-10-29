@@ -21,7 +21,7 @@ export function MessageList({ userId, chatId, positions, data, ...props }: Props
   ).map(message => message.id)), [visibleData]);
   return <FlatList {...props} data={visibleData} inverted contentOffset={offset}
     renderItem={info => <View>
-      {dayStarts.has(info.item.id) && <Text style={p.dayLabel}>{new Date(info.item.createdAt).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}</Text>}
+      {dayStarts.has(info.item.id) && <View style={p.day}><Text style={p.dayLabel}>{new Date(info.item.createdAt).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}</Text></View>}
       {props.renderItem?.(info)}
     </View>}
     maintainVisibleContentPosition={{ minIndexForVisible: 0, autoscrollToTopThreshold: 70 }}
@@ -41,4 +41,4 @@ export function MessageList({ userId, chatId, positions, data, ...props }: Props
       props.onContentSizeChange?.(width, height);
     }} />;
 }
-const p = StyleSheet.create({ dayLabel: { color: colors.muted, fontSize: 11, textAlign: 'center', marginTop: 4, marginBottom: 18 } });
+const p = StyleSheet.create({ day: { alignItems: 'center', marginVertical: 20 }, dayLabel: { color: colors.muted, fontSize: 12, lineHeight: 17, textAlign: 'center', paddingVertical: 6, paddingHorizontal: 10, backgroundColor: colors.surfaceInset, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, borderRadius: 12 } });
