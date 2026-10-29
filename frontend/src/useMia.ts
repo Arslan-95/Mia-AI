@@ -46,6 +46,7 @@ export function useMia() {
   const conversation = useRef(new VoiceConversation()).current;
   const duplex = useRef(new DuplexAudio(() => audio.current!.stop())).current;
   const nativeStream = useRef<string | null>(null);
+  const nativeRecognitionSessions = useRef(new Set<string>());
   const nativeCandidate = useRef<string | null>(null);
   const nativeResponse = useRef<AbortController | null>(null);
   const nativeCapture = useRef<string | null>(null);
@@ -181,6 +182,7 @@ export function useMia() {
   }, [session?.token, session?.user.profileComplete, address, booting]);
   const speech = useRef<{ requestId: string; turnId: string; epoch: number; parts: Uint8Array[]; bytes: number; settle(error?: unknown): void } | null>(null);
   async function stopNativeVoice() {
+    nativeRecognitionSessions.current.clear();
     respondingTurn.current = null;
     setVoiceLevel(0);
     clearTimeout(nativeConnectTimeout.current); nativeConnectTimeout.current = undefined;
@@ -191,6 +193,7 @@ export function useMia() {
     await duplex.stop();
   }
   function cancelNativeRecognition() {
+    nativeRecognitionSessions.current.clear();
     clearTimeout(nativeConnectTimeout.current); nativeConnectTimeout.current = undefined;
     if (nativeStream.current) socket.current?.send({ type: 'voice.cancel' });
     nativeStream.current = null; nativeCapture.current = null;
@@ -207,6 +210,10 @@ export function useMia() {
     return duplex.hasInput && nativeStream.current !== null && nativeCapture.current === nativeStream.current ? 'listening' : 'waiting';
   }
   function startNativeRecognition(id: string) {
+    // A natural rotation can overtake the previous session's committed turn.
+    // Explicit cancellation clears this allowance; retain only one prior id.
+    nativeRecognitionSessions.current.add(id);
+    while (nativeRecognitionSessions.current.size > 2) nativeRecognitionSessions.current.delete(nativeRecognitionSessions.current.values().next().value!);
     clearTimeout(nativeConnectTimeout.current);
     nativeStream.current = id; nativeCapture.current = null;
     if (!socket.current?.send({ type: 'voice.start', requestId: id, sampleRate: 24000, format: 'pcm_s16le', inputProcessing: 'aec-residual-v1', context: clientSnapshot() })) {
@@ -375,12 +382,15 @@ export function useMia() {
         }
       }, () => { if (nativeStream.current) setVoiceRevision(value => value + 1); }, reason => {
         if (nativeStream.current) handleVoiceFailure(reason);
+      }).then(() => {
+        if (nativeStream.current === id && !['thinking', 'speaking'].includes(state.current.voicePhase)) setVoicePhase(idleNativePhase());
       }).catch(reason => {
         if (nativeStream.current && !(reason instanceof CancelledError)) handleVoiceFailure(reason);
       });
       return;
     }
     if (nativeStream.current && frame.type === 'voice.interruption' && frame.requestId === nativeStream.current && typeof frame.clientTurnId === 'string') {
+      if (microphoneIntent.current || typeof frame.inputRevision === 'number' && frame.inputRevision !== voiceControlRevision.current) return;
       nativeResponse.current?.abort(); nativeResponse.current = null;
       nativeCandidate.current = frame.clientTurnId;
       lease.begin(frame.clientTurnId); requestContext.current = clientSnapshot(); setDevicePrompt(null);
@@ -389,7 +399,14 @@ export function useMia() {
     }
     if (duplex.available && (aiModeRef.current || finishingControl.current) && frame.type === 'turn.accepted') {
       const turn = frame.turn as Turn;
-      if (turn?.clientTurnId !== nativeCandidate.current) return;
+      if (!turn) return;
+      if (turn.clientTurnId !== nativeCandidate.current) {
+        // A committed command can arrive after a mute edge hid its earlier
+        // interruption. Keep its reply; an uncommitted stale onset stays inert.
+        if (typeof frame.requestId !== 'string' || !nativeRecognitionSessions.current.has(frame.requestId) || typeof frame.inputRevision !== 'number') return;
+        lease.begin(turn.clientTurnId); setDevicePrompt(null);
+        void stopAudio().catch(fail);
+      }
       lease.accept(turn.clientTurnId, turn.id); requestContext.current = turn.context ?? clientSnapshot();
       nativeResponse.current?.abort(); const controller = nativeResponse.current = new AbortController();
       respondingTurn.current = turn.id;
@@ -490,13 +507,19 @@ export function useMia() {
     setMicrophoneMuted(muted);
     // Only input acquisition is serialized. Current work/playback continues.
     if (muted) {
-      cancelNativeRecognition();
+      nativePCM.current = { parts: [], bytes: 0 };
       if (!['thinking', 'speaking'].includes(state.current.voicePhase)) { setVoicePhase('paused'); setVoiceLevel(0); }
+    } else if (nativeStream.current && !['thinking', 'speaking'].includes(state.current.voicePhase)) {
+      setVoicePhase(idleNativePhase());
+    }
+    if (nativeStream.current && !socket.current?.send({ type: 'voice.mute', requestId: nativeStream.current, muted, revision: voiceControlRevision.current })) {
+      handleVoiceFailure(new ApiError(0, 'OFFLINE', ''));
     }
     publishVoiceState();
     const transition = microphoneTransition.current.catch(() => {}).then(async () => {
       if (epoch !== microphoneEpoch.current) return;
       if (!muted) {
+        if (nativeStream.current && !voiceFault) return;
         await recoveryBarrier.current;
         if (state.current.assistantSession) await assistantControl.beforeTurn(api, state.current.assistantSession.id);
         if (!aiModeRef.current || microphoneIntent.current || epoch !== microphoneEpoch.current) return;
@@ -755,7 +778,7 @@ export function useMia() {
     }
     let cancelled = false;
     if (duplex.available) {
-      if (microphoneIntent.current || !aiModeRef.current) return () => { void stopNativeVoice(); };
+      if (!aiModeRef.current) return () => { void stopNativeVoice(); };
       const id = Crypto.randomUUID(); nativeStream.current = id; nativeCandidate.current = null;
       setVoicePhase('waiting');
       void assistantControl.beforeTurn(api, assistantSession.id).then(() => {

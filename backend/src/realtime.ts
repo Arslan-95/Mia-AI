@@ -22,6 +22,7 @@ const frameSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('voice.start'), requestId: z.uuid(), sampleRate: z.literal(24000), format: z.literal('pcm_s16le'), context: clientContextSchema.optional(), inputProcessing: z.literal('aec-residual-v1').optional() }).strict(),
   z.object({ type: z.literal('voice.end') }).strict(),
   z.object({ type: z.literal('voice.cancel') }).strict(),
+  z.object({ type: z.literal('voice.mute'), requestId: z.uuid(), muted: z.boolean(), revision: z.int().nonnegative() }).strict(),
   z.object({ type: z.literal('voice.context'), context: clientContextSchema }).strict(),
   z.object({ type: z.literal('speech.playback'), turnId: z.uuid(), playing: z.boolean() }).strict(),
   z.object({ type: z.literal('speech.request'), requestId: z.uuid(), turnId: z.uuid() }).strict(),
@@ -90,6 +91,12 @@ export function registerRealtime(app: FastifyInstance, deps: {
     let latestSpeechTurn: number | undefined;
     const acoustic = new AcousticEvidence();
     let needsAudioEvidence = false;
+    let inputMuted = false;
+    let inputController = new AbortController();
+    let inputBoundary: number | undefined;
+    let inputRevision = 0;
+    let pendingInputMute: { requestId: string; muted: boolean; revision: number } | undefined;
+    let mutedSilence: ReturnType<typeof setInterval> | undefined;
     const playback = new PlaybackEcho();
 
     const send = (value: unknown) => {
@@ -118,7 +125,27 @@ export function registerRealtime(app: FastifyInstance, deps: {
       throwIfAborted(signal);
     }
     const cancelSpeech = () => { synthesis?.abort(); synthesis = undefined; synthesisGeneration = undefined; };
+    const resetUtterances = () => {
+      acoustic.consumeThrough(acoustic.position);
+      for (const timer of stableWords.values()) clearTimeout(timer);
+      stableWords.clear();
+      for (const id of starts) completedSpeech.add(id);
+      starts.length = 0; finalTranscripts.clear(); utteranceContexts.clear(); wordGate.clear(); latestSpeechTurn = undefined;
+      inputController.abort(); inputController = new AbortController();
+    };
+    const setInputMuted = (muted: boolean, revision: number) => {
+      if (revision < inputRevision || inputMuted === muted && revision === inputRevision) return;
+      inputMuted = muted;
+      inputRevision = revision;
+      // Keep the provider's audio clock, but discard work crossing a mute edge.
+      inputBoundary = acoustic.position;
+      resetUtterances();
+    };
     const cancelVoice = () => {
+      clearInterval(mutedSilence); mutedSilence = undefined;
+      resetUtterances(); inputController.abort();
+      inputMuted = false; inputBoundary = undefined;
+      pendingInputMute = undefined;
       recognitionId = undefined;
       voiceGeneration = undefined;
       voiceContext = undefined;
@@ -182,7 +209,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
 
     async function interruptRecognizedWord(id: string, speechId: number, signal: AbortSignal) {
       cancelSpeech();
-      send({ type: 'voice.interruption', requestId: id, speechTurnId: speechId, clientTurnId: speechTurnId(id, speechId) });
+      send({ type: 'voice.interruption', requestId: id, inputRevision, speechTurnId: speechId, clientTurnId: speechTurnId(id, speechId) });
       const interrupted = await assistant.interrupt(user!.id, sessionId, signal, 'speech');
       voiceGeneration = interrupted.generation;
     }
@@ -198,7 +225,14 @@ export function registerRealtime(app: FastifyInstance, deps: {
         }).catch((error: unknown) => { if (!signal.aborted) { failure(error); cancelVoice(); } });
       }, Math.max(0, due - Date.now())));
     }
-    function onRecognition(id: string, event: RecognitionEvent, signal: AbortSignal) {
+    function onRecognition(id: string, event: RecognitionEvent, recognitionSignal: AbortSignal) {
+      if (recognitionId !== id || stopped || recognitionSignal.aborted) return;
+      if (inputMuted) {
+        if (event.type === 'speechStart' && completedSpeech.size < 256) completedSpeech.add(event.turnId);
+        return;
+      }
+      const eventInputRevision = inputRevision;
+      const signal = AbortSignal.any([recognitionSignal, inputController.signal]);
       // Database work below can delay this event while newer PCM arrives.
       // Assess audio at event receipt, not against a later utterance's audio.
       const receivedAt = Date.now();
@@ -209,12 +243,17 @@ export function registerRealtime(app: FastifyInstance, deps: {
         if (!user || recognitionId !== id || stopped || signal.aborted) return;
         if (!await validateSession() || signal.aborted) return;
         if (event.type === 'speechStart') {
-          if (starts.includes(event.turnId) || completedSpeech.has(event.turnId)) return;
+          if (completedSpeech.has(event.turnId) || inputBoundary !== undefined && event.audioProcessedMs !== undefined && event.audioProcessedMs <= inputBoundary) {
+            latestSpeechTurn = undefined; return;
+          }
+          if (starts.includes(event.turnId)) return;
           if (starts.length >= 8) throw new AppError(503, 'ASR_OVERFLOW', 'Too many unfinished speech turns. Please reconnect.');
           starts.push(event.turnId);
           utteranceContexts.set(event.turnId, voiceContext ? { ...voiceContext } : undefined);
           latestSpeechTurn = event.turnId; wordGate.start(event.turnId, needsAudioEvidence, audible); wordGate.hear(event.turnId, echo);
         }
+        // A final result from before mute must not become a new command after unmute.
+        if (event.type === 'speechComplete' && !starts.includes(event.turnId)) return;
         const speechId = event.type === 'speechComplete' ? event.turnId : event.type === 'transcript' ? latestSpeechTurn : undefined;
         if (speechId !== undefined) wordGate.hear(speechId, echo);
         if (speechId !== undefined && (event.type === 'transcript' || event.type === 'speechComplete')
@@ -246,7 +285,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
         }
         if (transcripts.length) {
           const result = await assistant.submit(user.id, sessionId, speechTurnId(id, lastTurnId), transcripts.join(' '), signal, utteranceContext);
-          send({ type: 'turn.accepted', ...result });
+          send({ type: 'turn.accepted', ...result, requestId: id, inputRevision: eventInputRevision });
         }
       }).catch((error: unknown) => { if (!signal.aborted) { failure(error); cancelVoice(); } });
     }
@@ -325,18 +364,26 @@ export function registerRealtime(app: FastifyInstance, deps: {
         send({ type: 'assistant.stopped', ...await assistant.interrupt(user.id, sessionId) });
       } else if (frame.type === 'voice.cancel') {
         cancelVoice(); send({ type: 'voice.cancelled' });
+      } else if (frame.type === 'voice.mute') {
+        // Applied immediately on receipt, including while ASR startup is pending.
       } else if (frame.type === 'voice.context') {
         await assertContextAccess(db, user.id, frame.context);
         voiceContext = frame.context;
       } else if (frame.type === 'speech.playback') {
         // Tracked on receipt in the message handler, outside this queue.
       } else if (frame.type === 'voice.end') {
+        clearInterval(mutedSilence); mutedSilence = undefined;
         recognition?.end();
         voiceEndTimer = setTimeout(() => { cancelVoice(); send({ type: 'voice.closed' }); }, 10_000);
       } else if (frame.type === 'voice.start') {
+        const pendingMute = pendingInputMute;
         cancelVoice();
         await assertContextAccess(db, user.id, frame.context ?? null);
         recognitionId = frame.requestId;
+        const latestMute = pendingInputMute?.requestId === frame.requestId ? pendingInputMute : pendingMute;
+        inputMuted = latestMute?.requestId === frame.requestId ? latestMute.muted : frame.context?.voice?.microphoneMuted === true;
+        inputRevision = latestMute?.requestId === frame.requestId ? latestMute.revision : frame.context?.voice?.revision ?? 0;
+        inputController = new AbortController();
         needsAudioEvidence = frame.inputProcessing === 'aec-residual-v1';
         voiceContext = frame.context;
         const controller = new AbortController(); recognitionController = controller;
@@ -349,6 +396,19 @@ export function registerRealtime(app: FastifyInstance, deps: {
             AbortSignal.any([controller.signal, lifetime.signal]));
           if (stopped || recognitionId !== frame.requestId) { stream.close(); return; }
           recognition = stream; voiceStartedAt = Date.now(); receivedBytes = 0;
+          // Meta requires real-time PCM even during silence. Never forward muted
+          // microphone bytes; generate silence here without a client audio stream.
+          let silenceAt = Date.now();
+          mutedSilence = setInterval(() => {
+            const now = Date.now();
+            const elapsed = Math.min(now - silenceAt, 160);
+            silenceAt = now;
+            if (!inputMuted || recognition !== stream) return;
+            try {
+              const silence = Buffer.alloc(Math.max(0, Math.round(elapsed * 24)) * 2);
+              acoustic.observe(silence); stream.write(silence);
+            } catch { send({ type: 'voice.failed', requestId: frame.requestId, code: 'ASR_UNAVAILABLE' }); cancelVoice(); }
+          }, 80);
           voiceTimer = setTimeout(() => { const requestId = recognitionId; cancelVoice(); send({ type: 'voice.closed', requestId }); }, 300_000);
           send({ type: 'voice.ready', requestId: frame.requestId, sampleRate: 24000, format: 'pcm_s16le' });
         } catch (error) {
@@ -378,6 +438,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
             || receivedBytes > 96_000 + (Date.now() - voiceStartedAt) * 60) {
             throw new AppError(400, 'INVALID_AUDIO_FRAME', 'Send realtime mono 24 kHz Int16 PCM in small ordered frames.');
           }
+          if (inputMuted) return;
           acoustic.observe(bytes);
           recognition.write(bytes);
         } catch (error) { failure(error); cancelVoice(); }
@@ -388,6 +449,10 @@ export function registerRealtime(app: FastifyInstance, deps: {
       let value: z.infer<typeof frameSchema>;
       try { value = frameSchema.parse(JSON.parse(data.toString())); }
       catch (error) { failure(error); return; }
+      if (value.type === 'voice.mute' && user) {
+        pendingInputMute = value;
+        if (value.requestId === recognitionId) setInputMuted(value.muted, value.revision);
+      }
       // Mia's echo reaches recognition right after this frame. Record it now,
       // not behind ASR startup or database work queued for earlier frames.
       if (value.type === 'speech.playback' && user) {

@@ -543,6 +543,8 @@ test('rapid microphone taps gate input without stopping the speaker graph or ope
   try {
     await h.wait(() => !!h.n.nativePCM);
     const stops = h.n.nativeStops, starts = h.n.nativeStarts;
+    const sessions = h.n.frames.filter(f => f.type === 'voice.start').length;
+    const cancelled = h.n.frames.filter(f => f.type === 'voice.cancel').length;
     let first!: Promise<void>; let second!: Promise<void>;
     await act(async () => { first = h.mia.toggleMicrophone(); second = h.mia.toggleMicrophone(); });
     await act(async () => { await Promise.all([first, second]); });
@@ -554,7 +556,59 @@ test('rapid microphone taps gate input without stopping the speaker graph or ope
     await act(async () => { h.n.nativePCM!(new Uint8Array(3840)); });
     assert.equal(h.n.pcmPackets, packets, 'muted input is neither sent nor buffered');
     assert.equal(h.n.nativeStops, stops); assert.equal(h.n.nativeStarts, starts);
+    await act(async () => { await h.mia.toggleMicrophone(); });
+    assert.equal(h.n.frames.filter(f => f.type === 'voice.start').length, sessions);
+    assert.equal(h.n.frames.filter(f => f.type === 'voice.cancel').length, cancelled);
+    assert.deepEqual(h.n.frames.filter(f => f.type === 'voice.mute').map(f => f.muted), [true, false, true, false]);
+    assert.equal(h.mia.voicePhase, 'listening');
   } finally { h.n.holdNativeStop = false; h.n.releaseNativeStop?.(); await h.close(); }
+});
+
+test('muted recognition survives rotation, background and reconnect without reopening on unmute', async () => {
+  const h = await mount(true, false, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    await act(async () => { h.n.nativePCM!(new Uint8Array(3840)); await h.mia.toggleMicrophone(); });
+    const stream = () => h.n.frames.filter(f => f.type === 'voice.start').at(-1)!;
+    await act(async () => { h.n.frame({ type: 'voice.closed', requestId: stream().requestId }); });
+    assert.equal((stream().context as any).voice.microphoneMuted, true);
+    assert.equal(h.mia.microphoneMuted, true); assert.equal(h.mia.voicePhase, 'paused');
+    await act(async () => { h.n.appState('background'); });
+    await h.wait(() => !h.n.nativePCM);
+    await act(async () => { h.n.appState('active'); });
+    await h.wait(() => !!h.n.nativePCM);
+    assert.equal(h.mia.voicePhase, 'paused');
+    await act(async () => { h.n.connection('Offline · reconnecting'); });
+    await act(async () => { h.n.connection('Connected'); });
+    await h.wait(() => !!h.n.nativePCM);
+    await act(async () => { h.n.nativePCM!(new Uint8Array(3840)); });
+    assert.equal(h.mia.voicePhase, 'paused');
+    assert.equal((stream().context as any).voice.microphoneMuted, true);
+    const sessions = h.n.frames.filter(f => f.type === 'voice.start').length;
+    const packets = h.n.pcmPackets;
+    await act(async () => { await h.mia.toggleMicrophone(); h.n.nativePCM!(new Uint8Array(3840)); });
+    assert.equal(h.n.frames.filter(f => f.type === 'voice.start').length, sessions);
+    assert.equal(h.mia.voicePhase, 'listening'); assert.ok(h.n.pcmPackets > packets);
+  } finally { await h.close(); }
+});
+
+test('mute while waiting for ASR ready preserves the request and resumes without a second handshake', async () => {
+  const h = await mount(true, false, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    h.n.holdASR = true;
+    const first = h.n.frames.find(f => f.type === 'voice.start')!;
+    await act(async () => { h.n.frame({ type: 'voice.closed', requestId: first.requestId }); });
+    const stream = h.n.frames.filter(f => f.type === 'voice.start').at(-1)!;
+    const sessions = h.n.frames.filter(f => f.type === 'voice.start').length;
+    await act(async () => { await h.mia.toggleMicrophone(); h.n.nativePCM!(new Uint8Array(3840)); });
+    const packets = h.n.pcmPackets;
+    await act(async () => { h.n.frame({ type: 'voice.ready', requestId: stream.requestId }); });
+    assert.equal(h.mia.voicePhase, 'paused'); assert.equal(h.n.pcmPackets, packets);
+    await act(async () => { await h.mia.toggleMicrophone(); h.n.nativePCM!(new Uint8Array(3840)); });
+    assert.equal(h.n.frames.filter(f => f.type === 'voice.start').length, sessions);
+    assert.equal(h.mia.voicePhase, 'listening');
+  } finally { await h.close(); }
 });
 
 test('native mute preserves pending work and playback; Stop reply preserves mode and restarts only recognition', async () => {
@@ -577,9 +631,37 @@ test('native mute preserves pending work and playback; Stop reply preserves mode
     assert.equal(h.n.pcmPackets, packets); assert.equal(h.n.nativeStops, stops);
     await act(async () => { await h.mia.toggleMicrophone(); });
     assert.ok(h.n.playback, 'unmuting does not cancel the reply');
+    const inputRevision = (h.n.frames.filter(f => f.type === 'voice.mute').at(-1)!.revision as number);
+    await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId,
+      inputRevision: inputRevision - 2, clientTurnId: 'queued-before-mute' }); });
+    assert.ok(h.n.playback, 'an old interruption queued before mute/unmute cannot stop the current reply');
     await act(async () => { await h.mia.stopAssistantReply(); });
     assert.equal(h.n.playback, null); assert.equal(h.mia.aiMode, true); assert.equal(h.n.nativeStops, stops);
-    assert.ok(h.n.frames.filter(f => f.type === 'voice.start').length >= 3);
+    assert.equal(h.n.frames.filter(f => f.type === 'voice.start').length, 2, 'only Stop reply rotates recognition');
+  } finally { await h.close(); }
+});
+
+test('an already committed voice command delivered after mute still receives its spoken reply', async () => {
+  const h = await mount(true, false, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    const stream = h.n.frames.find(f => f.type === 'voice.start')!;
+    const turn: Turn = { id: 'committed-before-mute', sessionId: 'assistant', userId: 'user', generation: 1,
+      userText: 'Explain', assistantText: 'Here is the answer.', status: 'completed', clientTurnId: 'committed-client', context: stream.context as any };
+    h.n.turns.push(turn);
+    await act(async () => { await h.mia.toggleMicrophone(); });
+    await act(async () => { h.n.frame({ type: 'voice.closed', requestId: stream.requestId }); });
+    await act(async () => {
+      h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, inputRevision: 0, clientTurnId: turn.clientTurnId });
+      h.n.frame({ type: 'turn.accepted', requestId: stream.requestId, inputRevision: 0, turn });
+    });
+    await h.wait(() => !!h.n.playback);
+    assert.equal(h.mia.microphoneMuted, true); assert.equal(h.mia.voicePhase, 'speaking');
+    assert.equal(h.n.frames.filter(f => f.type === 'voice.start').length, 2, 'natural rotation preserves committed work from the previous stream');
+    await act(async () => { await h.mia.stopAssistantReply(); });
+    const playbacks = h.n.playbacks;
+    await act(async () => { h.n.frame({ type: 'turn.accepted', requestId: stream.requestId, inputRevision: 0, turn }); });
+    assert.equal(h.n.playbacks, playbacks, 'explicit stop revokes acceptance from old streams');
   } finally { await h.close(); }
 });
 

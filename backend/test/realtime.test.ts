@@ -59,7 +59,8 @@ test('long speech drains bounded writes, survives input mute, and cancels a stal
   client.send({ type: 'turn', clientTurnId: randomUUID(), text: 'Explain in detail.' });
   const accepted = await client.next('turn.accepted'); const turnId = (accepted.turn as { id: string }).id;
   await client.next('event', frame => (frame.event as { type: string }).type === 'assistant.completed');
-  client.send({ type: 'voice.start', requestId: randomUUID(), sampleRate: 24000, format: 'pcm_s16le' }); await client.next('voice.ready');
+  const voiceRequestId = randomUUID();
+  client.send({ type: 'voice.start', requestId: voiceRequestId, sampleRate: 24000, format: 'pcm_s16le' }); await client.next('voice.ready');
 
   // Model a slow network at the actual server socket boundary. A provider may
   // yield an entire answer at once; a single huge write used to close with 1013.
@@ -77,7 +78,7 @@ test('long speech drains bounded writes, survives input mute, and cancels a stal
     });
   }) as typeof server.send;
   const requestId = randomUUID(); client.send({ type: 'speech.request', requestId, turnId }); await client.next('speech.chunk');
-  client.send({ type: 'voice.cancel' }); await client.next('voice.cancelled');
+  client.send({ type: 'voice.mute', requestId: voiceRequestId, muted: true, revision: 1 });
   client.send({ type: 'ping' }); await client.next('pong');
   const completed = await client.next('speech.completed', frame => frame.requestId === requestId);
   const chunks = client.frames.filter(frame => frame.type === 'speech.chunk' && frame.requestId === requestId);
@@ -413,6 +414,170 @@ test('live websocket authenticates, replays scoped events and runs only final sp
   assert.equal(events.statusCode, 200);
   assert.ok(events.json().length > 0);
   assert.equal(sessionId, String((await context.app.inject({ method: 'POST', url: '/v1/assistant/sessions', headers })).json().id));
+});
+
+test('mute keeps recognition connected with synthetic silence and discards speech crossing mute edges', { timeout: 12_000 }, async t => {
+  let emit!: (event: RecognitionEvent) => void;
+  let opens = 0, closes = 0;
+  const packets: Buffer[] = [];
+  const speech: SpeechProvider = {
+    recognitionConfigured: true, synthesisConfigured: false, transcribe: async () => '',
+    async *synthesize() { yield new Uint8Array(2); },
+    async recognize(_keywords, events) {
+      opens++; emit = events;
+      return { write(bytes) { packets.push(Buffer.from(bytes)); }, end() {}, close() { closes++; } };
+    },
+  };
+  const context = await testApp({ speech, provider: { configured: true, respond: async () => ({ text: 'Okay.', calls: [], output: [] }) } });
+  t.after(() => context.close());
+  const identity = await phoneSignIn(context.app, '+15550000930', 'warm_mute');
+  const url = (await context.app.listen({ port: 0, host: '127.0.0.1' })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: identity.token, after: '0' }); await client.next('ready');
+  const requestId = randomUUID();
+  client.send({ type: 'voice.start', requestId, sampleRate: 24000, format: 'pcm_s16le' }); await client.next('voice.ready');
+  emit({ type: 'speechStart', turnId: 1 });
+  emit({ type: 'transcript', transcript: 'Open later', final: false });
+  await client.next('voice.event', f => (f.event as RecognitionEvent).type === 'transcript');
+  client.send({ type: 'voice.mute', requestId, muted: true, revision: 1 });
+  await waitFor(() => packets.length >= 3 ? true : undefined);
+  assert.ok(packets.every(packet => packet.every(byte => byte === 0)));
+  assert.ok(packets.every(packet => packet.length > 0 && packet.length <= 8192));
+  client.socket.send(Buffer.alloc(3840, 7)); // Even a misbehaving muted client cannot send microphone audio upstream.
+  emit({ type: 'speechComplete', turnId: 1, transcript: 'Open later.' });
+  emit({ type: 'speechStart', turnId: 2, audioProcessedMs: 80 });
+  emit({ type: 'speechComplete', turnId: 2, transcript: 'Muted words.' });
+  await delay(50);
+  assert.ok(packets.every(packet => packet.every(byte => byte === 0)));
+  assert.equal(client.frames.some(f => f.type === 'voice.interruption'), false, 'mute cancels stable-word confirmation');
+  client.send({ type: 'voice.mute', requestId, muted: false, revision: 2 });
+  client.send({ type: 'ping' }); await client.next('pong');
+  const packetCount = packets.length;
+  await delay(180); assert.equal(packets.length, packetCount, 'unmute stops synthetic silence');
+  emit({ type: 'speechComplete', turnId: 1, transcript: 'Late old words.' });
+  emit({ type: 'speechStart', turnId: 2, audioProcessedMs: 80 });
+  emit({ type: 'speechComplete', turnId: 2, transcript: 'Late muted words.' });
+  await delay(30);
+  assert.equal((await context.db.query('SELECT id FROM assistant_turns')).length, 0);
+  client.socket.send(Buffer.alloc(3840, 9));
+  await waitFor(() => packets.length > packetCount ? true : undefined);
+  emit({ type: 'speechStart', turnId: 3 });
+  emit({ type: 'speechComplete', turnId: 3, transcript: 'Fresh command.' });
+  await client.next('turn.accepted', f => (f.turn as { userText: string }).userText === 'Fresh command.');
+  assert.equal(opens, 1); assert.equal(closes, 0);
+  assert.equal(client.frames.filter(f => f.type === 'voice.ready').length, 1);
+  client.send({ type: 'voice.cancel' }); await client.next('voice.cancelled');
+  const finalCount = packets.length; await delay(100);
+  assert.equal(packets.length, finalCount); assert.equal(closes, 1);
+  const oldEmit = emit, nextRequestId = randomUUID();
+  client.send({ type: 'voice.start', requestId: nextRequestId, sampleRate: 24000, format: 'pcm_s16le',
+    context: { route: '/chats', revision: 0, voice: { enabled: true, microphoneMuted: true, revision: 2 } } });
+  await client.next('voice.ready', f => f.requestId === nextRequestId);
+  oldEmit({ type: 'speechStart', turnId: 99 });
+  client.send({ type: 'voice.mute', requestId: nextRequestId, muted: false, revision: 3 });
+  client.send({ type: 'ping' }); await waitFor(() => client.frames.filter(f => f.type === 'pong').length >= 2 ? true : undefined);
+  emit({ type: 'speechStart', turnId: 99 });
+  emit({ type: 'speechComplete', turnId: 99, transcript: 'New stream command.' });
+  await client.next('turn.accepted', f => (f.turn as { userText: string }).userText === 'New stream command.');
+});
+
+test('mute during pending recognition startup preserves the stream and latest mute intent', { timeout: 12_000 }, async t => {
+  let release!: () => void;
+  let signal!: AbortSignal;
+  let writes = 0, closes = 0, ended = false;
+  const speech: SpeechProvider = {
+    recognitionConfigured: true, synthesisConfigured: false, transcribe: async () => '',
+    async *synthesize() { yield new Uint8Array(2); },
+    async recognize(_keywords, _events, _failure, currentSignal) {
+      signal = currentSignal;
+      await new Promise<void>(resolve => { release = resolve; });
+      return { write() { assert.equal(ended, false, 'no PCM is allowed after endStream'); writes++; }, end() { ended = true; }, close() { closes++; } };
+    },
+  };
+  const context = await testApp({ speech }); t.after(() => context.close());
+  const identity = await phoneSignIn(context.app, '+15550000931', 'pending_mute');
+  const url = (await context.app.listen({ port: 0, host: '127.0.0.1' })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: identity.token, after: '0' }); await client.next('ready');
+  const requestId = randomUUID();
+  client.send({ type: 'voice.start', requestId, sampleRate: 24000, format: 'pcm_s16le' });
+  await waitFor(() => signal);
+  for (const [index, muted] of [true, false, true].entries()) client.send({ type: 'voice.mute', requestId, muted, revision: index + 1 });
+  await delay(30); release();
+  await client.next('voice.ready'); await waitFor(() => writes > 0 ? true : undefined);
+  assert.equal(signal.aborted, false); assert.equal(closes, 0);
+  client.send({ type: 'voice.mute', requestId: randomUUID(), muted: false, revision: 4 });
+  const before = writes; await delay(180);
+  assert.ok(writes > before, 'a stale request cannot unmute the current stream');
+  client.send({ type: 'voice.end' });
+  await waitFor(() => ended ? true : undefined);
+  const afterEnd = writes; await delay(180);
+  assert.equal(writes, afterEnd);
+  client.send({ type: 'voice.cancel' }); await client.next('voice.cancelled');
+  assert.equal(signal.aborted, true); assert.equal(closes, 1);
+});
+
+test('mute aborts recognition queued behind authentication before it can interrupt or submit', { timeout: 12_000 }, async t => {
+  let emit!: (event: RecognitionEvent) => void;
+  const speech: SpeechProvider = {
+    recognitionConfigured: true, synthesisConfigured: false, transcribe: async () => '',
+    async *synthesize() { yield new Uint8Array(2); },
+    async recognize(_keywords, events) { emit = events; return { write() {}, end() {}, close() {} }; },
+  };
+  const context = await testApp({ speech, provider: { configured: true, respond: async () => ({ text: 'Okay.', calls: [], output: [] }) } });
+  t.after(() => context.close());
+  const identity = await phoneSignIn(context.app, '+15550000934', 'queued_mute');
+  const url = (await context.app.listen({ port: 0, host: '127.0.0.1' })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: identity.token, after: '0' }); await client.next('ready');
+  const requestId = randomUUID();
+  client.send({ type: 'voice.start', requestId, sampleRate: 24000, format: 'pcm_s16le' }); await client.next('voice.ready');
+  const query = context.db.query.bind(context.db);
+  let release!: () => void, held = false;
+  context.db.query = (async (sql, values) => {
+    if (!held && sql.includes('FROM auth_sessions s JOIN users')) {
+      held = true; await new Promise<void>(resolve => { release = resolve; });
+    }
+    return query(sql, values);
+  }) as typeof context.db.query;
+  emit({ type: 'speechStart', turnId: 1 });
+  emit({ type: 'speechComplete', turnId: 1, transcript: 'Must never run.' });
+  await waitFor(() => release);
+  client.send({ type: 'voice.mute', requestId, muted: true, revision: 1 });
+  client.send({ type: 'ping' }); await client.next('pong'); release();
+  await delay(80);
+  assert.equal(client.frames.some(f => f.type === 'voice.interruption' || f.type === 'turn.accepted'), false);
+  assert.equal((await context.db.query('SELECT id FROM assistant_turns')).length, 0);
+});
+
+test('mute arriving during route authorization applies to the new recognition session', { timeout: 12_000 }, async t => {
+  let writes = 0, opens = 0;
+  const speech: SpeechProvider = {
+    recognitionConfigured: true, synthesisConfigured: false, transcribe: async () => '',
+    async *synthesize() { yield new Uint8Array(2); },
+    async recognize() { opens++; return { write() { writes++; }, end() {}, close() {} }; },
+  };
+  const context = await testApp({ speech }); t.after(() => context.close());
+  const owner = await phoneSignIn(context.app, '+15550000932', 'authorize_mute');
+  const other = await phoneSignIn(context.app, '+15550000933', 'authorize_other');
+  const chat = await new MessagingService(context.db).createDirectChat(owner.user.id, other.user.id);
+  const url = (await context.app.listen({ port: 0, host: '127.0.0.1' })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: owner.token, after: '0' }); await client.next('ready');
+  const query = context.db.query.bind(context.db);
+  let authorize!: () => void;
+  context.db.query = (async (sql, values) => {
+    if (sql.startsWith('SELECT 1 FROM chat_members')) await new Promise<void>(resolve => { authorize = resolve; });
+    return query(sql, values);
+  }) as typeof context.db.query;
+  const requestId = randomUUID();
+  client.send({ type: 'voice.start', requestId, sampleRate: 24000, format: 'pcm_s16le',
+    context: { route: `/chat/${chat.id}`, revision: 0, voice: { enabled: true, microphoneMuted: false, revision: 0 } } });
+  await waitFor(() => authorize);
+  client.send({ type: 'voice.mute', requestId, muted: true, revision: 1 });
+  await delay(30); authorize();
+  await client.next('voice.ready'); await waitFor(() => writes > 0 ? true : undefined);
+  assert.equal(opens, 1);
 });
 
 test('websocket rejects unauthenticated commands and disallowed browser origins', { timeout: 10_000 }, async (t) => {
