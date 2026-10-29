@@ -25,6 +25,8 @@ export type VoiceRuntime = {
 export class VoiceConversation {
   private controller?: AbortController;
   private settled = Promise.resolve();
+  private inputMuted = false;
+  private inputController?: AbortController;
   get stopped() { return this.controller?.signal.aborted ?? true; }
 
   start(runtime: VoiceRuntime) {
@@ -33,21 +35,34 @@ export class VoiceConversation {
     const { signal } = controller;
     const task = this.settled.then(async () => {
       while (!signal.aborted) {
-        if (!runtime.ready()) {
+        if (this.inputMuted || !runtime.ready()) {
           runtime.phase('paused');
           await voiceDelay(200, signal);
           continue;
         }
-        runtime.phase('listening');
-        const recording = await runtime.capture(signal);
-        if (!recording) continue;
+        const input = this.inputController = new AbortController();
+        const cancelInput = () => input.abort();
+        signal.addEventListener('abort', cancelInput, { once: true });
+        if (signal.aborted) input.abort();
+        const inputSignal = input.signal;
+        let recording: Recording | null = null;
         let text: string;
         try {
-          checkVoice(signal);
+          runtime.phase('listening');
+          recording = await runtime.capture(inputSignal);
+          if (!recording) continue;
+          checkVoice(inputSignal);
           runtime.phase('transcribing');
-          text = await runtime.transcribe(recording, signal);
-          checkVoice(signal);
-        } finally { await runtime.discard(recording); }
+          text = await runtime.transcribe(recording, inputSignal);
+          checkVoice(inputSignal);
+        } catch (error) {
+          if (input.signal.aborted && !signal.aborted) continue;
+          throw error;
+        } finally {
+          signal.removeEventListener('abort', cancelInput);
+          if (this.inputController === input) this.inputController = undefined;
+          if (recording) await runtime.discard(recording);
+        }
         if (!text.trim()) continue;
         checkVoice(signal);
         runtime.phase('thinking');
@@ -61,4 +76,5 @@ export class VoiceConversation {
   }
 
   stop() { this.controller?.abort(); return this.settled; }
+  setInputMuted(muted: boolean) { this.inputMuted = muted; if (muted) this.inputController?.abort(); }
 }

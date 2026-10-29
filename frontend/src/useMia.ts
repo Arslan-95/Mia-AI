@@ -8,6 +8,7 @@ import { NavigationContext, sameContext, viewRoute } from './navigationContext';
 import { preferences, sessionStorage } from './storage';
 import { Realtime, type Frame } from './realtime';
 import { PresentationLease, isLiveAction, mergeMessages } from './coordination';
+import { ChatScrollPositions } from './chatScrollPositions';
 import { Engine } from './audio/engine';
 import { DuplexAudio } from './audio/duplex';
 import { concatBytes } from './audio/wav';
@@ -24,6 +25,12 @@ export function useMia() {
   const microphoneIntent = useRef(false);
   const microphoneTransition = useRef<Promise<void>>(Promise.resolve());
   const microphoneEpoch = useRef(0);
+  const voiceControlRevision = useRef(0);
+  const finishingControl = useRef<string | null>(null);
+  const respondingTurn = useRef<string | null>(null);
+  const appliedVoiceControl = useRef<{ turnId: string; revision: number } | null>(null);
+  const [finishingControlReply, setFinishingControlReply] = useState(false);
+  const voiceSessionEnabled = aiMode || finishingControlReply;
   const [voiceLevel, setVoiceLevel] = useState(0);
   const lastMeter = useRef(0);
   const voiceEnvelope = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
@@ -58,6 +65,11 @@ export function useMia() {
   const lease = useRef(new PresentationLease()).current; const audio = useRef<Engine | null>(null); if (!audio.current) audio.current = new Engine();
   const assistantControl = useRef(new AssistantControl()).current;
   const navigation = useRef(new NavigationContext()).current;
+  const [chatScrollPositions] = useState(() => new ChatScrollPositions());
+  function clientSnapshot(): ClientContext {
+    return { ...navigation.snapshot(), voice: { enabled: aiModeRef.current, microphoneMuted: microphoneIntent.current, revision: voiceControlRevision.current } };
+  }
+  function publishVoiceState() { socket.current?.send({ type: 'voice.context', context: clientSnapshot() }); }
   const requestContext = useRef<ClientContext | null>(null);
   const socket = useRef<Realtime | null>(null); const state = useRef({ session, activeChatId, tab, assistantSession, chats, devicePrompt, audioState, voicePhase });
   state.current = { session, activeChatId, tab, assistantSession, chats, devicePrompt, audioState, voicePhase };
@@ -69,6 +81,8 @@ export function useMia() {
   const fail = useCallback((reason: unknown) => { const message = userErrorMessage(reason); if (message) setError(message); }, []);
   const api = useMemo(() => new Api(address, session, () => { void clearSession(); }), [address, session]);
   async function clearSession() {
+    chatScrollPositions.clear();
+    finishingControl.current = null; setFinishingControlReply(false); appliedVoiceControl.current = null;
     void conversation.stop(); await stopNativeVoice();
     setManualAudio(false); setVoiceFault(false); setVoiceRecoverable(false); setRealtimeReady(false);
     navigation.reset(); requestContext.current = null; setTab('chats');
@@ -162,6 +176,7 @@ export function useMia() {
   }, [session?.token, session?.user.profileComplete, address, booting]);
   const speech = useRef<{ requestId: string; turnId: string; epoch: number; parts: Uint8Array[]; bytes: number; settle(error?: unknown): void } | null>(null);
   async function stopNativeVoice() {
+    respondingTurn.current = null;
     setVoiceLevel(0);
     clearTimeout(nativeConnectTimeout.current); nativeConnectTimeout.current = undefined;
     nativeResponse.current?.abort(); nativeResponse.current = null;
@@ -170,13 +185,26 @@ export function useMia() {
     nativePCM.current = { parts: [], bytes: 0 };
     await duplex.stop();
   }
+  function cancelNativeRecognition() {
+    clearTimeout(nativeConnectTimeout.current); nativeConnectTimeout.current = undefined;
+    if (nativeStream.current) socket.current?.send({ type: 'voice.cancel' });
+    nativeStream.current = null; nativeCapture.current = null;
+    nativePCM.current = { parts: [], bytes: 0 };
+  }
+  function finishControlReply(turnId: string) {
+    if (finishingControl.current !== turnId) return;
+    finishingControl.current = null; setFinishingControlReply(false);
+    if (!aiModeRef.current) setVoicePhase('off');
+  }
   function idleNativePhase(): VoicePhase {
+    if (!aiModeRef.current) return 'off';
+    if (microphoneIntent.current) return 'paused';
     return duplex.hasInput && nativeStream.current !== null && nativeCapture.current === nativeStream.current ? 'listening' : 'waiting';
   }
   function startNativeRecognition(id: string) {
     clearTimeout(nativeConnectTimeout.current);
     nativeStream.current = id; nativeCapture.current = null;
-    if (!socket.current?.send({ type: 'voice.start', requestId: id, sampleRate: 24000, format: 'pcm_s16le', inputProcessing: 'aec-residual-v1', context: navigation.snapshot() })) {
+    if (!socket.current?.send({ type: 'voice.start', requestId: id, sampleRate: 24000, format: 'pcm_s16le', inputProcessing: 'aec-residual-v1', context: clientSnapshot() })) {
       handleVoiceFailure(new ApiError(0, 'OFFLINE', '')); return;
     }
     nativeConnectTimeout.current = setTimeout(() => {
@@ -209,7 +237,7 @@ export function useMia() {
   }
   function setView(next: Tab, chatId: string | null = null) {
     navigation.move(viewRoute(next, chatId)); setTab(next); setActiveChatId(chatId);
-    if (nativeStream.current) socket.current?.send({ type: 'voice.context', context: navigation.snapshot() });
+    publishVoiceState();
     state.current = { ...state.current, tab: next, activeChatId: chatId };
   }
   async function navigate(next: Tab, chatId: string | null = null) {
@@ -218,7 +246,8 @@ export function useMia() {
     if (next === 'chats' && chatId) await loadMessages(chatId).catch(fail);
   }
   async function acknowledge(action: DeviceAction, success: boolean, result: { message?: string; mediaId?: string }) {
-    await api.request(`/v1/device-actions/${action.actionId}/result`, 'POST', { success, result: { ...result, context: navigation.snapshot() } });
+    await api.request(`/v1/device-actions/${action.actionId}/result`, 'POST', { success, result: { ...result, context: clientSnapshot(),
+      ...(['set_voice_mode', 'set_microphone_muted'].includes(action.kind) ? { voice: clientSnapshot().voice } : {}) } });
   }
   async function performAction(action: DeviceAction) {
     const epoch = lease.snapshot();
@@ -226,7 +255,30 @@ export function useMia() {
       && foreground.current && Date.now() - Date.parse(action.createdAt) < 18000;
     try {
       if (!valid()) throw new Error('This device request belongs to a previous view.');
-      if (action.kind === 'open_chat' && typeof action.payload.chatId === 'string') {
+      if (action.kind === 'set_voice_mode' || action.kind === 'set_microphone_muted') {
+        const ownPrevious = appliedVoiceControl.current?.turnId === action.turnId && appliedVoiceControl.current.revision === voiceControlRevision.current;
+        if (!action.context?.voice || action.context.voice.revision !== voiceControlRevision.current && !ownPrevious) throw new Error('Voice controls changed after that request.');
+        if (action.kind === 'set_voice_mode') {
+          if (typeof action.payload.enabled !== 'boolean') throw new Error('Voice mode state is missing.');
+          const enabled = action.payload.enabled;
+          if (enabled) throw new Error('Enable voice mode deliberately in Settings.');
+          if (!enabled && respondingTurn.current === action.turnId) { finishingControl.current = action.turnId; setFinishingControlReply(true); }
+          else { finishingControl.current = null; setFinishingControlReply(false); }
+          microphoneEpoch.current++; voiceControlRevision.current++;
+          aiModeRef.current = enabled; setAiMode(enabled);
+          microphoneIntent.current = false; setMicrophoneMuted(false);
+          duplex.setInputMuted(!enabled); conversation.setInputMuted(!enabled);
+          if (!enabled) cancelNativeRecognition();
+          await preferences.set('mia.ai_mode', String(enabled)); publishVoiceState();
+          if (enabled && duplex.active && !nativeStream.current && realtimeReady) startNativeRecognition(Crypto.randomUUID());
+        } else {
+          if (typeof action.payload.muted !== 'boolean') throw new Error('Microphone state is missing.');
+          await applyMicrophoneMute(action.payload.muted);
+        }
+        const appliedRevision = voiceControlRevision.current;
+        await acknowledge(action, true, { message: 'Voice controls updated on this device.' });
+        appliedVoiceControl.current = { turnId: action.turnId, revision: appliedRevision };
+      } else if (action.kind === 'open_chat' && typeof action.payload.chatId === 'string') {
         const list = await api.request<Chat[]>('/v1/chats');
         if (!valid()) throw new Error('This device request is no longer current.');
         const chat = list.find(item => item.id === action.payload.chatId); if (!chat) throw new Error('The requested chat is unavailable.');
@@ -294,7 +346,7 @@ export function useMia() {
         return;
       }
       void duplex.start(bytes => {
-        if (!nativeStream.current) return;
+        if (!nativeStream.current || microphoneIntent.current || !aiModeRef.current) return;
         if (state.current.voicePhase !== 'speaking' && Date.now() - lastMeter.current >= 80) {
           lastMeter.current = Date.now(); setVoiceLevel(pcmLevel(bytes));
         }
@@ -315,19 +367,21 @@ export function useMia() {
     if (nativeStream.current && frame.type === 'voice.interruption' && frame.requestId === nativeStream.current && typeof frame.clientTurnId === 'string') {
       nativeResponse.current?.abort(); nativeResponse.current = null;
       nativeCandidate.current = frame.clientTurnId;
-      lease.begin(frame.clientTurnId); requestContext.current = navigation.snapshot(); setDevicePrompt(null);
+      lease.begin(frame.clientTurnId); requestContext.current = clientSnapshot(); setDevicePrompt(null);
       void stopAudio().catch(fail); setVoicePhase(idleNativePhase());
       return;
     }
-    if (nativeStream.current && frame.type === 'turn.accepted') {
+    if (duplex.available && (aiModeRef.current || finishingControl.current) && frame.type === 'turn.accepted') {
       const turn = frame.turn as Turn;
       if (turn?.clientTurnId !== nativeCandidate.current) return;
-      lease.accept(turn.clientTurnId, turn.id); requestContext.current = turn.context ?? navigation.snapshot();
+      lease.accept(turn.clientTurnId, turn.id); requestContext.current = turn.context ?? clientSnapshot();
       nativeResponse.current?.abort(); const controller = nativeResponse.current = new AbortController();
+      respondingTurn.current = turn.id;
       setVoicePhase('thinking');
       void respondToTurn(turn, controller.signal).then(() => {
         if (nativeResponse.current === controller && !controller.signal.aborted) setVoicePhase(idleNativePhase());
-      }).catch(reason => { if (!controller.signal.aborted && !(reason instanceof CancelledError)) handleVoiceFailure(reason); });
+      }).catch(reason => { if (!controller.signal.aborted && !(reason instanceof CancelledError)) handleVoiceFailure(reason); })
+        .finally(() => { if (respondingTurn.current === turn.id) respondingTurn.current = null; finishControlReply(turn.id); });
       return;
     }
     if (nativeStream.current && ['voice.failed', 'voice.closed'].includes(String(frame.type))) {
@@ -391,11 +445,16 @@ export function useMia() {
   }
   async function logout() { try { await api.request('/v1/auth/logout', 'POST'); } finally { await clearSession(); } }
   async function saveAiMode(enabled: boolean) {
+    const wasFinishing = Boolean(finishingControl.current);
+    finishingControl.current = null; setFinishingControlReply(false);
     microphoneEpoch.current++;
+    voiceControlRevision.current++;
     microphoneIntent.current = false; setMicrophoneMuted(false);
+    duplex.setInputMuted(!enabled); conversation.setInputMuted(!enabled);
     aiModeRef.current = enabled; setAiMode(enabled); setVoiceFault(false); setVoiceRecoverable(false); setError('');
     if (!enabled) setVoicePhase('off');
-    await Promise.all([preferences.set('mia.ai_mode', String(enabled)), enabled ? Promise.resolve() : interrupt()]);
+    publishVoiceState();
+    await Promise.all([preferences.set('mia.ai_mode', String(enabled)), enabled && !wasFinishing ? Promise.resolve() : interrupt()]);
   }
   async function resumeAssistant() {
     await recoveryBarrier.current;
@@ -404,27 +463,51 @@ export function useMia() {
     setVoiceRevision(value => value + 1);
   }
   function toggleMicrophone() {
+    return applyMicrophoneMute(!microphoneIntent.current);
+  }
+  function applyMicrophoneMute(muted: boolean) {
     if (!aiModeRef.current) return Promise.resolve();
     const epoch = microphoneEpoch.current;
-    const muted = !microphoneIntent.current;
+    voiceControlRevision.current++;
     microphoneIntent.current = muted;
-    // Reopening waits for the previous capture graph and assistant work to
-    // finish, including during rapid repeated taps.
-    if (muted) setMicrophoneMuted(true);
+    duplex.setInputMuted(muted); conversation.setInputMuted(muted);
+    setMicrophoneMuted(muted);
+    // Only input acquisition is serialized. Current work/playback continues.
+    if (muted) {
+      cancelNativeRecognition();
+      if (!['thinking', 'speaking'].includes(state.current.voicePhase)) { setVoicePhase('paused'); setVoiceLevel(0); }
+    }
+    publishVoiceState();
     const transition = microphoneTransition.current.catch(() => {}).then(async () => {
       if (epoch !== microphoneEpoch.current) return;
-      if (muted) await interrupt();
-      else {
+      if (!muted) {
         await recoveryBarrier.current;
+        if (state.current.assistantSession) await assistantControl.beforeTurn(api, state.current.assistantSession.id);
         if (!aiModeRef.current || microphoneIntent.current || epoch !== microphoneEpoch.current) return;
         if (voiceFault) await resumeAssistant();
         if (!aiModeRef.current || microphoneIntent.current || epoch !== microphoneEpoch.current) return;
-        setMicrophoneMuted(false);
-        setVoiceRevision(value => value + 1);
+        if (duplex.available && realtimeReady && foreground.current && !nativeStream.current) {
+          if (!['thinking', 'speaking'].includes(state.current.voicePhase)) setVoicePhase('waiting');
+          startNativeRecognition(Crypto.randomUUID());
+        }
       }
     });
     microphoneTransition.current = transition;
     return transition;
+  }
+  async function stopAssistantReply() {
+    const epoch = microphoneEpoch.current;
+    nativeResponse.current?.abort(); nativeResponse.current = null;
+    nativeCandidate.current = null; cancelNativeRecognition();
+    lease.revoke(); requestContext.current = null; setDevicePrompt(null);
+    const current = state.current.assistantSession;
+    await Promise.all([stopAudio(), conversation.stop(), current ? assistantControl.stop(api, current.id) : Promise.resolve()]);
+    if (epoch !== microphoneEpoch.current || !aiModeRef.current || !foreground.current) return;
+    if (duplex.available && !microphoneIntent.current) {
+      if (!nativeStream.current) { setVoicePhase('waiting'); startNativeRecognition(Crypto.randomUUID()); }
+      else setVoicePhase(idleNativePhase());
+    } else if (duplex.available) setVoicePhase('paused');
+    else setVoiceRevision(value => value + 1);
   }
   async function startChat(profile: Profile, add = false) {
     if (add) await api.request('/v1/contacts', 'POST', { userId: profile.id });
@@ -446,11 +529,6 @@ export function useMia() {
     setComposers(previous => ({ ...previous, [chatId]: '' }));
     await sendPending({ chatId, content: { kind: 'text', text }, clientMessageId: Crypto.randomUUID(), status: 'sending' });
   }
-  async function saveDraft() {
-    const chat = chats.find(item => item.id === activeChatId); const text = chat ? composers[chat.id]?.trim() : ''; if (!chat || !text) return;
-    await api.request('/v1/drafts', 'POST', { recipientId: chat.recipient.id, content: { kind: 'text', text } });
-    setComposers(previous => ({ ...previous, [chat.id]: '' })); await refresh();
-  }
   async function draftAction(draft: Draft, action: 'review' | 'confirm' | 'discard' | 'edit', text?: string) {
     await api.request(`/v1/drafts/${draft.id}${action === 'review' || action === 'confirm' ? `/${action}` : ''}`, action === 'discard' ? 'DELETE' : action === 'edit' ? 'PATCH' : 'POST', { version: draft.version, ...(action === 'edit' ? { content: { kind: 'text', text } } : {}) });
     await refresh();
@@ -458,7 +536,7 @@ export function useMia() {
   async function submitAssistant(text: string, signal: AbortSignal) {
     if (!assistantSession || !text.trim()) return;
     checkVoice(signal);
-    const item = { text, clientTurnId: Crypto.randomUUID(), context: navigation.snapshot() };
+    const item = { text, clientTurnId: Crypto.randomUUID(), context: clientSnapshot() };
     lease.begin(item.clientTurnId); setDevicePrompt(null);
     requestContext.current = item.context;
     const epoch = lease.snapshot();
@@ -612,7 +690,9 @@ export function useMia() {
       const accepted = await submitAssistant(text, signal);
       checkVoice(signal);
       if (!accepted) throw new CancelledError();
-      await respondToTurn(accepted, signal);
+      respondingTurn.current = accepted.id;
+      try { await respondToTurn(accepted, signal); }
+      finally { if (respondingTurn.current === accepted.id) respondingTurn.current = null; finishControlReply(accepted.id); }
     },
   };
   useEffect(() => {
@@ -651,14 +731,15 @@ export function useMia() {
     return () => controller.abort();
   }, [aiMode, microphoneMuted, session?.token, session?.user.profileComplete, inForeground, manualAudio, voiceFault, voiceRecoverable, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, assistantSession?.id]);
   useEffect(() => {
-    if (!aiMode || !session?.user.profileComplete) { setVoicePhase('off'); return; }
-    if (microphoneMuted || !inForeground || manualAudio) { setVoicePhase('paused'); return; }
+    if (!voiceSessionEnabled || !session?.user.profileComplete) { setVoicePhase('off'); return; }
+    if (!inForeground || manualAudio) { setVoicePhase('paused'); return; }
     if (voiceFault) { setVoicePhase(voiceRecoverable ? 'waiting' : 'error'); return; }
     if (!assistantSession || !realtimeReady || capabilities?.agent !== true || !capabilities.speechRecognition || !capabilities.speechSynthesis) {
       setVoicePhase('waiting'); return;
     }
     let cancelled = false;
     if (duplex.available) {
+      if (microphoneIntent.current || !aiModeRef.current) return () => { void stopNativeVoice(); };
       const id = Crypto.randomUUID(); nativeStream.current = id; nativeCandidate.current = null;
       setVoicePhase('waiting');
       void assistantControl.beforeTurn(api, assistantSession.id).then(() => {
@@ -680,8 +761,8 @@ export function useMia() {
       handleVoiceFailure(reason);
     });
     return () => { cancelled = true; void conversation.stop(); };
-  }, [aiMode, microphoneMuted, session?.token, session?.user.profileComplete, assistantSession?.id, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, inForeground, manualAudio, voiceRevision, voiceFault, voiceRecoverable, realtimeReady]);
-  return { booting, session, aiMode, microphoneMuted, toggleMicrophone, voiceLevel, voicePhase, voiceFault, error, setError, busy, tab, capabilities, chats, contacts, drafts, messages, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, devicePrompt, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, startChat, sendText, sendPending, saveDraft, draftAction, interrupt, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice, acceptDeviceRecording,
+  }, [voiceSessionEnabled, session?.token, session?.user.profileComplete, assistantSession?.id, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, inForeground, manualAudio, voiceRevision, voiceFault, voiceRecoverable, realtimeReady]);
+  return { booting, session, aiMode, microphoneMuted, toggleMicrophone, stopAssistantReply, voiceLevel, voicePhase, voiceFault, error, setError, busy, tab, capabilities, chats, contacts, drafts, messages, chatScrollPositions, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, devicePrompt, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, startChat, sendText, sendPending, draftAction, interrupt, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice, acceptDeviceRecording,
     setComposer: (text: string) => { if (activeChatId) setComposers(previous => ({ ...previous, [activeChatId]: text })); },
   };
 }

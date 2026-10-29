@@ -65,6 +65,18 @@ test('interruption cancels PCM playback without closing the input graph', async 
   await audio.stop(); delete (globalThis as any).__miaDuplexModule;
 });
 
+test('input mute drops every microphone packet while leaving native playback and the graph alive', async () => {
+  const { audio, native, listeners } = await device(); const heard: Uint8Array[] = [];
+  await audio.start(bytes => heard.push(bytes), () => {}, () => {});
+  const playback = audio.playPcm(new Uint8Array(48000), 'reply');
+  const rejected = assert.rejects(playback, error => (error as Error).constructor.name === 'CancelledError');
+  audio.setInputMuted(true);
+  for (let i = 0; i < 5; i++) listeners.get('pcm')!({ audio: 'AAECAw==' });
+  assert.equal(heard.length, 0); assert.equal(native.stopped, 0); assert.equal(audio.active, true); assert.equal(audio.hasInput, true);
+  audio.setInputMuted(false);
+  await audio.stopPlayback(); await rejected; await audio.stop();
+});
+
 test('speaker PCM is gated on the real capture path and input resumes unchanged after playback', async t => {
   const { audio, listeners } = await device(); const heard: Uint8Array[] = [];
   await audio.start(bytes => heard.push(bytes), () => {}, () => {});

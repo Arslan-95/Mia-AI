@@ -99,6 +99,24 @@ export function registerRealtime(app: FastifyInstance, deps: {
     };
     const failure = (error: unknown) => send({ type: 'error', error: error instanceof AppError
       ? { code: error.code, message: error.message } : { code: 'INVALID_REQUEST', message: 'The request could not be processed.' } });
+    async function sendSpeechChunk(value: unknown, signal: AbortSignal) {
+      throwIfAborted(signal);
+      // TTS can produce minutes of PCM at once. Wait for each small write to
+      // flush instead of filling the shared socket and triggering its 1013
+      // overflow protection. Cancellation must also release a stalled write.
+      await new Promise<void>((resolve, reject) => {
+        const finish = (error?: unknown) => {
+          clearTimeout(timer); signal.removeEventListener('abort', abort);
+          if (error) reject(error); else resolve();
+        };
+        const abort = () => finish(signal.reason ?? new Error('Speech cancelled'));
+        const timer = setTimeout(() => finish(new AppError(503, 'SPEECH_DELIVERY_TIMEOUT', 'Audio delivery stalled.')), 15_000);
+        signal.addEventListener('abort', abort, { once: true });
+        try { socket.send(JSON.stringify(value), error => finish(error)); }
+        catch (error) { finish(error); }
+      });
+      throwIfAborted(signal);
+    }
     const cancelSpeech = () => { synthesis?.abort(); synthesis = undefined; synthesisGeneration = undefined; };
     const cancelVoice = () => {
       recognitionId = undefined;
@@ -255,8 +273,11 @@ export function registerRealtime(app: FastifyInstance, deps: {
           const current = await assistant.state.requireSession(user!.id, sessionId);
           throwIfAborted(signal);
           if (current.generation !== turn.generation) { controller.abort(); break; }
-          totalBytes += bytes.byteLength;
-          send({ type: 'speech.chunk', requestId, turnId, sequence: sequence++, audio: Buffer.from(bytes).toString('base64') });
+          for (let offset = 0; offset < bytes.byteLength; offset += 12_000) {
+            const part = bytes.subarray(offset, offset + 12_000);
+            await sendSpeechChunk({ type: 'speech.chunk', requestId, turnId, sequence: sequence++, audio: Buffer.from(part).toString('base64') }, signal);
+            totalBytes += part.byteLength;
+          }
         }
         if (!signal.aborted) send({ type: 'speech.completed', requestId, turnId, chunks: sequence, totalBytes });
       } catch (error) {

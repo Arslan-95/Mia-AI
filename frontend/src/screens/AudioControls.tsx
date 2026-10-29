@@ -3,9 +3,15 @@ import { StyleSheet, Text, View } from 'react-native';
 import type { Mia } from '../useMia';
 import { Button, colors, s } from '../ui';
 
-export function AudioControls({ mia, elapsed }: { mia: Mia; elapsed: number }) {
+export function hasAudioControls(mia: Pick<Mia, 'devicePrompt' | 'audioState' | 'recording' | 'voicePhase'>) {
+  return Boolean(mia.devicePrompt || mia.audioState === 'recording' || mia.recording
+    || (mia.audioState === 'playing' || mia.audioState === 'loading') && mia.voicePhase !== 'speaking');
+}
+
+export function AudioControls({ mia, elapsed, bottomInset = 0 }: { mia: Mia; elapsed: number; bottomInset?: number }) {
+  if (!hasAudioControls(mia)) return null;
   return (
-    <>
+    <View testID="audio-controls" style={{ paddingBottom: bottomInset, backgroundColor: mia.audioState === 'recording' || mia.recording ? colors.yellow : colors.soft }}>
       {mia.devicePrompt && (
         <View style={[s.card, a.prompt]}>
           <Text accessibilityRole="alert" style={s.label}>Record a voice note</Text>
@@ -39,7 +45,7 @@ export function AudioControls({ mia, elapsed }: { mia: Mia; elapsed: number }) {
           <Button secondary label="Stop audio" icon="stop-outline" onPress={() => void mia.stopAudio().catch(mia.fail)} />
         </View>
       )}
-    </>
+    </View>
   );
 }
 

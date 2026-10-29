@@ -69,6 +69,10 @@ export class PlaybackEchoGate {
     this.references = []; this.pending = new Uint8Array(0); this.queue = []; this.recent = [];
     this.open = { from: -1, through: -2 }; this.openFrames = 0; this.coupling = initialCouplingDb;
   }
+  discardInput() {
+    this.pending = new Uint8Array(0); this.queue = []; this.recent = [];
+    this.open = { from: -1, through: -2 }; this.openFrames = 0;
+  }
   private prune(now: number) { this.references = this.references.filter(ref => now <= ref.end + tailMs); }
   process(bytes: Uint8Array, now = Date.now()): Uint8Array[] {
     this.prune(now);

@@ -9,11 +9,12 @@ const routeSchema = z.string().max(100).refine(route => {
   return Boolean(match && z.uuid().safeParse(match[2]).success);
 }, 'Use a supported application route.');
 
-export const clientContextSchema = z.object({ route: routeSchema, revision: z.int().nonnegative(),
+export const voiceStateSchema = z.object({ enabled: z.boolean(), microphoneMuted: z.boolean(), revision: z.int().nonnegative() }).strict();
+export const clientContextSchema = z.object({ route: routeSchema, revision: z.int().nonnegative(), voice: voiceStateSchema.optional(),
   previousRoute: routeSchema.optional() }).strict();
 export type ClientContext = z.infer<typeof clientContextSchema>;
 export const deviceResultSchema = z.object({ message: z.string().max(500).optional(), mediaId: z.uuid().optional(),
-  context: clientContextSchema.optional() }).strict();
+  context: clientContextSchema.optional(), voice: voiceStateSchema.optional() }).strict();
 
 export function sameContext(left: ClientContext | null, right: ClientContext | null) {
   return left?.route === right?.route && left?.revision === right?.revision && left?.previousRoute === right?.previousRoute;

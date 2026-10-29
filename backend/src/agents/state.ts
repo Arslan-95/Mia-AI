@@ -183,6 +183,13 @@ export class AssistantState {
       if (action.state !== 'pending') return action;
       if (action.expired || session.generation !== action.generation) throw conflict('This device action has expired or was cancelled.');
       await assertContextAccess(sql, userId, feedback.context ?? null);
+      if (success && ['set_voice_mode', 'set_microphone_muted'].includes(action.kind)) {
+        const requested = action.payload as { enabled?: boolean; muted?: boolean };
+        if (!feedback.voice || (action.kind === 'set_voice_mode' ? feedback.voice.enabled !== requested.enabled : feedback.voice.microphoneMuted !== requested.muted)) {
+          throw conflict('Report the actual applied voice state before confirming success.');
+        }
+        if (feedback.context?.voice && JSON.stringify(feedback.context.voice) !== JSON.stringify(feedback.voice)) throw conflict('Voice feedback must match the device context.');
+      }
       if (typeof result === 'object' && result !== null && 'mediaId' in result) {
         if (action.kind !== 'record_voice') throw conflict('This device action does not accept a recording.');
         const [media] = await sql.query('SELECT id FROM media WHERE id = $1 AND owner_id = $2', [result.mediaId, userId]);

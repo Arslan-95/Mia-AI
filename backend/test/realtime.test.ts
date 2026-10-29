@@ -43,6 +43,60 @@ test('native iPhone API-origin sockets authenticate while foreign browser origin
   assert.equal((await context.db.query('SELECT id FROM assistant_turns')).length, 0);
 });
 
+test('long speech drains bounded writes, survives input mute, and cancels a stalled write without reconnecting', { timeout: 20_000 }, async t => {
+  const pcm = new Uint8Array(2_400_000).fill(7);
+  const speech: SpeechProvider = {
+    recognitionConfigured: true, synthesisConfigured: true, transcribe: async () => '',
+    async *synthesize() { yield pcm; },
+    async recognize() { return { write() {}, end() {}, close() {} }; },
+  };
+  const context = await testApp({ speech, provider: { configured: true, respond: async () => ({ text: 'A long spoken answer.', calls: [], output: [] }) } });
+  t.after(() => context.close());
+  const identity = await phoneSignIn(context.app, '+15550000920', 'long_speech');
+  const url = (await context.app.listen({ port: 0, host: '127.0.0.1' })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: identity.token, after: '0' }); await client.next('ready');
+  client.send({ type: 'turn', clientTurnId: randomUUID(), text: 'Explain in detail.' });
+  const accepted = await client.next('turn.accepted'); const turnId = (accepted.turn as { id: string }).id;
+  await client.next('event', frame => (frame.event as { type: string }).type === 'assistant.completed');
+  client.send({ type: 'voice.start', requestId: randomUUID(), sampleRate: 24000, format: 'pcm_s16le' }); await client.next('voice.ready');
+
+  // Model a slow network at the actual server socket boundary. A provider may
+  // yield an entire answer at once; a single huge write used to close with 1013.
+  const server = [...context.app.websocketServer.clients][0]!;
+  const send = server.send.bind(server);
+  let queued = 0, maximum = 0, hold = false;
+  const held: (() => void)[] = [];
+  Object.defineProperty(server, 'bufferedAmount', { configurable: true, get: () => queued });
+  server.send = ((data: string, callback?: (error?: Error) => void) => {
+    if (JSON.parse(data).type !== 'speech.chunk') { send(data, callback); return; }
+    const length = Buffer.byteLength(data); queued += length; maximum = Math.max(maximum, queued);
+    send(data, error => {
+      const flushed = () => { queued -= length; callback?.(error); };
+      if (hold) held.push(flushed); else setTimeout(flushed, 5);
+    });
+  }) as typeof server.send;
+  const requestId = randomUUID(); client.send({ type: 'speech.request', requestId, turnId }); await client.next('speech.chunk');
+  client.send({ type: 'voice.cancel' }); await client.next('voice.cancelled');
+  client.send({ type: 'ping' }); await client.next('pong');
+  const completed = await client.next('speech.completed', frame => frame.requestId === requestId);
+  const chunks = client.frames.filter(frame => frame.type === 'speech.chunk' && frame.requestId === requestId);
+  assert.equal(completed.totalBytes, pcm.length); assert.equal(completed.chunks, chunks.length);
+  assert.deepEqual(Buffer.concat(chunks.map(frame => Buffer.from(String(frame.audio), 'base64'))), Buffer.from(pcm));
+  assert.ok(maximum < 20_000, `Queued ${maximum} bytes`);
+  assert.equal(client.socket.readyState, WebSocket.OPEN);
+
+  hold = true;
+  const cancelledId = randomUUID(); client.send({ type: 'speech.request', requestId: cancelledId, turnId });
+  await client.next('speech.chunk', frame => frame.requestId === cancelledId);
+  client.send({ type: 'speech.cancel' }); await client.next('speech.cancelled', frame => frame.requestId === cancelledId);
+  for (const release of held) release();
+  await delay(25);
+  assert.equal(client.frames.filter(frame => frame.type === 'speech.chunk' && frame.requestId === cancelledId).length, 1);
+  assert.equal(client.frames.some(frame => frame.type === 'speech.completed' && frame.requestId === cancelledId), false);
+  assert.equal(client.socket.readyState, WebSocket.OPEN);
+});
+
 test('voice onset and noise preserve a spoken reply; a recognized word cancels it while the recognition session stays live', { timeout: 12000 }, async t => {
   let emit!: (event: RecognitionEvent) => void; let synthesisSignal!: AbortSignal; let recognitionClosed = false; let audioPackets = 0;
   const speech: SpeechProvider = {

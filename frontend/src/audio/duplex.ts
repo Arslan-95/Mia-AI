@@ -7,6 +7,7 @@ export class DuplexAudio {
   active = false;
   hasInput = false;
   ownsSession = false;
+  inputMuted = false;
   private revision = 0;
   private stopBarrier: Promise<void> = Promise.resolve();
   private subscriptions: { remove(): void }[] = [];
@@ -26,6 +27,9 @@ export class DuplexAudio {
       MiaVoice.addListener('pcm', ({ audio }) => {
         if (this.active && revision === this.revision && audio.length) {
           lastInput = Date.now(); this.hasInput = true;
+          // The shared native graph still owns the speaker. Discard input
+          // before decoding/buffering it; muted speech never reaches ASR.
+          if (this.inputMuted) return;
           const bytes = Uint8Array.from(atob(audio), char => char.charCodeAt(0));
           for (const part of this.echo.process(bytes)) onPCM(part);
         }
@@ -85,6 +89,7 @@ export class DuplexAudio {
     finally { this.echo.end(requestId); }
   }
   async stopPlayback() { if (MiaVoice) await MiaVoice.stopPlayback(); }
+  setInputMuted(muted: boolean) { this.inputMuted = muted; this.echo.discardInput(); }
   async stop() {
     const revision = ++this.revision; this.active = false; this.hasInput = false; this.removeListeners(); this.echo.reset();
     const stopped = MiaVoice ? MiaVoice.stop() : Promise.resolve();

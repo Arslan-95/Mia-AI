@@ -1,19 +1,61 @@
-import React, { useRef, useState } from 'react';
-import { ScrollView, Text, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import type { Mia } from '../useMia';
 import type { Profile } from '../types';
-import { Avatar, Button, Empty, Field, s } from '../ui';
+import { Avatar, Empty, Icon, SearchField, colors, s } from '../ui';
 export function People({ mia }: { mia: Mia }) {
   const [query, setQuery] = useState(''); const [results, setResults] = useState<Profile[]>([]); const [searched, setSearched] = useState(false); const [loading, setLoading] = useState(false); const epoch = useRef(0);
-  async function search() {
-    const request = ++epoch.current; setLoading(true);
-    try { const list = await mia.api.request<Profile[]>(`/v1/users?query=${encodeURIComponent(query.trim())}`); if (request === epoch.current) { setResults(list); setSearched(true); } }
-    catch (reason) { mia.fail(reason); } finally { if (request === epoch.current) setLoading(false); }
+  const activeRequest = useRef<AbortController | null>(null);
+  const latestQuery = useRef('');
+  const searchQuery = query.trim();
+  const { api, fail } = mia;
+  function changeQuery(value: string) {
+    if (value.trim() !== latestQuery.current) {
+      epoch.current++; activeRequest.current?.abort();
+      setResults([]); setSearched(false); setLoading(false);
+    }
+    latestQuery.current = value.trim();
+    setQuery(value);
   }
-  return <ScrollView contentContainerStyle={s.content} keyboardShouldPersistTaps="handled"><Text accessibilityRole="header" style={s.heading}>People</Text><View style={s.card}><Field label="Find by phone number or username" placeholder="+1 202 555 0101 or username" maxLength={50} value={query} onChangeText={value => { epoch.current++; setQuery(value); setSearched(false); setResults([]); setLoading(false); }} autoCapitalize="none" autoCorrect={false} returnKeyType="search" onSubmitEditing={() => { if (query.trim().length >= 2) void search(); }} /><Text style={s.small}>For phone numbers, include the country code. Search finds people registered on Mia.</Text><Button label="Search people" icon="search-outline" disabled={query.trim().length < 2} loading={loading} onPress={() => void search()} /></View>
-    {searched && <Text style={s.label}>{results.length ? 'SEARCH RESULTS' : 'No matching people. Check the phone number or username.'}</Text>}
-    {results.map(person => <View key={person.id} style={[s.card, s.row]}><Avatar name={person.displayName} /><View style={{ flex: 1, gap: 4 }}><Text style={s.label}>{person.displayName}</Text><Text style={s.small}>@{person.username}</Text><Button quiet label="Add & chat" icon="add-outline" onPress={() => void mia.startChat(person, true).catch(mia.fail)} /></View></View>)}
-    <Text style={s.label}>SAVED CONTACTS · {mia.contacts.length}</Text>{!mia.contacts.length && <Empty icon="people-outline" title="Your people, here" text="Find someone by phone number or username. Your saved contacts will appear here." />}
-    {mia.contacts.map(person => <View key={person.contactId} style={[s.card, s.row, { padding: 16 }]}><Avatar name={person.name} /><View style={{ flex: 1, gap: 5 }}><Text style={[s.label, { fontSize: 17 }]}>{person.name}</Text><Text style={s.small}>@{person.username}</Text></View><Button secondary label="Chat" icon="chatbubble-outline" onPress={() => void mia.startChat(person).catch(mia.fail)} /></View>)}
+  useEffect(() => {
+    if (searchQuery.length < 2) return;
+    const request = ++epoch.current;
+    const controller = new AbortController();
+    activeRequest.current = controller;
+    const current = () => !controller.signal.aborted && request === epoch.current;
+    const timer = setTimeout(() => {
+      if (!current()) return;
+      setLoading(true);
+      void api.request<Profile[]>(`/v1/users?query=${encodeURIComponent(searchQuery)}`, 'GET', undefined, controller.signal)
+        .then(list => { if (current()) { setResults(list); setSearched(true); } })
+        .catch(reason => { if (current()) fail(reason); })
+        .finally(() => { if (current()) setLoading(false); });
+    }, 300);
+    return () => { clearTimeout(timer); controller.abort(); if (activeRequest.current === controller) activeRequest.current = null; };
+  }, [api, fail, searchQuery]);
+  return <ScrollView contentContainerStyle={s.content} keyboardShouldPersistTaps="handled">
+    <Text accessibilityRole="header" style={s.heading}>People</Text>
+    <SearchField label="Find by phone number or username" hint="Type at least two characters. For phone numbers, include the country code. Search finds people registered on Mia."
+      placeholder="Phone number or username" value={query} onChangeText={changeQuery} maxLength={50} loading={loading} />
+    {searched && <Text accessibilityLiveRegion="polite" style={s.label}>{results.length ? 'SEARCH RESULTS' : 'No matching people. Check the phone number or username.'}</Text>}
+    {!!results.length && <View>{results.map(person => <PersonRow key={person.id} name={person.displayName} username={person.username} add onPress={() => void mia.startChat(person, true).catch(mia.fail)} />)}</View>}
+    <Text style={p.section}>SAVED CONTACTS · {mia.contacts.length}</Text>{!mia.contacts.length && <Empty icon="people-outline" title="Your people, here" text="Find someone by phone number or username. Your saved contacts will appear here." />}
+    {!!mia.contacts.length && <View>{mia.contacts.map(person => <PersonRow key={person.contactId} name={person.name} username={person.username} onPress={() => void mia.startChat(person).catch(mia.fail)} />)}</View>}
   </ScrollView>;
 }
+function PersonRow({ name, username, add = false, onPress }: { name: string; username: string; add?: boolean; onPress(): void }) {
+  const [focused, setFocused] = useState(false);
+  return <Pressable accessibilityRole="button" accessibilityLabel={add ? `Add ${name} and open chat` : `${name}, @${username}`} accessibilityHint={add ? 'Save this person to your contacts and open a conversation.' : 'Open conversation.'}
+    onPress={onPress} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+    style={({ pressed }) => [p.person, pressed && { backgroundColor: colors.paper }, focused && s.focus]}>
+    <Avatar name={name} size={40} />
+    <View style={p.personText}><Text numberOfLines={1} style={p.name}>{name}</Text><Text numberOfLines={1} style={s.small}>@{username}</Text></View>
+    <Icon name={add ? 'add-outline' : 'chevron-forward'} size={18} color={colors.muted} />
+  </Pressable>;
+}
+const p = StyleSheet.create({
+  section: { color: colors.muted, fontSize: 10, letterSpacing: 1.5, fontWeight: '600' },
+  person: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, minHeight: 62, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
+  personText: { flex: 1, minWidth: 0, gap: 2 },
+  name: { color: colors.ink, fontSize: 16, fontWeight: '600' },
+});

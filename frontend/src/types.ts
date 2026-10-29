@@ -1,5 +1,6 @@
 export type Profile = { id: string; username: string; displayName: string };
-export type ClientContext = { route: string; revision: number; previousRoute?: string };
+export type VoiceState = { enabled: boolean; microphoneMuted: boolean; revision: number };
+export type ClientContext = { route: string; revision: number; previousRoute?: string; voice?: VoiceState };
 export type AssistantRequest = { clientTurnId: string; text: string; context: ClientContext };
 export type User = Profile & { phoneNumber: string; profileComplete: boolean };
 export type Session = { user: User; token: string; expiresAt: string };
