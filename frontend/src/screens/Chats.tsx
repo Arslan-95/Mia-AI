@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AccessibilityInfo, Keyboard, Pressable, ScrollView, StyleSheet, Text, TextInput, View, findNodeHandle } from 'react-native';
 import type { Mia } from '../useMia';
-import { Avatar, Button, Empty, Icon, SearchField, colors, s } from '../ui';
+import { Avatar, Button, Empty, HeaderAction, Icon, ScreenHeader, SearchField, colors, s } from '../ui';
 import { MessageDrafts } from './MessageDrafts';
 import { ChatBackGesture } from './ChatBackGesture';
 import { MessageList } from './MessageList';
@@ -18,13 +18,10 @@ export function Chats({ mia, bottomInset }: { mia: Mia; bottomInset: number }) {
   const searchQuery = query.trim().toLowerCase();
   const matchingChats = mia.chats.filter(item => `${item.recipient.displayName} ${item.recipient.username}`.toLowerCase().includes(searchQuery));
   if (!chat) return <ScrollView contentContainerStyle={c.content} keyboardShouldPersistTaps="handled">
-    <View style={s.between}>
-      <Text accessibilityRole="header" style={s.heading}>Chats</Text>
-      <Button secondary iconOnly label="New chat" icon="create-outline" onPress={() => void mia.navigate('people')} style={c.headerAction} />
-    </View>
+    <ScreenHeader title="Chats" action={<HeaderAction label="New chat" icon="create-outline" onPress={() => void mia.navigate('people')} />} />
     <SearchField label="Search chats" placeholder="Search chats" value={query} onChangeText={setQuery} />
     {!matchingChats.length && <Empty title={searchQuery ? 'No chats found' : 'Start a conversation'} text={searchQuery ? 'No chats match your search.' : 'Find your people. Send a message. Or just ask Mia.'}>{!searchQuery && <Button secondary label="Find people" icon="add-outline" onPress={() => void mia.navigate('people')} />}</Empty>}
-    <View style={c.chatList}>{matchingChats.map(item => <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={`${item.recipient.displayName}${item.unreadCount ? `, ${item.unreadCount} unread` : ''}. ${item.lastMessage?.text ?? (item.lastMessage?.kind === 'voice' ? 'Voice note' : 'No messages yet')}`} onPress={() => void mia.navigate('chats', item.id)} style={({ pressed }) => [c.chatRow, { backgroundColor: pressed ? colors.paper : 'transparent' }]}>
+    <View style={c.chatList}>{matchingChats.map(item => <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={`${item.recipient.displayName}${item.unreadCount ? `, ${item.unreadCount} unread` : ''}. ${item.lastMessage?.text ?? (item.lastMessage?.kind === 'voice' ? 'Voice note' : 'No messages yet')}`} onPress={() => void mia.navigate('chats', item.id)} style={({ pressed }) => [s.personRow, { backgroundColor: pressed ? colors.paper : 'transparent' }]}>
       <Avatar name={item.recipient.displayName} size={48} />
       <View style={c.chatText}><View style={s.between}><Text numberOfLines={1} style={[c.name, { flex: 1 }]}>{item.recipient.displayName}</Text><Text style={[c.date, item.unreadCount > 0 && { color: colors.accentLight }]}>{item.lastMessage ? new Date(item.lastMessage.createdAt).toLocaleDateString('en', { month: 'short', day: 'numeric' }) : ''}</Text></View>
         <View style={s.between}><View style={[s.row, { flex: 1, gap: 6 }]}>{item.lastMessage?.kind === 'voice' && <Icon name="mic-outline" size={14} color={colors.muted} />}<Text numberOfLines={1} style={[c.preview, item.unreadCount > 0 && { color: '#CEC6E0' }]}>{item.lastMessage?.text ?? (item.lastMessage?.kind === 'voice' ? 'Voice message' : 'Say hello')}</Text></View>{item.unreadCount > 0 && <View style={c.badge}><Text style={c.badgeText}>{item.unreadCount > 99 ? '99+' : item.unreadCount}</Text></View>}</View>
@@ -35,11 +32,11 @@ export function Chats({ mia, bottomInset }: { mia: Mia; bottomInset: number }) {
   const messages = mia.messages[chat.id] ?? [];
   const composer = mia.composers[chat.id] ?? '';
   const drafts = mia.drafts.filter(draft => draft.recipientId === chat.recipient.id);
-  return <ChatBackGesture chatId={chat.id} enabled={!mia.aiMode} onBack={() => void mia.navigate('chats')}>
-    <View style={c.chatHeader}><Button quiet iconOnly label="Back" icon="chevron-back" onPress={() => void mia.navigate('chats')} style={c.headerAction} /><Avatar name={chat.recipient.displayName} size={36} /><View style={{ flex: 1, gap: 1 }}><Text ref={heading} accessibilityRole="header" numberOfLines={1} style={[s.sectionTitle, { fontSize: 16 }]}>{chat.recipient.displayName}</Text><Text style={s.small}>@{chat.recipient.username}</Text></View></View>
+  return <ChatBackGesture chatId={chat.id} enabled={!mia.aiMode} onBack={() => void mia.navigateBack()}>
+    <View style={c.chatHeader}><Button quiet iconOnly label="Back" icon="chevron-back" onPress={() => void mia.navigateBack()} style={c.headerAction} /><Avatar name={chat.recipient.displayName} size={36} /><View style={{ flex: 1, gap: 1 }}><Text ref={heading} accessibilityRole="header" numberOfLines={1} style={[s.sectionTitle, { fontSize: 16 }]}>{chat.recipient.displayName}</Text><Text style={s.small}>@{chat.recipient.username}</Text></View></View>
     <MessageList key={`${mia.session!.user.id}/${chat.id}`} userId={mia.session!.user.id} chatId={chat.id} positions={mia.chatScrollPositions}
       data={messages} keyExtractor={item => item.id} contentContainerStyle={c.messages} ItemSeparatorComponent={() => <View style={c.messageGap} />} keyboardShouldPersistTaps="handled" scrollEventThrottle={32}
-      ListFooterComponent={mia.hasOlder[chat.id] ? <Button quiet label="Load earlier messages" onPress={() => void mia.loadMessages(chat.id, messages[messages.length - 1]?.id).catch(mia.fail)} /> : messages.length ? <View style={c.historyLabel}><View style={c.historyLine} /><Text style={s.small}>Your conversation</Text><View style={c.historyLine} /></View> : null}
+      ListFooterComponent={mia.hasOlder[chat.id] ? <Button quiet label="Load earlier messages" onPress={() => void mia.loadMessages(chat.id, messages[messages.length - 1]?.id).catch(mia.fail)} /> : null}
       ListEmptyComponent={<Empty title="Say something" text="A message or a voice note. It starts here." />}
       renderItem={({ item }) => {
         const mine = item.senderId === mia.session?.user.id;
@@ -65,12 +62,12 @@ export function Chats({ mia, bottomInset }: { mia: Mia; bottomInset: number }) {
 
 const c = StyleSheet.create({
   content: { flexGrow: 1, padding: 20, gap: 18 },
-  chatList: { marginHorizontal: -8 }, chatRow: { flexDirection: 'row', gap: 12, alignItems: 'center', paddingHorizontal: 8, paddingVertical: 12, borderRadius: 14 },
+  chatList: { marginHorizontal: -8 },
   chatText: { flex: 1, gap: 9, minWidth: 0 }, name: { fontSize: 16, fontWeight: '600', color: colors.ink, letterSpacing: -.2 }, preview: { color: colors.muted, fontSize: 13, flex: 1 },
   date: { fontSize: 10, color: colors.muted }, badge: { minWidth: 22, height: 22, paddingHorizontal: 6, borderRadius: 8, backgroundColor: '#A184EE', justifyContent: 'center' }, badgeText: { fontSize: 10, fontWeight: '700', textAlign: 'center', color: '#140D24' },
   chatHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 8, paddingTop: 6, paddingBottom: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.line },
   headerAction: { width: 44, height: 44, minHeight: 44, paddingVertical: 0, paddingHorizontal: 0 },
-  messages: { flexGrow: 1, padding: 20 }, messageGap: { height: 16 }, historyLabel: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 16 }, historyLine: { flex: 1, height: 1, backgroundColor: colors.line },
+  messages: { flexGrow: 1, padding: 20 }, messageGap: { height: 16 },
   bubble: { maxWidth: '88%', paddingHorizontal: 17, paddingVertical: 14, borderRadius: 22, gap: 8, borderWidth: 1 },
   sent: { backgroundColor: '#53348E', borderColor: '#7050A8', borderBottomRightRadius: 6 }, received: { backgroundColor: colors.paper, borderColor: colors.line, borderBottomLeftRadius: 6 },
   messageText: { color: colors.ink, fontSize: 15, lineHeight: 23 }, timestamp: { color: colors.muted, fontSize: 10, marginHorizontal: 5 },

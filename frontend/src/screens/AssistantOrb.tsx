@@ -3,7 +3,7 @@ import { AccessibilityInfo, AppState, Animated, Easing, Pressable, StyleSheet, T
 import { SafeAreaView } from 'react-native-safe-area-context';
 import type { Mia } from '../useMia';
 import type { VoicePhase } from '../voiceConversation';
-import { Button, Icon, colors, s } from '../ui';
+import { Icon, colors, s } from '../ui';
 
 const labels: Record<VoicePhase, string> = {
   off: 'Ready when you are', waiting: 'Connecting', listening: 'Listening',
@@ -88,7 +88,7 @@ export function VoiceMode({ mia }: { mia: Mia }) {
   const working = mia.voicePhase === 'thinking' || mia.voicePhase === 'speaking';
   const phase = mia.microphoneMuted && !working ? 'paused' : mia.voicePhase;
   const chat = mia.chats.find(item => item.id === mia.activeChatId);
-  const context = chat && mia.tab === 'chats' ? chat.recipient.displayName : mia.tab === 'people' ? 'People' : mia.tab === 'settings' ? 'Settings' : 'Chats';
+  const context = chat && mia.tab === 'chats' ? chat.recipient.displayName : mia.tab === 'people' ? 'Contacts' : mia.tab === 'settings' ? 'Settings' : 'Chats';
   const status = mia.microphoneMuted && !working ? 'Microphone muted' : labels[phase];
   return <View style={orb.screen} accessibilityViewIsModal onAccessibilityEscape={explainExit}>
     <SafeAreaView style={orb.safe}>
@@ -116,7 +116,6 @@ export function VoiceMode({ mia }: { mia: Mia }) {
       <View style={orb.footer}>
         <View style={orb.context}><Icon name={chat ? 'chatbubble-outline' : 'layers-outline'} size={14} color={colors.muted} /><Text numberOfLines={1} style={s.small}>{context}</Text></View>
         <View style={orb.tapHint}><Icon name={mia.microphoneMuted ? 'mic-off-outline' : 'mic-outline'} size={20} color={colors.accentLight} /><Text style={orb.hint}>Tap Mia to {mia.microphoneMuted ? 'unmute' : 'mute'} input</Text></View>
-        {working && <Button secondary label="Stop reply" icon="stop-outline" onPress={() => void mia.stopAssistantReply().catch(mia.fail)} />}
         <Pressable accessibilityRole="button" accessibilityLabel="Hold for 5 seconds to exit voice mode"
           accessibilityHint="Keep holding until the phone vibrates. Releasing early keeps voice mode on. With VoiceOver, double tap and hold."
           onPressIn={beginHold} onPressOut={cancelHold} onPress={explainExit}

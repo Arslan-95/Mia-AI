@@ -8,6 +8,16 @@ export const colors = {
   soft: '#221B37', yellow: '#30271C', red: '#FF9EAD', blue: '#201D38', white: '#FFFFFF',
 };
 export function Icon({ name, size = 22, color = colors.ink }: { name: React.ComponentProps<typeof Ionicons>['name']; size?: number; color?: string }) { return <Ionicons name={name} size={size} color={color} accessible={false} />; }
+export function ScreenHeader({ title, action }: { title: string; action?: React.ReactNode }) {
+  return <View style={s.screenHeader}><Text accessibilityRole="header" style={s.heading}>{title}</Text>{action}</View>;
+}
+export function HeaderAction({ label, icon, onPress }: { label: string; icon: React.ComponentProps<typeof Icon>['name']; onPress(): void }) {
+  const [focused, setFocused] = useState(false);
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+    style={({ pressed }) => [s.headerAction, { opacity: pressed ? .6 : 1 }, focused && s.focus]}>
+    <Icon name={icon} size={21} color={colors.accentLight} />
+  </Pressable>;
+}
 export function Button({ label, onPress, icon, secondary, quiet, disabled, loading, style, iconOnly }: { label: string; onPress: () => void; icon?: React.ComponentProps<typeof Ionicons>['name']; secondary?: boolean; quiet?: boolean; disabled?: boolean; loading?: boolean; style?: StyleProp<ViewStyle>; iconOnly?: boolean }) {
   const [focused, setFocused] = useState(false);
   const foreground = secondary || quiet ? colors.accentLight : colors.white;
@@ -56,6 +66,9 @@ export function Notice({ children, error = false }: { children: React.ReactNode;
 export const s = StyleSheet.create({
   page: { flex: 1, backgroundColor: colors.background }, content: { padding: 20, gap: 18, flexGrow: 1 },
   heading: { fontSize: 28, fontWeight: '600', letterSpacing: -.8, color: colors.ink }, eyebrow: { fontSize: 10, fontWeight: '700', letterSpacing: 2.8, color: colors.accentLight },
+  screenHeader: { minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  headerAction: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  personRow: { flexDirection: 'row', gap: 12, alignItems: 'center', paddingHorizontal: 8, paddingVertical: 12, borderRadius: 14, minHeight: 72 },
   sectionTitle: { fontSize: 19, fontWeight: '600', letterSpacing: -.5, color: colors.ink }, body: { fontSize: 15, lineHeight: 22, color: colors.muted }, small: { fontSize: 12, lineHeight: 18, color: colors.muted },
   row: { flexDirection: 'row', alignItems: 'center', gap: 14 }, between: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
   card: { backgroundColor: colors.paper, borderRadius: 20, padding: 18, gap: 14, borderWidth: 1, borderColor: colors.line },

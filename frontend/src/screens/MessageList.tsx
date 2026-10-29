@@ -1,7 +1,8 @@
-import React, { useRef, useState } from 'react';
-import { FlatList, type FlatListProps } from 'react-native';
+import React, { useMemo, useRef, useState } from 'react';
+import { FlatList, StyleSheet, Text, View, type FlatListProps } from 'react-native';
 import type { ChatScrollPositions } from '../chatScrollPositions';
 import type { Message } from '../types';
+import { colors } from '../ui';
 
 type Props = Omit<FlatListProps<Message>, 'data' | 'inverted' | 'contentOffset' | 'onScroll' | 'maintainVisibleContentPosition'> & {
   userId: string; chatId: string; positions: ChatScrollPositions; data: readonly Message[];
@@ -15,7 +16,14 @@ export function MessageList({ userId, chatId, positions, data, ...props }: Props
   const offset = useRef({ x: 0, y: initial.offset ?? 0 }).current;
   const restored = useRef(offset.y === 0);
   const visibleData = initialData ?? data;
+  const dayStarts = useMemo(() => new Set(visibleData.filter((message, index) =>
+    new Date(message.createdAt).toDateString() !== (visibleData[index + 1] ? new Date(visibleData[index + 1]!.createdAt).toDateString() : null)
+  ).map(message => message.id)), [visibleData]);
   return <FlatList {...props} data={visibleData} inverted contentOffset={offset}
+    renderItem={info => <View>
+      {dayStarts.has(info.item.id) && <Text style={p.dayLabel}>{new Date(info.item.createdAt).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}</Text>}
+      {props.renderItem?.(info)}
+    </View>}
     maintainVisibleContentPosition={{ minIndexForVisible: 0, autoscrollToTopThreshold: 70 }}
     onScrollBeginDrag={() => { restored.current = true; }}
     onScroll={event => {
@@ -33,3 +41,4 @@ export function MessageList({ userId, chatId, positions, data, ...props }: Props
       props.onContentSizeChange?.(width, height);
     }} />;
 }
+const p = StyleSheet.create({ dayLabel: { color: colors.muted, fontSize: 11, textAlign: 'center', marginTop: 4, marginBottom: 18 } });

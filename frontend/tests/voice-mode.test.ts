@@ -27,7 +27,7 @@ const sources: Record<string, string> = {
     export const Easing = { inOut: value => value, sin: x => x, linear: x => x };
     const animation = () => ({ start(callback) { if (callback) { const finish = () => callback({ finished: true }); if (n.holdAnimation) n.finishAnimation = finish; else finish(); } }, stop() {} });
     export const Animated = { add: () => 0, Value: class { setValue() {} stopAnimation() {} interpolate() { return 0; } }, View: 'AnimatedView', loop: animation, sequence: animation, timing: animation, spring: animation };
-    export const ActivityIndicator='ActivityIndicator', KeyboardAvoidingView='KeyboardAvoidingView', Pressable='Pressable', StatusBar='StatusBar', Text='Text', View='View', ScrollView='ScrollView', TextInput='TextInput', FlatList='FlatList', Switch='Switch';
+    export const ActivityIndicator='ActivityIndicator', KeyboardAvoidingView='KeyboardAvoidingView', Pressable='Pressable', Modal='Modal', StatusBar='StatusBar', Text='Text', View='View', ScrollView='ScrollView', TextInput='TextInput', FlatList='FlatList', Switch='Switch';
     export const StyleSheet = { create: value => value };
     export const Linking = { openSettings: async () => {} };
     export const findNodeHandle = () => null;
@@ -39,8 +39,14 @@ const sources: Record<string, string> = {
   '@expo/vector-icons/Ionicons': `export default 'Icon';`,
   'expo-crypto': `export { randomUUID } from 'node:crypto';`,
   './storage': `const n = globalThis.__miaNative;
-    export const preferences = { get: async key => n.preferences.get(key) ?? null, set: async (key, value) => { n.preferences.set(key, value); } };
-    export const sessionStorage = { read: async () => n.session, write: async value => { n.session = value; } };`,
+    export const preferences = { get: async key => {
+      if (n.holdStartup && key === 'mia.ai_mode') await new Promise(resolve => { n.releaseStartupMode = resolve; });
+      return n.preferences.get(key) ?? null;
+    }, set: async (key, value) => { if (n.failPreferences) throw new Error('Storage unavailable'); n.preferences.set(key, value); } };
+    export const sessionStorage = { read: async () => {
+      if (n.holdStartup) await new Promise(resolve => { n.releaseStartupSession = resolve; });
+      return n.session;
+    }, write: async value => { n.session = value; } };`,
   './audio/engine': `import { CancelledError, UserFacingError } from '${root}/src/errors';
     const n = globalThis.__miaNative;
     export class Engine {
@@ -120,7 +126,7 @@ const session = { token: 'token', expiresAt: '2099-01-01', user: { id: 'user', u
 const assistantSession = { id: 'assistant', generation: 0, activeChatId: null };
 const chat = { id: 'anna', recipient: { id: 'recipient', username: 'anna', displayName: 'Anna' }, unreadCount: 0, lastMessage: null };
 
-async function mount(mode = false, renderApp = false, nativeAvailable = false) {
+async function mount(mode = false, renderApp = false, nativeAvailable = false, holdStartup = false) {
   const code = (await bundle).outputFiles[0]!.text;
   const n = {
     session, preferences: new Map([['mia.ai_mode', String(mode)]]), captures: 0, playbacks: 0, deleted: [] as string[],
@@ -140,6 +146,8 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false) {
     savedContacts: [] as Contact[],
     history: [] as Message[],
     holdPeopleSearch: false,
+    failPreferences: false,
+    holdStartup, releaseStartupMode: null as (() => void) | null, releaseStartupSession: null as (() => void) | null,
     peopleSearches: [] as { query: string; signal: AbortSignal; resolve(value: Response): void; reject(error: Error): void }[],
   };
   (globalThis as any).__miaNative = n;
@@ -152,6 +160,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false) {
     if (n.offline) throw new Error('Network unavailable');
     const response = (body: unknown) => Response.json(body);
     if (path === '/v1/me') return response(session.user);
+    if (path === '/v1/auth/logout') return response({});
     if (path === '/health/ready') {
       if (n.holdHealth) {
         n.healthHeld = true;
@@ -209,13 +218,38 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false) {
     while (!predicate() && Date.now() < end) await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
     assert.ok(predicate(), `Timed out: phase=${mia?.voicePhase}, error=${mia?.error}`);
   };
-  await wait(() => renderApp ? n.requests.some(request => request.path === '/v1/assistant/sessions/assistant') : !!mia.assistantSession);
+  if (!holdStartup) await wait(() => renderApp ? n.requests.some(request => request.path === '/v1/assistant/sessions/assistant') : !!mia.assistantSession);
   return {
     n, get mia(): Mia { return renderApp ? renderer.root.findAll(node => typeof node.props.mia?.saveAiMode === 'function')[0]!.props.mia : mia; }, get tree() { return renderer.root; }, wait,
     async say() { assert.ok(n.capture); await act(async () => { n.capture!({ uri: 'file:///command.wav', durationMs: 2400 }); }); },
     async close() { await act(async () => { renderer.unmount(); }); globalThis.fetch = realFetch; globalThis.FormData = realFormData; delete (globalThis as any).__miaNative; },
   };
 }
+
+test('startup waits for both saved credentials and mode, then opens only the saved mode without a transient agent screen', async () => {
+  for (const enabled of [false, true]) for (const sessionFirst of [true, false]) {
+    const h = await mount(enabled, true, false, true);
+    const loading = () => h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'app-startup').length > 0;
+    const voice = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel?.startsWith('Mia voice mode.')).length > 0;
+    const tabs = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityRole === 'tab');
+    try {
+      assert.equal(loading(), true); assert.equal(voice(), false); assert.equal(tabs().length, 0);
+      assert.equal(h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'MiaCore').length, 0, 'loading must not impersonate the voice-mode orb');
+      assert.equal(h.n.captures, 0); assert.equal(h.n.requests.length, 0);
+      await act(async () => { if (sessionFirst) h.n.releaseStartupSession!(); else h.n.releaseStartupMode!(); });
+      assert.equal(loading(), true); assert.equal(voice(), false); assert.equal(tabs().length, 0);
+      assert.equal(h.n.captures, 0);
+      await act(async () => { if (sessionFirst) h.n.releaseStartupMode!(); else h.n.releaseStartupSession!(); });
+      await h.wait(() => !loading());
+      assert.equal(h.mia.aiMode, enabled); assert.equal(voice(), enabled);
+      const root = h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.edges)[0]!;
+      assert.equal(root.props.pointerEvents, enabled ? 'none' : 'auto');
+      assert.equal(root.props.accessibilityElementsHidden, enabled);
+      if (enabled) await h.wait(() => h.n.captures === 1);
+      else { assert.equal(h.n.captures, 0); assert.equal(h.n.preferences.get('mia.ai_mode'), 'false'); }
+    } finally { await h.close(); }
+  }
+});
 
 test('ai_mode starts one global conversation, speaks automatically and keeps listening after a reply and tab navigation', async () => {
   const h = await mount();
@@ -392,15 +426,15 @@ test('voice activation requires Settings confirmation; exit requires a five-seco
   try {
     const pressable = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
     const overlay = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel?.startsWith('Mia voice mode.'))[0]!;
-    assert.deepEqual(h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityRole === 'tab').map(node => node.props.accessibilityLabel), ['Chats', 'People', 'Settings']);
+    assert.deepEqual(h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityRole === 'tab').map(node => node.props.accessibilityLabel), ['Contacts', 'Chats', 'Settings']);
       assert.equal(pressable('Mia voice mode'), undefined, 'no dock launcher');
       assert.equal(pressable('Enable voice mode'), undefined, 'activation is absent outside Settings');
       await act(async () => { pressable('Settings').props.onPress(); });
-      await act(async () => { pressable('Enable voice mode').props.onPress(); });
+      await act(async () => { pressable('Mia voice mode').props.onPress(); });
       assert.equal(h.mia.aiMode, false, 'one tap must not activate');
       await act(async () => { pressable('Keep voice mode off').props.onPress(); });
       assert.equal(h.mia.aiMode, false);
-      await act(async () => { pressable('Enable voice mode').props.onPress(); });
+      await act(async () => { pressable('Mia voice mode').props.onPress(); });
       await act(async () => { pressable('Enable voice mode now').props.onPress(); });
       await h.wait(() => !!h.n.capture);
       const blocked = h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.pointerEvents === 'none')[0]!;
@@ -757,7 +791,7 @@ test('lost native input automatically rebuilds capture without repeating a comma
 test('People submits a formatted phone number, presents the result and adds the selected person', async () => {
   const h = await mount(false, true);
   try {
-    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'People')[0]!.props.onPress(); });
+    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Contacts')[0]!.props.onPress(); });
     const input = h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Find by phone number or username')[0]!;
     await act(async () => { input.props.onChangeText('+1 (202) 555-0101'); });
     await h.wait(() => h.n.requests.some(request => request.path.startsWith('/v1/users?query=')));
@@ -767,11 +801,85 @@ test('People submits a formatted phone number, presents the result and adds the 
     assert.equal(h.n.requests.find(request => request.path === '/v1/contacts' && request.method === 'POST')?.body.userId, 'recipient');
     await h.wait(() => h.n.requests.some(request => request.path.startsWith('/v1/chats/anna/messages')));
     await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Back')[0]!.props.onPress(); });
-    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'People')[0]!.props.onPress(); });
+    assert.equal(h.mia.tab, 'people', 'back returns to Contacts, where this conversation was opened');
+    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Contacts')[0]!.props.onPress(); });
     await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Anna, @anna')[0]!.props.onPress(); });
     await h.wait(() => h.mia.activeChatId === 'anna');
     assert.equal(h.n.requests.filter(request => request.path === '/v1/contacts' && request.method === 'POST').length, 1, 'opening a saved contact does not add it again');
     assert.equal(h.n.captures, 0, 'searching contacts must not activate the voice assistant');
+  } finally { await h.close(); }
+});
+
+test('Contacts and Chats share header geometry and row height; chat back swipe returns to its origin', async () => {
+  const h = await mount(false, true);
+  const button = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
+  const flatten = (value: any): Record<string, any> => Array.isArray(value) ? Object.assign({}, ...value.filter(Boolean).map(flatten)) : value ?? {};
+  const header = (title: string) => h.tree.findAll(node => node.type === 'Text' as any && node.props.accessibilityRole === 'header' && node.props.children === title)[0]!.parent!;
+  try {
+    const chatHeader = flatten(header('Chats').props.style);
+    const chatRow = flatten(button('Anna. No messages yet').props.style({ pressed: false }));
+    const tabs = h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityRole === 'tab');
+    assert.deepEqual(tabs.map(node => node.props.accessibilityLabel), ['Contacts', 'Chats', 'Settings']);
+    const selectedIcon = tabs[1]!.findAll(node => node.type === 'View' as any && flatten(node.props.style).borderRadius === 18)[0]!;
+    const iconStyle = flatten(selectedIcon.props.style); assert.equal(iconStyle.width, iconStyle.height);
+    h.n.savedContacts.push({ ...chat.recipient, contactId: 'contact-anna', name: 'Anna' });
+    await act(async () => { await h.mia.refresh(); button('Contacts').props.onPress(); });
+    assert.deepEqual(flatten(header('Contacts').props.style), chatHeader, 'the search row has the same header above it on both tabs');
+    const contactRow = flatten(button('Anna, @anna').props.style({ pressed: false }));
+    for (const key of ['minHeight', 'paddingVertical', 'paddingHorizontal', 'gap']) assert.equal(contactRow[key], chatRow[key]);
+    assert.equal(h.tree.findAll(node => node.type === 'Text' as any && String(node.props.children).includes('SAVED CONTACTS')).length, 0);
+    await act(async () => { button('Anna, @anna').props.onPress(); });
+    await h.wait(() => h.mia.activeChatId === 'anna');
+    const back = h.n.backGesture!;
+    await act(async () => { back.onPanResponderGrant!(); back.onPanResponderRelease!(null, { dx: 130, vx: .2 }); });
+    await h.wait(() => h.mia.tab === 'people');
+    assert.equal(h.mia.activeChatId, null);
+    await act(async () => { button('Chats').props.onPress(); });
+    await act(async () => { button('Anna. No messages yet').props.onPress(); });
+    await h.wait(() => h.mia.activeChatId === 'anna');
+    await act(async () => { button('Back').props.onPress(); });
+    assert.equal(h.mia.tab, 'chats'); assert.equal(h.mia.activeChatId, null);
+  } finally { await h.close(); }
+});
+
+test('Settings uses modal confirmations without changing its page layout and only signs out after approval', async () => {
+  const h = await mount(false, true);
+  const button = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
+  const modal = () => h.tree.findAll(node => node.type === 'Modal' as any)[0];
+  try {
+    await act(async () => { button('Settings').props.onPress(); });
+    const page = h.tree.findAll(node => node.type === 'ScrollView' as any)[0]!;
+    const childCount = page.children.length;
+    assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'PERMISSIONS').length, 0);
+    assert.equal(button('Open iPhone settings'), undefined);
+    await act(async () => { button('Mia voice mode').props.onPress(); });
+    assert.ok(modal()); assert.equal(h.mia.aiMode, false);
+    assert.equal(page.children.length, childCount, 'the question is outside the settings scroll content');
+    await act(async () => { modal()!.props.onRequestClose(); });
+    assert.equal(modal(), undefined); assert.equal(h.mia.aiMode, false);
+    await act(async () => { button('Sign out').props.onPress(); });
+    assert.ok(modal()); assert.equal(h.n.requests.some(request => request.path === '/v1/auth/logout'), false);
+    await act(async () => { button('Keep me signed in').props.onPress(); });
+    assert.equal(modal(), undefined); assert.ok(h.mia.session);
+    await act(async () => { button('Sign out').props.onPress(); });
+    await act(async () => { button('Sign out now').props.onPress(); });
+    await h.wait(() => h.mia.session === null);
+    assert.equal(h.n.requests.filter(request => request.path === '/v1/auth/logout').length, 1);
+  } finally { await h.close(); }
+});
+
+test('an approved voice mode cannot be covered by its old confirmation if preference persistence fails', async () => {
+  const h = await mount(false, true);
+  const button = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
+  try {
+    await act(async () => { button('Settings').props.onPress(); });
+    await act(async () => { button('Mia voice mode').props.onPress(); });
+    h.n.failPreferences = true;
+    await act(async () => { button('Enable voice mode now').props.onPress(); });
+    assert.equal(h.mia.aiMode, true, 'the user explicitly approved activation');
+    assert.equal(h.tree.findAll(node => node.type === 'Modal' as any).length, 0);
+    assert.equal(button('Keep voice mode off'), undefined);
+    assert.ok(h.mia.error);
   } finally { await h.close(); }
 });
 
@@ -804,7 +912,7 @@ test('People debounces input, aborts superseded searches, and clears results wit
   const type = async (value: string) => act(async () => { field().props.onChangeText(value); });
   const tick = async (ms: number) => act(async () => { t.mock.timers.tick(ms); });
   try {
-    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'People')[0]!.props.onPress(); });
+    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Contacts')[0]!.props.onPress(); });
     t.mock.timers.enable({ apis: ['setTimeout'] }); h.n.holdPeopleSearch = true;
     await type('a'); await tick(400);
     assert.equal(h.n.peopleSearches.length, 0);
@@ -833,7 +941,7 @@ test('People debounces input, aborts superseded searches, and clears results wit
     await type('pending');
     await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Chats')[0]!.props.onPress(); });
     await tick(500); assert.equal(h.n.peopleSearches.length, 4, 'leaving the screen cancels a pending debounce');
-    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'People')[0]!.props.onPress(); });
+    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Contacts')[0]!.props.onPress(); });
     await type('leaving'); await tick(300); assert.equal(h.n.peopleSearches.length, 5);
     await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Chats')[0]!.props.onPress(); });
     assert.equal(h.n.peopleSearches[4]!.signal.aborted, true, 'leaving also aborts an in-flight request');
@@ -917,22 +1025,39 @@ test('chat entry starts at the latest message and restores a native initial offs
   ];
   const h = await mount(false, true);
   const timeline = () => h.tree.findAll(node => node.type === 'FlatList' as any)[0]!;
+  const text = (node: React.ReactNode): string => {
+    if (typeof node === 'string' || typeof node === 'number') return String(node);
+    if (Array.isArray(node)) return node.map(text).join(' ');
+    return React.isValidElement<{ children?: React.ReactNode }>(node) ? text(node.props.children) : '';
+  };
+  const rowText = (id: string) => {
+    const data = timeline().props.data as Message[];
+    const index = data.findIndex(message => message.id === id);
+    return text(timeline().props.renderItem({ item: data[index], index, separators: {} }));
+  };
+  const day = new Date(history[0]!.createdAt).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' });
   try {
     h.n.history = history;
     await act(async () => { await h.mia.navigate('chats', 'anna'); });
     assert.equal(timeline().props.inverted, true);
     assert.deepEqual(timeline().props.data.map((m: Message) => m.id), ['m2', 'm1']);
     assert.deepEqual(timeline().props.contentOffset, { x: 0, y: 0 });
+    assert.equal(rowText('m2').includes(day), false);
+    assert.equal(rowText('m1').includes(day), true);
     await act(async () => { timeline().props.onScrollBeginDrag(); timeline().props.onScroll({ nativeEvent: { contentOffset: { y: 250 } } }); });
     await act(async () => { await h.mia.navigate('people'); });
-    h.n.history = [{ ...history[0]!, id: 'm3', text: 'Arrived while away', createdAt: '2026-10-29T12:02:00Z' }, ...history];
+    h.n.history = [{ ...history[0]!, id: 'm3', text: 'Arrived while away', createdAt: '2026-10-29T12:02:00Z' }, ...history,
+      { ...history[1]!, id: 'm0', text: 'Older history', createdAt: '2026-10-29T11:59:00Z' }];
     await act(async () => { await h.mia.navigate('chats', 'anna'); });
     assert.deepEqual(timeline().props.contentOffset, { x: 0, y: 250 });
     assert.deepEqual(timeline().props.data.map((m: Message) => m.id), ['m2', 'm1'], 'restore the previous content before inserting unseen messages');
+    assert.equal(rowText('m1').includes(day), true, 'date geometry belongs to the frozen snapshot until restoration completes');
     await act(async () => { timeline().props.onScroll({ nativeEvent: { contentOffset: { y: 0 } } }); });
     assert.equal(h.mia.chatScrollPositions.read('user', 'anna').offset, 250, 'layout events cannot erase a saved offset');
     await act(async () => { timeline().props.onContentSizeChange(390, 2000); });
-    assert.deepEqual(timeline().props.data.map((m: Message) => m.id), ['m3', 'm2', 'm1']);
+    assert.deepEqual(timeline().props.data.map((m: Message) => m.id), ['m3', 'm2', 'm1', 'm0']);
+    assert.equal(rowText('m1').includes(day), false);
+    assert.equal(rowText('m0').includes(day), true, 'the day heading moves to the newly loaded oldest message');
     await act(async () => { timeline().props.onScroll({ nativeEvent: { contentOffset: { y: 250 } } }); h.mia.setComposer('Still here'); });
     assert.deepEqual(timeline().props.contentOffset, { x: 0, y: 250 }, 'typing does not issue a different scroll offset');
   } finally { await h.close(); }

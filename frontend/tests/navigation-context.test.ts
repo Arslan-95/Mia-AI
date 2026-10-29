@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { NavigationContext, sameContext, viewRoute } from '../src/navigationContext';
+import { NavigationContext, routeView, sameContext, viewRoute } from '../src/navigationContext';
 import { PresentationLease } from '../src/coordination';
 
 test('Mia requests retain the open conversation without a separate assistant route', () => {
@@ -12,6 +12,23 @@ test('Mia requests retain the open conversation without a separate assistant rou
   snapshot.route = '/settings';
   assert.equal(navigation.snapshot().route, '/chat/anna-chat');
   assert.equal(viewRoute('people'), '/contacts');
+});
+
+test('back returns to the screen that opened the chat and root tabs replace the navigation branch', () => {
+  const navigation = new NavigationContext();
+  navigation.move(viewRoute('people'));
+  navigation.move(viewRoute('chats', 'anna'));
+  const entered = navigation.snapshot();
+  assert.equal(navigation.back().route, '/contacts');
+  assert.ok(navigation.snapshot().revision > entered.revision);
+  navigation.move('/chat/anna'); navigation.move('/chat/bob');
+  assert.equal(navigation.back().route, '/chat/anna');
+  assert.equal(navigation.back().route, '/contacts');
+  navigation.move('/settings'); navigation.move('/chats'); navigation.move('/chat/anna');
+  assert.equal(navigation.back().route, '/chats');
+  navigation.reset(); assert.equal(navigation.back().route, '/chats');
+  assert.deepEqual(routeView('/chat/anna'), { view: 'chats', chatId: 'anna' });
+  assert.deepEqual(routeView('/contacts'), { view: 'people', chatId: null });
 });
 
 test('returning to the same chat does not make an old request or its device actions current again', () => {

@@ -4,7 +4,7 @@ import * as Crypto from 'expo-crypto';
 import { Api, ApiError } from './api';
 import { CancelledError, UserFacingError, VoiceCaptureUnavailable, userErrorMessage } from './errors';
 import { AssistantControl } from './assistantControl';
-import { NavigationContext, sameContext, viewRoute } from './navigationContext';
+import { NavigationContext, routeView, sameContext, viewRoute } from './navigationContext';
 import { preferences, sessionStorage } from './storage';
 import { Realtime, type Frame } from './realtime';
 import { PresentationLease, isLiveAction, mergeMessages } from './coordination';
@@ -90,12 +90,17 @@ export function useMia() {
     await sessionStorage.write(null).catch(fail); setSession(null); setChats([]); setContacts([]); setDrafts([]); setMessages({}); setTurns([]); setPending([]); setComposers({}); setActiveChatId(null); setAssistantSession(null); setDevicePrompt(null); setAudioState('idle');
     if (recording) await audio.current!.disposeRecording(recording); setRecording(null);
   }
-  useEffect(() => { void (async () => {
-    try {
-      const [stored, mode] = await Promise.all([sessionStorage.read(), preferences.get('mia.ai_mode')]);
-      aiModeRef.current = mode === 'true'; setAiMode(aiModeRef.current); setSession(stored);
-    } catch (reason) { fail(reason); } finally { setBooting(false); }
-  })(); }, []);
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const [stored, mode] = await Promise.all([sessionStorage.read(), preferences.get('mia.ai_mode')]);
+        if (!active) return;
+        aiModeRef.current = mode === 'true'; setAiMode(aiModeRef.current); setSession(stored);
+      } catch (reason) { if (active) fail(reason); } finally { if (active) setBooting(false); }
+    })();
+    return () => { active = false; };
+  }, []);
   async function checkHealth() {
     try { const health = await api.request<{ capabilities: Capabilities }>('/health/ready'); setCapabilities(health.capabilities); }
     catch (reason) { setCapabilities(null); fail(reason); }
@@ -235,15 +240,26 @@ export function useMia() {
     try { await Promise.all([stopAudio(), stopped, current && state.current.session ? assistantControl.stop(api, current.id) : Promise.resolve()]); }
     finally { if (!recording) setManualAudio(false); setVoiceRevision(value => value + 1); }
   }
-  function setView(next: Tab, chatId: string | null = null) {
-    navigation.move(viewRoute(next, chatId)); setTab(next); setActiveChatId(chatId);
+  function presentView(next: Tab, chatId: string | null) {
+    setTab(next); setActiveChatId(chatId);
     publishVoiceState();
     state.current = { ...state.current, tab: next, activeChatId: chatId };
+  }
+  function setView(next: Tab, chatId: string | null = null) {
+    navigation.move(viewRoute(next, chatId)); presentView(next, chatId);
   }
   async function navigate(next: Tab, chatId: string | null = null) {
     const stopped = interrupt(); setView(next, chatId);
     await stopped.catch(fail);
     if (next === 'chats' && chatId) await loadMessages(chatId).catch(fail);
+  }
+  async function navigateBack() {
+    if (state.current.tab !== 'chats' || !state.current.activeChatId) return;
+    const stopped = interrupt();
+    const { view, chatId } = routeView(navigation.back().route);
+    presentView(view, chatId);
+    await stopped.catch(fail);
+    if (chatId) await loadMessages(chatId).catch(fail);
   }
   async function acknowledge(action: DeviceAction, success: boolean, result: { message?: string; mediaId?: string }) {
     await api.request(`/v1/device-actions/${action.actionId}/result`, 'POST', { success, result: { ...result, context: clientSnapshot(),
@@ -762,7 +778,7 @@ export function useMia() {
     });
     return () => { cancelled = true; void conversation.stop(); };
   }, [voiceSessionEnabled, session?.token, session?.user.profileComplete, assistantSession?.id, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, inForeground, manualAudio, voiceRevision, voiceFault, voiceRecoverable, realtimeReady]);
-  return { booting, session, aiMode, microphoneMuted, toggleMicrophone, stopAssistantReply, voiceLevel, voicePhase, voiceFault, error, setError, busy, tab, capabilities, chats, contacts, drafts, messages, chatScrollPositions, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, devicePrompt, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, startChat, sendText, sendPending, draftAction, interrupt, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice, acceptDeviceRecording,
+  return { booting, session, aiMode, microphoneMuted, toggleMicrophone, stopAssistantReply, voiceLevel, voicePhase, voiceFault, error, setError, busy, tab, capabilities, chats, contacts, drafts, messages, chatScrollPositions, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, devicePrompt, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, navigateBack, startChat, sendText, sendPending, draftAction, interrupt, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice, acceptDeviceRecording,
     setComposer: (text: string) => { if (activeChatId) setComposers(previous => ({ ...previous, [activeChatId]: text })); },
   };
 }
