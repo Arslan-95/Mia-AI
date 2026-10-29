@@ -27,6 +27,7 @@ function define<T extends z.ZodType>(name: string, description: string, schema: 
 const uuid = z.uuid();
 const empty = z.object({}).strict();
 const versionedDraft = z.object({ draftId: uuid, version: z.int().positive() }).strict();
+const pageRoutes = { assistant: '/mia', chats: '/chats', contacts: '/contacts', drafts: '/drafts', settings: '/settings' } as const;
 
 export function toolsFor(agent: AgentName, context: ToolContext): Map<string, Tool> {
   const { db, state, turn, signal } = context;
@@ -189,6 +190,9 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
         if (!review) throw conflict('Review the current draft and wait for a later user turn to approve it.');
         return service.confirmDraft(turn.userId, draftId, version, signal);
       })),
+    define('open_page', 'Show the assistant home, chat list, contacts, saved drafts or settings on the phone. Navigation preserves voice mode and the current task. Pending means requested; check get_device_action before claiming the page opened.',
+      z.object({ page: z.enum(['assistant', 'chats', 'contacts', 'drafts', 'settings']) }).strict(),
+      ({ page }) => state.action(turn, signal, 'open_page', { route: pageRoutes[page] })),
     define('open_chat', 'Request that the app open the direct chat with a verified recipient. This does not send or discard drafts.',
       z.object({ recipientId: uuid }).strict(), async ({ recipientId }) => {
         const chat = await mutate(service => service.createDirectChat(turn.userId, recipientId));

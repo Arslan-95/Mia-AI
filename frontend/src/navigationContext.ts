@@ -1,13 +1,16 @@
 import type { ClientContext } from './types';
 
-export type View = 'chats' | 'people' | 'settings' | 'drafts';
-const routes: Record<View, string> = { chats: '/chats', people: '/contacts', settings: '/settings', drafts: '/drafts' };
+export type View = 'assistant' | 'chats' | 'people' | 'settings' | 'drafts';
+const routes: Record<View, string> = { assistant: '/mia', chats: '/chats', people: '/contacts', settings: '/settings', drafts: '/drafts' };
+export function pageView(route: unknown): View | null {
+  return (Object.keys(routes) as View[]).find(view => routes[view] === route) ?? null;
+}
 export function viewRoute(view: View, chatId: string | null = null) {
   return view === 'chats' && chatId ? `/chat/${chatId}` : routes[view];
 }
 export function routeView(route: string): { view: View; chatId: string | null } {
   if (route.startsWith('/chat/')) return { view: 'chats', chatId: route.slice('/chat/'.length) };
-  return { view: (Object.keys(routes) as View[]).find(view => routes[view] === route) ?? 'chats', chatId: null };
+  return { view: pageView(route) ?? 'chats', chatId: null };
 }
 export function sameContext(left: ClientContext | null, right: ClientContext | null) {
   return left?.route === right?.route && left?.revision === right?.revision && left?.previousRoute === right?.previousRoute;

@@ -29,11 +29,11 @@ export function Settings({ mia }: { mia: Mia }) {
       <ScreenHeader title="Settings" action={<HeaderAction label="Sign out" icon="log-out-outline" onPress={() => setConfirmation('logout')} />} />
       <View style={[s.card, s.row]}><Avatar name={mia.session!.user.displayName} size={48} /><View style={{ flex: 1, gap: 3 }}><Text style={s.sectionTitle}>{mia.session!.user.displayName}</Text><Text style={s.small}>@{mia.session!.user.username}</Text><Text style={s.small}>{mia.session!.user.phoneNumber}</Text></View></View>
       <Text style={p.groupTitle}>YOUR ASSISTANT</Text>
-      <Pressable accessibilityRole="button" accessibilityLabel="Mia voice mode" accessibilityHint="Opens a confirmation before enabling hands-free assistance."
-        onPress={() => setConfirmation('voice')} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      <Pressable accessibilityRole="button" accessibilityLabel="Mia voice mode" accessibilityHint={mia.aiMode ? 'Hands-free assistance is on. Opens Mia home.' : 'Opens a confirmation before enabling hands-free assistance.'}
+        onPress={() => { if (mia.aiMode) void mia.navigate('assistant'); else setConfirmation('voice'); }} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
         style={({ pressed }) => [s.card, s.row, { opacity: pressed ? .7 : 1 }, focused && s.focus]}>
         <View style={p.icon}><Icon name="sparkles-outline" color={colors.accentLight} /></View>
-        <View style={p.description}><Text style={s.label}>Mia voice mode</Text><Text style={s.small}>Open chats, hear messages and reply hands-free.</Text></View>
+        <View style={p.description}><Text style={s.label}>Mia voice mode{mia.aiMode ? ' · On' : ''}</Text><Text style={s.small}>{mia.aiMode ? 'Mia is with you. Return to your assistant.' : 'Open chats, hear messages and reply hands-free.'}</Text></View>
         <Icon name="chevron-forward" size={18} color={colors.muted} />
       </Pressable>
     </ScrollView>

@@ -50,13 +50,13 @@ export function Chats({ mia, bottomInset }: { mia: Mia; bottomInset: number }) {
         {showDrafts && <MessageDrafts mia={mia} drafts={drafts} />}
       </View>} />
     {drafts.length > 0 && <Button quiet label={`${showDrafts ? 'Hide' : 'Review'} ${drafts.length} saved ${drafts.length === 1 ? 'message' : 'messages'}`} icon="bookmark-outline" onPress={() => setShowDrafts(!showDrafts)} />}
-    <View testID="message-composer-area" style={[c.composerArea, { paddingBottom: Math.max(bottomInset, 8) }]}>
+    {!mia.aiMode && <View testID="message-composer-area" style={[c.composerArea, { paddingBottom: Math.max(bottomInset, 8) }]}>
       <View style={c.composer}>
         <Button quiet iconOnly label="Voice note" icon="mic-outline" disabled={mia.audioState === 'recording' || !!mia.recording} onPress={() => { Keyboard.dismiss(); void mia.startRecording().catch(mia.fail); }} style={c.composerAction} />
         <TextInput accessibilityLabel={`Message ${chat.recipient.displayName}`} placeholder="Message…" placeholderTextColor={colors.muted} keyboardAppearance="dark" selectionColor={colors.accentLight} multiline maxLength={8000} value={composer} onChangeText={mia.setComposer} style={c.composerInput} />
         <Button iconOnly label="Send" icon="arrow-up" disabled={!composer.trim()} onPress={() => void mia.sendText()} style={c.send} />
       </View>
-    </View>
+    </View>}
   </ChatBackGesture>;
 }
 

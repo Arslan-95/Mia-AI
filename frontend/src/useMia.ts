@@ -4,7 +4,7 @@ import * as Crypto from 'expo-crypto';
 import { Api, ApiError } from './api';
 import { CancelledError, UserFacingError, VoiceCaptureUnavailable, userErrorMessage } from './errors';
 import { AssistantControl } from './assistantControl';
-import { NavigationContext, routeView, sameContext, viewRoute } from './navigationContext';
+import { NavigationContext, pageView, routeView, sameContext, viewRoute, type View } from './navigationContext';
 import { preferences, sessionStorage } from './storage';
 import { Realtime, type Frame } from './realtime';
 import { PresentationLease, isLiveAction, mergeMessages } from './coordination';
@@ -16,7 +16,7 @@ import { pcmLevel } from './audio/level';
 import { VoiceConversation, checkVoice, voiceDelay, type VoicePhase, type VoiceRuntime } from './voiceConversation';
 import type { Recording } from './audio/types';
 import type { AssistantSession, Capabilities, Chat, ClientContext, Contact, DeviceAction, Draft, Message, OtpChallenge, PendingMessage, Profile, ServerEvent, Session, Turn, User } from './types';
-export type Tab = 'chats' | 'people' | 'settings' | 'drafts';
+export type Tab = View;
 const address = (process.env.EXPO_PUBLIC_API_URL ?? '').trim().replace(/\/+$/, '');
 export function useMia() {
   const [booting, setBooting] = useState(true); const [session, setSession] = useState<Session | null>(null);
@@ -97,7 +97,9 @@ export function useMia() {
       try {
         const [stored, mode] = await Promise.all([sessionStorage.read(), preferences.get('mia.ai_mode')]);
         if (!active) return;
-        aiModeRef.current = mode === 'true'; setAiMode(aiModeRef.current); setSession(stored);
+        aiModeRef.current = mode === 'true'; setAiMode(aiModeRef.current);
+        if (aiModeRef.current) setView('assistant');
+        setSession(stored);
       } catch (reason) { if (active) fail(reason); } finally { if (active) setBooting(false); }
     })();
     return () => { active = false; };
@@ -289,6 +291,7 @@ export function useMia() {
           else { finishingControl.current = null; setFinishingControlReply(false); }
           microphoneEpoch.current++; voiceControlRevision.current++;
           aiModeRef.current = enabled; setAiMode(enabled);
+          if (!enabled && state.current.tab === 'assistant') setView('chats');
           microphoneIntent.current = false; setMicrophoneMuted(false);
           duplex.setInputMuted(!enabled); conversation.setInputMuted(!enabled);
           if (!enabled) cancelNativeRecognition();
@@ -301,6 +304,17 @@ export function useMia() {
         const appliedRevision = voiceControlRevision.current;
         await acknowledge(action, true, { message: 'Voice controls updated on this device.' });
         appliedVoiceControl.current = { turnId: action.turnId, revision: appliedRevision };
+      } else if (action.kind === 'open_page') {
+        const next = pageView(action.payload.route);
+        if (!next) throw new Error('The requested page is unavailable.');
+        // Load page data before presentation, then recheck ownership: manual
+        // navigation during the request must not be overtaken by this action.
+        if (next === 'chats' || next === 'people' || next === 'drafts') await refresh();
+        if (!valid()) throw new Error('This device request is no longer current.');
+        // Keep the original request context and lease so later actions from
+        // this same turn can continue after the agent changes the visible page.
+        setView(next);
+        await acknowledge(action, true, { message: 'Page opened.' });
       } else if (action.kind === 'open_chat' && typeof action.payload.chatId === 'string') {
         const list = await api.request<Chat[]>('/v1/chats');
         if (!valid()) throw new Error('This device request is no longer current.');
@@ -485,6 +499,10 @@ export function useMia() {
     microphoneIntent.current = false; setMicrophoneMuted(false);
     duplex.setInputMuted(!enabled); conversation.setInputMuted(!enabled);
     aiModeRef.current = enabled; setAiMode(enabled); setVoiceFault(false); setVoiceRecoverable(false); setError('');
+    if (enabled) {
+      lease.revoke(); requestContext.current = null; setDevicePrompt(null);
+      setView('assistant');
+    } else if (state.current.tab === 'assistant') setView('chats');
     if (!enabled) setVoicePhase('off');
     publishVoiceState();
     await Promise.all([preferences.set('mia.ai_mode', String(enabled)), enabled && !wasFinishing ? Promise.resolve() : interrupt()]);

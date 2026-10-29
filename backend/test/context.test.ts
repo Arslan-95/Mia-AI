@@ -114,3 +114,34 @@ test('navigation requests never become current UI state and acknowledgements val
   await state.accept(alice.user.id, session.id, randomUUID(), 'Read my draft.', undefined, { route: `/draft/${draft.id}`, revision: 8 });
   assert.equal((await state.history(alice.user.id, session.id))[0]?.context?.route, `/draft/${draft.id}`);
 });
+
+test('page navigation tools choose allowlisted routes and retain action ownership and request context', async (t) => {
+  const context = await testApp(); t.after(() => context.close());
+  const owner = await phoneSignIn(context.app, '+15550000809', 'page_owner');
+  const stranger = await phoneSignIn(context.app, '+15550000810', 'page_stranger');
+  const state = new AssistantState(context.db); const session = await state.session(owner.user.id);
+  const snapshot = { route: '/mia', revision: 1 };
+  await state.accept(owner.user.id, session.id, randomUUID(), 'Show me my contacts and drafts.', undefined, snapshot);
+  const turn = await state.claim(randomUUID()); assert.ok(turn);
+  const toolContext = { db: context.db, state, turn, signal: new AbortController().signal, delegate: async () => 'Unused.' };
+  const tools = toolsFor('mia', toolContext);
+  assert.equal(toolsFor('contacts', toolContext).has('open_page'), false);
+  assert.equal(toolsFor('messaging', toolContext).has('open_page'), false);
+  for (const [page, route] of Object.entries({ assistant: '/mia', chats: '/chats', contacts: '/contacts', drafts: '/drafts', settings: '/settings' })) {
+    const action = await tools.get('open_page')!.execute({ page }) as { id: string; kind: string; payload: unknown; state: string };
+    assert.equal(action.kind, 'open_page'); assert.deepEqual(action.payload, { route }); assert.equal(action.state, 'pending');
+    await assert.rejects(state.acknowledgeAction(stranger.user.id, action.id, true, { context: { route, revision: 2 } }), { status: 404 });
+    const completed = await state.acknowledgeAction(owner.user.id, action.id, true, { context: { route, revision: 2 } });
+    assert.equal(completed.state, 'completed');
+    assert.deepEqual((await state.turn(owner.user.id, session.id, turn.id)).context, snapshot);
+  }
+  const before = (await context.db.query('SELECT id FROM device_actions')).length;
+  for (const input of [{ page: 'https://example.com' }, { page: '/settings' }, { page: 'contacts', route: 'https://example.com' }]) {
+    await assert.rejects(tools.get('open_page')!.execute(input));
+  }
+  assert.equal((await context.db.query('SELECT id FROM device_actions')).length, before);
+  const stale = await tools.get('open_page')!.execute({ page: 'chats' }) as { id: string };
+  await state.accept(owner.user.id, session.id, randomUUID(), 'A different task.', undefined, { route: '/settings', revision: 3 });
+  const cancelled = await state.acknowledgeAction(owner.user.id, stale.id, true, { context: { route: '/chats', revision: 4 } });
+  assert.equal(cancelled.state, 'cancelled');
+});

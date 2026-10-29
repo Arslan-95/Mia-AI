@@ -8,7 +8,7 @@ import { build } from 'esbuild';
 import type { Mia } from '../src/useMia';
 import type { Recording } from '../src/audio/types';
 import type { Frame } from '../src/realtime';
-import type { Contact, Message, ServerEvent, Turn } from '../src/types';
+import type { Contact, Draft, Message, ServerEvent, Turn } from '../src/types';
 import { pressGesture } from './pressability';
 
 // Run the real hook, API and conversation loop. Only OS audio, secure storage
@@ -144,6 +144,8 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     keyboardHandlers: new Map<string, () => void>(), insets: { top: 47, bottom: 34, left: 0, right: 0 },
     backGesture: null as Record<string, (...args: any[]) => any> | null, holdAnimation: false, finishAnimation: null as (() => void) | null,
     savedContacts: [] as Contact[],
+    savedDrafts: [] as Draft[],
+    holdContacts: false, contactsHeld: false, releaseContacts: null as (() => void) | null,
     history: [] as Message[],
     holdPeopleSearch: false,
     failPreferences: false,
@@ -178,12 +180,15 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
       return response([chat.recipient]);
     }
     if (path === '/v1/contacts' && method === 'POST') { const contact = { ...chat.recipient, name: 'Anna', contactId: 'contact-anna' }; if (!n.savedContacts.length) n.savedContacts.push(contact); return response(contact); }
-    if (path === '/v1/contacts') return response(n.savedContacts);
+    if (path === '/v1/contacts') {
+      if (n.holdContacts) { n.contactsHeld = true; await new Promise<void>(resolve => { n.releaseContacts = resolve; }); }
+      return response(n.savedContacts);
+    }
     if (path.startsWith('/v1/chats/anna/messages')) return response(n.history);
     if (path === '/v1/chats/anna/read') return response({});
-    if (path === '/v1/drafts') return response([]);
+    if (path === '/v1/drafts') return response(n.savedDrafts);
     if (path === '/v1/assistant/sessions') return response(assistantSession);
-    if (path === '/v1/assistant/sessions/assistant') return response({ turns: n.turns });
+    if (path === '/v1/assistant/sessions/assistant') return response({ turns: [...n.turns].reverse() });
     if (path.endsWith('/stop')) {
       n.turns.forEach(turn => { if (turn.status === 'running' || turn.status === 'queued') turn.status = 'interrupted'; });
       return response({ sessionId: 'assistant', stopped: true, generation: 1 });
@@ -226,7 +231,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
   };
 }
 
-test('startup waits for both saved credentials and mode, then opens only the saved mode without a transient agent screen', async () => {
+test('startup waits for both saved credentials and mode, then opens assistant home only for the restored voice mode', async () => {
   for (const enabled of [false, true]) for (const sessionFirst of [true, false]) {
     const h = await mount(enabled, true, false, true);
     const loading = () => h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'app-startup').length > 0;
@@ -243,8 +248,11 @@ test('startup waits for both saved credentials and mode, then opens only the sav
       await h.wait(() => !loading());
       assert.equal(h.mia.aiMode, enabled); assert.equal(voice(), enabled);
       const root = h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.edges)[0]!;
-      assert.equal(root.props.pointerEvents, enabled ? 'none' : 'auto');
-      assert.equal(root.props.accessibilityElementsHidden, enabled);
+      assert.notEqual(root.props.pointerEvents, 'none');
+      assert.notEqual(root.props.accessibilityElementsHidden, true);
+      assert.equal(h.mia.tab, enabled ? 'assistant' : 'chats');
+      assert.equal(h.tree.findAll(node => node.type === 'ScrollView' as any && node.props.testID === 'agent-home').length, enabled ? 1 : 0);
+      assert.equal(h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'agent-dock').length, enabled ? 1 : 0);
       if (enabled) await h.wait(() => h.n.captures === 1);
       else { assert.equal(h.n.captures, 0); assert.equal(h.n.preferences.get('mia.ai_mode'), 'false'); }
     } finally { await h.close(); }
@@ -257,10 +265,10 @@ test('ai_mode starts one global conversation, speaks automatically and keeps lis
     assert.equal(h.n.captures, 0);
     await act(async () => { await h.mia.saveAiMode(true); });
     await h.wait(() => !!h.n.capture);
-    assert.equal(h.mia.tab, 'chats');
+    assert.equal(h.mia.tab, 'assistant');
     await h.say(); await h.wait(() => h.n.playbacks === 1);
     assert.equal(h.mia.voicePhase, 'speaking'); assert.equal(h.n.captures, 1);
-    assert.deepEqual(h.n.turns[0]?.context, { route: '/chats', revision: 0, voice: { enabled: true, microphoneMuted: false, revision: 1 } });
+    assert.deepEqual(h.n.turns[0]?.context, { route: '/mia', revision: 1, previousRoute: '/chats', voice: { enabled: true, microphoneMuted: false, revision: 1 } });
     await act(async () => { h.n.playback!(); });
     await h.wait(() => h.n.captures === 2);
     await act(async () => { await h.mia.navigate('people'); });
@@ -270,6 +278,7 @@ test('ai_mode starts one global conversation, speaks automatically and keeps lis
     assert.equal(h.n.turns[1]?.context?.route, '/contacts');
     await act(async () => { await h.mia.saveAiMode(false); });
     assert.equal(h.n.capture, null); assert.equal(h.mia.voicePhase, 'off');
+    assert.equal(h.mia.tab, 'people', 'leaving voice mode retains the current messenger page');
     assert.equal(h.n.preferences.get('mia.ai_mode'), 'false');
   } finally { await h.close(); }
 });
@@ -304,6 +313,106 @@ test('voice commands retain the open chat and a server open_chat action does not
     await h.wait(() => h.n.playbacks === 1);
     await act(async () => { h.n.playback!(); }); await h.wait(() => !!h.n.capture);
     assert.equal(h.mia.voicePhase, 'listening');
+  } finally { await h.close(); }
+});
+
+test('agent page actions switch visible views and retain the native voice session and same-turn action ownership', async () => {
+  const h = await mount(true, true, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
+    const turn: Turn = { id: 'page-turn', sessionId: 'assistant', userId: 'user', generation: 1, userText: 'Show my contacts and then open Anna.',
+      assistantText: null, status: 'running', clientTurnId: 'page-client', context: stream.context as any };
+    h.n.turns.push(turn);
+    await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: turn.clientTurnId }); h.n.frame({ type: 'turn.accepted', turn }); });
+    const stops = h.n.nativeStops; const starts = h.n.nativeStarts;
+    h.n.savedDrafts.push({ id: 'saved-draft', recipientId: 'recipient', recipient: chat.recipient, kind: 'text', text: 'Keep this message for Anna.', mediaId: null,
+      version: 1, state: 'editing', reviewedVersion: null, updatedAt: new Date().toISOString() });
+    const stopRequests = h.n.requests.filter(request => request.path.endsWith('/stop')).length;
+    const open = async (id: string, kind: string, payload: Record<string, unknown>) => {
+      await act(async () => { await h.n.event({ id, type: 'device.action_requested', createdAt: new Date().toISOString(), payload: {
+        actionId: id, sessionId: 'assistant', turnId: turn.id, kind, payload, context: turn.context,
+      } }, 0); });
+      const feedback = h.n.requests.find(request => request.path === `/v1/device-actions/${id}/result`)!.body;
+      assert.equal(feedback.success, true);
+      return feedback.result.context;
+    };
+    for (const [route, tab] of [['/contacts', 'people'], ['/drafts', 'drafts'], ['/settings', 'settings'], ['/chats', 'chats'], ['/mia', 'assistant']]) {
+      const reported = await open(`page-${tab}`, 'open_page', { route });
+      assert.equal(h.mia.tab, tab); assert.equal(h.mia.activeChatId, null); assert.equal(reported.route, route);
+      assert.ok(h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'agent-dock').length);
+      assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.accessibilityElementsHidden === true).length, 0);
+      if (tab === 'drafts') {
+        assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Saved messages').length);
+        assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Keep this message for Anna.').length);
+        assert.ok(h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Review message').length);
+      }
+    }
+    assert.equal((await open('page-chat', 'open_chat', { chatId: 'anna' })).route, '/chat/anna');
+    assert.equal(h.mia.activeChatId, 'anna');
+    assert.equal(h.tree.findAll(node => node.type === 'FlatList' as any).length, 1, 'the conversation remains visible');
+    assert.equal(h.tree.findAll(node => node.props.testID === 'message-composer-area').length, 0, 'voice mode hides manual composition');
+    assert.equal(h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Message Anna').length, 0);
+    await open('page-return', 'open_page', { route: '/mia' });
+    await open('page-followup', 'stop_audio', {});
+    assert.equal(h.mia.tab, 'assistant'); assert.equal(h.mia.aiMode, true);
+    assert.equal(h.n.nativeStops, stops); assert.equal(h.n.nativeStarts, starts);
+    assert.equal(h.n.requests.filter(request => request.path.endsWith('/stop')).length, stopRequests);
+    assert.equal(turn.status, 'running');
+    await act(async () => { await h.mia.navigate('assistant'); });
+    const acknowledged = h.n.requests.filter(request => request.path.startsWith('/v1/device-actions/')).length;
+    await act(async () => { await h.n.event({ id: 'after-manual-home', type: 'device.action_requested', createdAt: new Date().toISOString(), payload: {
+      actionId: 'after-manual-home', turnId: turn.id, kind: 'open_page', payload: { route: '/contacts' }, context: turn.context,
+    } }, 0); });
+    assert.equal(h.mia.tab, 'assistant'); assert.equal(h.mia.aiMode, true);
+    assert.equal(h.n.requests.filter(request => request.path.startsWith('/v1/device-actions/')).length, acknowledged, 'manual home navigation revokes even a same-route lease');
+  } finally { await h.close(); }
+});
+
+test('unauthorized, expired, replayed and unallowlisted page actions cannot change the visible view', async () => {
+  const h = await mount(true, false, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
+    const turn: Turn = { id: 'guarded-page-turn', sessionId: 'assistant', userId: 'user', generation: 1, userText: 'Show contacts.',
+      assistantText: null, status: 'running', clientTurnId: 'guarded-page-client', context: stream.context as any };
+    h.n.turns.push(turn);
+    await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: turn.clientTurnId }); h.n.frame({ type: 'turn.accepted', turn }); });
+    const send = async (id: string, options: { turnId?: string; createdAt?: string; route?: string; context?: any; replayed?: boolean } = {}) => {
+      await act(async () => { await h.n.event({ id, type: 'device.action_requested', createdAt: options.createdAt ?? new Date().toISOString(), payload: {
+        actionId: id, turnId: options.turnId ?? turn.id, kind: 'open_page', payload: { route: options.route ?? '/contacts' }, context: options.context ?? turn.context,
+      } }, 0, options.replayed); });
+      assert.equal(h.mia.tab, 'assistant');
+      return h.n.requests.find(request => request.path === `/v1/device-actions/${id}/result`)?.body;
+    };
+    assert.equal(await send('foreign-page', { turnId: 'another-device-turn' }), undefined);
+    assert.equal(await send('expired-page', { createdAt: new Date(Date.now() - 19000).toISOString() }), undefined);
+    assert.equal(await send('replayed-page', { replayed: true }), undefined);
+    assert.equal((await send('wrong-context-page', { context: { route: '/settings', revision: 99 } })).success, false);
+    for (const route of ['https://example.com', '/chat/anna', '/settings/../mia']) assert.equal((await send(`invalid-${route}`, { route })).success, false);
+    assert.equal(h.mia.aiMode, true);
+  } finally { await h.close(); }
+});
+
+test('manual navigation during a page refresh prevents the pending action from stealing the screen', async () => {
+  const h = await mount(true, false, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
+    const turn: Turn = { id: 'refresh-page-turn', sessionId: 'assistant', userId: 'user', generation: 1, userText: 'Show contacts.',
+      assistantText: null, status: 'running', clientTurnId: 'refresh-page-client', context: stream.context as any };
+    h.n.turns.push(turn);
+    await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: turn.clientTurnId }); h.n.frame({ type: 'turn.accepted', turn }); });
+    h.n.holdContacts = true;
+    let pending!: Promise<void>;
+    await act(async () => { pending = h.n.event({ id: 'refresh-page', type: 'device.action_requested', createdAt: new Date().toISOString(), payload: {
+      actionId: 'refresh-page', turnId: turn.id, kind: 'open_page', payload: { route: '/contacts' }, context: turn.context,
+    } }, 0); });
+    await h.wait(() => h.n.contactsHeld);
+    await act(async () => { await h.mia.navigate('settings'); });
+    await act(async () => { h.n.holdContacts = false; h.n.releaseContacts!(); await pending; });
+    assert.equal(h.mia.tab, 'settings'); assert.equal(h.mia.aiMode, true);
+    assert.equal(h.n.requests.find(request => request.path === '/v1/device-actions/refresh-page/result')!.body.success, false);
   } finally { await h.close(); }
 });
 
@@ -343,7 +452,7 @@ test('leaving a live voice-note recording resumes the enabled assistant in the n
   } finally { await h.close(); }
 });
 
-test('a failed spoken response stops with a retry control and can resume without a separate assistant screen', async () => {
+test('a failed spoken response stops and can resume on the assistant home', async () => {
   const h = await mount(true);
   try {
     await h.wait(() => !!h.n.capture); h.n.failSpeech = true;
@@ -353,7 +462,7 @@ test('a failed spoken response stops with a retry control and can resume without
     await act(async () => { await h.mia.resumeAssistant(); });
     await h.wait(() => !!h.n.capture);
     assert.equal(h.mia.voiceFault, false); assert.equal(h.mia.error, '');
-    assert.equal(h.mia.tab, 'chats');
+    assert.equal(h.mia.tab, 'assistant');
   } finally { await h.close(); }
 });
 
@@ -437,10 +546,11 @@ test('voice activation requires Settings confirmation; exit requires a five-seco
       await act(async () => { pressable('Mia voice mode').props.onPress(); });
       await act(async () => { pressable('Enable voice mode now').props.onPress(); });
       await h.wait(() => !!h.n.capture);
-      const blocked = h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.pointerEvents === 'none')[0]!;
-      assert.equal(blocked.props.accessibilityElementsHidden, true);
-      assert.equal(blocked.props.importantForAccessibility, 'no-hide-descendants');
-      assert.ok(h.tree.findAll(node => node.props.accessibilityViewIsModal === true).length);
+      assert.equal(h.mia.tab, 'assistant');
+      assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.pointerEvents === 'none').length, 0);
+      assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && (node.props.accessibilityElementsHidden === true || node.props.importantForAccessibility === 'no-hide-descendants')).length, 0);
+      assert.equal(h.tree.findAll(node => node.props.accessibilityViewIsModal === true).length, 0);
+      assert.ok(h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'agent-dock').length);
       await act(async () => { await overlay().props.onPress(); });
       await h.wait(() => h.n.capture === null);
       assert.equal(overlay().props.accessibilityState.checked, false);
@@ -469,6 +579,7 @@ test('voice activation requires Settings confirmation; exit requires a five-seco
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 300)); });
       await h.wait(() => h.n.capture === null);
       assert.equal(overlay(), undefined);
+      assert.equal(h.mia.tab, 'chats', 'holding exit on the assistant home returns to the messenger');
       assert.equal(h.n.preferences.get('mia.ai_mode'), 'false');
       assert.equal(h.n.vibrations, 1);
       fullHold.dispose();
@@ -681,6 +792,7 @@ test('a confirmed agent exit reports the actual off state and finishes its reply
     const feedback = h.n.requests.find(r => r.path === '/v1/device-actions/exit-action/result')!.body;
     assert.equal(feedback.success, true); assert.equal(feedback.result.voice.enabled, false);
     assert.equal(h.mia.aiMode, false); assert.equal(h.n.preferences.get('mia.ai_mode'), 'false');
+    assert.equal(h.mia.tab, 'chats');
     assert.equal(h.n.nativeStops, stops); assert.equal(turn.status, 'running');
     turn.status = 'completed'; turn.assistantText = 'Voice mode is off.';
     await h.wait(() => !!h.n.playback); assert.ok(h.n.nativePCM);
@@ -924,6 +1036,27 @@ test('Contacts and Chats share header geometry and row height; chat back swipe r
   } finally { await h.close(); }
 });
 
+test('agent home shows the newest conversation and active Settings returns home without re-enabling or unmuting Mia', async () => {
+  const h = await mount(true, true);
+  const button = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
+  const texts = () => h.tree.findAll(node => node.type === 'Text' as any).map(node => node.props.children);
+  try {
+    const turn: Turn = { id: 'older-home-turn', sessionId: 'assistant', userId: 'user', generation: 1, userText: 'An older request.',
+      assistantText: 'An older reply.', status: 'completed', clientTurnId: 'older-home-client' };
+    h.n.turns.push(turn, { ...turn, id: 'newer-home-turn', generation: 2, userText: 'My newest request.', assistantText: 'My newest reply.', clientTurnId: 'newer-home-client' });
+    await act(async () => { await h.mia.retryAssistant(); await h.mia.toggleMicrophone(); });
+    assert.ok(texts().includes('My newest request.')); assert.ok(texts().includes('My newest reply.'));
+    assert.equal(texts().includes('An older request.'), false);
+    const modeWrites = h.n.preferences.get('mia.ai_mode');
+    await act(async () => { button('Open agent settings').props.onPress(); });
+    assert.equal(h.mia.tab, 'settings'); assert.equal(h.mia.microphoneMuted, true);
+    await act(async () => { button('Mia voice mode').props.onPress(); });
+    assert.equal(h.mia.tab, 'assistant'); assert.equal(h.mia.aiMode, true); assert.equal(h.mia.microphoneMuted, true);
+    assert.equal(h.tree.findAll(node => node.type === 'Modal' as any).length, 0);
+    assert.equal(h.n.preferences.get('mia.ai_mode'), modeWrites);
+  } finally { await h.close(); }
+});
+
 test('Settings uses modal confirmations without changing its page layout and only signs out after approval', async () => {
   const h = await mount(false, true);
   const button = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
@@ -1072,9 +1205,9 @@ test('a finishing back animation cannot navigate after voice mode takes over', a
     await act(async () => { back.onPanResponderGrant!(); back.onPanResponderRelease!(null, { dx: 130, vx: .2 }); });
     assert.ok(h.n.finishAnimation);
     await act(async () => { await h.mia.saveAiMode(true); });
-    assert.equal(back.onMoveShouldSetPanResponderCapture!(null, { x0: 0, moveX: 138, dx: 130, dy: 2, numberActiveTouches: 1 }), false);
+    assert.equal(h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'chat-screen').length, 0, 'the assistant home unmounts the chat gesture');
     await act(async () => { h.n.finishAnimation!(); });
-    assert.equal(h.mia.activeChatId, 'anna'); assert.equal(h.mia.aiMode, true);
+    assert.equal(h.mia.activeChatId, null); assert.equal(h.mia.tab, 'assistant'); assert.equal(h.mia.aiMode, true);
   } finally { await h.close(); }
 });
 
