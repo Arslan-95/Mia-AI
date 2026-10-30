@@ -8,7 +8,7 @@ import { NavigationContext, pageView, routeView, sameContext, viewRoute, type Vi
 import { preferences, sessionStorage } from './storage';
 import { Realtime, type Frame } from './realtime';
 import { PresentationLease, isLiveAction, mergeMessages } from './coordination';
-import { DeviceActionError, deviceActionFailure, type DeviceActionStage } from './deviceActionFeedback';
+import { DeviceActionError, deviceActionFailure, speechFailure, type DeviceActionStage } from './deviceActionFeedback';
 import { ChatScrollPositions } from './chatScrollPositions';
 import { Engine } from './audio/engine';
 import { DuplexAudio } from './audio/duplex';
@@ -587,7 +587,7 @@ export function useMia() {
         if (voiceEnvelope.current === envelope) { voiceEnvelope.current = undefined; setVoiceLevel(0); }
         socket.current?.send({ type: 'speech.playback', turnId: current.turnId, playing: false });
       });
-    } else if (frame.type === 'speech.failed' || frame.type === 'speech.cancelled') { current.settle(frame.type === 'speech.failed' ? new ApiError(503, 'TTS_UNAVAILABLE', '') : new CancelledError()); }
+    } else if (frame.type === 'speech.failed' || frame.type === 'speech.cancelled') { current.settle(frame.type === 'speech.failed' ? speechFailure(frame.code) : new CancelledError()); }
   };
   async function requestOtp(phoneNumber: string) {
     return api.request<OtpChallenge>('/v1/auth/otp/request', 'POST', { phoneNumber });

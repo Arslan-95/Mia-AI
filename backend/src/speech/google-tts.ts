@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Config } from '../config.js';
 import { AppError, throwIfAborted } from '../errors.js';
 import { inspectWav } from '../media.js';
@@ -12,6 +13,54 @@ const maxBase64Length = Math.ceil(maxAudioBytes / 3) * 4;
 const maxResponseBytes = maxBase64Length + 1024;
 const responseSchema = z.object({ audioContent: z.string().min(1).max(maxBase64Length) });
 const invalidAudio = () => new AppError(503, 'INVALID_TTS_AUDIO', 'The speech provider returned invalid audio.');
+
+export class SpeechSynthesisError extends AppError {
+  constructor(code: string, readonly providerStatus: number | undefined, readonly attempts: number) {
+    super(503, code, 'Speech synthesis is temporarily unavailable.');
+  }
+}
+
+// Retry only before a segment is yielded. The phone buffers the entire request
+// before playback, so these retries cannot repeat words the user already heard.
+async function requestAudio(fetcher: typeof fetch, body: string, authorize: GoogleSpeechHeaders, signal: AbortSignal) {
+  for (let attempt = 1; ; attempt++) {
+    throwIfAborted(signal);
+    const headers = await authorize(signal);
+    throwIfAborted(signal);
+    headers.set('Content-Type', 'application/json'); headers.set('Accept', 'application/json');
+    let response: Response;
+    try {
+      response = await fetcher(googleSpeechEndpoint, { method: 'POST', signal, headers, body });
+    } catch {
+      throwIfAborted(signal);
+      if (attempt === 3) throw new SpeechSynthesisError('TTS_NETWORK_ERROR', undefined, attempt);
+      await delay(300 * attempt, undefined, { signal });
+      continue;
+    }
+    throwIfAborted(signal);
+    if (response.ok) {
+      try { return await readAudio(response, signal); }
+      catch (error) {
+        throwIfAborted(signal);
+        if (error instanceof AppError) throw error;
+        if (attempt === 3) throw new SpeechSynthesisError('TTS_NETWORK_ERROR', response.status, attempt);
+        await delay(300 * attempt, undefined, { signal });
+        continue;
+      }
+    }
+    await response.body?.cancel();
+    const transient = response.status === 429 || response.status >= 500;
+    if (!transient || attempt === 3) {
+      const code = response.status === 429 ? 'TTS_RATE_LIMITED'
+        : [401, 403].includes(response.status) ? 'TTS_AUTH_UNAVAILABLE'
+        : response.status === 400 ? 'TTS_REQUEST_REJECTED' : 'TTS_UNAVAILABLE';
+      throw new SpeechSynthesisError(code, response.status, attempt);
+    }
+    // Respect a short Retry-After without exceeding the overall request budget.
+    const retryAfter = Number(response.headers.get('retry-after'));
+    await delay(Math.max(300 * attempt, Number.isFinite(retryAfter) ? Math.min(Math.max(0, retryAfter * 1000), 3000) : 0), undefined, { signal });
+  }
+}
 
 const escapeSsml = (text: string) => text.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[character]!);
 
@@ -74,22 +123,9 @@ export async function* synthesizeGoogleSpeech(config: Config, fetcher: typeof fe
   if (gemini && Buffer.byteLength(prompt, 'utf8') > 4000) throw new AppError(503, 'TTS_PROMPT_LIMIT', 'The speech delivery configuration is too long.');
   for (const part of textParts(text, maximumBytes, encode)) {
     throwIfAborted(requestSignal);
-    const headers = await authorize(requestSignal);
-    throwIfAborted(requestSignal);
-    headers.set('Content-Type', 'application/json'); headers.set('Accept', 'application/json');
-    const response = await fetcher(googleSpeechEndpoint, {
-      method: 'POST', signal: requestSignal,
-      headers,
-      body: JSON.stringify({ input: gemini ? { text: part, prompt } : styled ? { ssml: opening + encode(part) + closing } : { text: part },
+    const pcm = await requestAudio(fetcher, JSON.stringify({ input: gemini ? { text: part, prompt } : styled ? { ssml: opening + encode(part) + closing } : { text: part },
         voice: { languageCode: 'en-US', name: config.googleTtsVoice, ...(gemini ? { modelName: config.googleTtsModel } : {}) },
-        audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: sampleRate } }),
-    });
-    throwIfAborted(requestSignal);
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new AppError(503, 'TTS_UNAVAILABLE', 'Speech synthesis is temporarily unavailable.');
-    }
-    const pcm = await readAudio(response, requestSignal);
+        audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: sampleRate } }), authorize, requestSignal);
     total += pcm.length;
     if (total > maxPcmBytes) throw new AppError(503, 'TTS_LIMIT', 'The spoken response exceeded its duration limit.');
     for (let offset = 0; offset < pcm.length; offset += 12_000) {

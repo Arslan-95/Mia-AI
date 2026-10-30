@@ -18,6 +18,10 @@ import { defaultSpeechDelivery } from '../speech/delivery.js';
 type Budget = { calls: number; delegations: number };
 const prompts = { mia: COORDINATOR_PROMPT, messaging: MESSAGING_PROMPT, contacts: CONTACTS_PROMPT };
 
+class MessageDeliveryIncomplete extends Error {
+  constructor(readonly presentationConfirmed: boolean) { super('Message narration did not complete.'); }
+}
+
 export class AssistantRuntime {
   readonly state: AssistantState;
   private readonly owner = randomUUID();
@@ -97,7 +101,18 @@ export class AssistantRuntime {
     }, 5000);
     try {
       const input = await conversationInput(this.db, this.state, turn);
-      const result = await this.loop('mia', turn, controller.signal, input, { calls: 0, delegations: 0 });
+      let result: string;
+      try {
+        result = await this.loop('mia', turn, controller.signal, input, { calls: 0, delegations: 0 });
+      } catch (error) {
+        if (!(error instanceof MessageDeliveryIncomplete)) throw error;
+        throwIfAborted(controller.signal);
+        // End the whole task, including delegated loops and remaining calls in
+        // a batch. A model cannot turn failed narration into a success claim.
+        result = error.presentationConfirmed
+          ? "The message appeared on screen, but I couldn't finish its audio. I stopped at that message; your request is not complete."
+          : "I couldn't confirm that the message was shown and its requested audio finished. I stopped at that message; your request is not complete.";
+      }
       await this.state.finish(turn, controller.signal, result);
     } catch (error) {
       const code = error instanceof AppError ? error.code : controller.signal.aborted ? 'RUN_INTERRUPTED' : 'MODEL_ERROR';
@@ -162,7 +177,10 @@ export class AssistantRuntime {
           else throw error;
         }
         throwIfAborted(signal);
-        await this.state.emit(turn, signal, 'agent.tool_completed', { agent, tool: call.name, success });
+        const action = result as { kind?: string; state?: string; result?: { stage?: string; presentationConfirmed?: boolean } } | null;
+        const deliveryIncomplete = call.name === 'show_message' && action?.kind === 'show_message' && action.state !== 'completed';
+        await this.state.emit(turn, signal, 'agent.tool_completed', { agent, tool: call.name, success: success && !deliveryIncomplete });
+        if (deliveryIncomplete) throw new MessageDeliveryIncomplete(action?.result?.presentationConfirmed === true);
         const serialized = JSON.stringify(result ?? null);
         input.push({ type: 'function_call_output', call_id: call.callId,
           output: serialized.length <= 32_000 ? serialized : JSON.stringify({ error: 'RESULT_TOO_LARGE', message: 'Request fewer messages or a narrower result.' }) });

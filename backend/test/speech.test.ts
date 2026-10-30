@@ -148,7 +148,50 @@ test('Google TTS rejects missing credentials, provider errors and malformed audi
     await assert.rejects(() => spokenAudio(provider), { code: 'INVALID_TTS_AUDIO' });
   }
   const provider = new CloudSpeechProvider(config, async () => Response.json({ error: 'private provider detail' }, { status: 403 }));
-  await assert.rejects(() => spokenAudio(provider), { code: 'TTS_UNAVAILABLE', message: 'Speech synthesis is temporarily unavailable.' });
+  await assert.rejects(() => spokenAudio(provider), { code: 'TTS_AUTH_UNAVAILABLE', providerStatus: 403, attempts: 1,
+    message: 'Speech synthesis is temporarily unavailable.' });
+});
+
+test('Google TTS retries transient HTTP and network failures without duplicating audio', async () => {
+  for (const failure of [503, 429, 'network', 'body'] as const) {
+    let attempts = 0;
+    const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async () => {
+      if (++attempts === 1) {
+        if (failure === 'network') throw new TypeError('private network details');
+        if (failure === 'body') return new Response(new ReadableStream({ start(controller) { controller.error(new TypeError('private connection reset')); } }));
+        return new Response('private provider details', { status: failure });
+      }
+      return Response.json({ audioContent: synthesizedWav().toString('base64') });
+    });
+    assert.deepEqual(await spokenAudio(provider), Buffer.from([1, 2, 3, 4, 5, 6]));
+    assert.equal(attempts, 2);
+  }
+});
+
+test('Google TTS bounds retries, preserves status and does not retry permanent rejections', async () => {
+  for (const status of [429, 503, 400, 403]) {
+    let attempts = 0;
+    const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async () => {
+      attempts++;
+      return new Response('private provider details', { status });
+    });
+    const expected = status === 429 ? 'TTS_RATE_LIMITED' : status === 400 ? 'TTS_REQUEST_REJECTED'
+      : status === 403 ? 'TTS_AUTH_UNAVAILABLE' : 'TTS_UNAVAILABLE';
+    await assert.rejects(() => spokenAudio(provider), { code: expected, providerStatus: status, attempts: status >= 429 ? 3 : 1 });
+    assert.equal(attempts, status >= 429 ? 3 : 1);
+  }
+});
+
+test('Google TTS cancellation during retry backoff prevents another request', async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async () => {
+    attempts++;
+    setTimeout(() => controller.abort(), 20);
+    return new Response('', { status: 503 });
+  });
+  await assert.rejects(() => spokenAudio(provider, 'Hello.', controller.signal), { name: 'AbortError' });
+  assert.equal(attempts, 1);
 });
 
 test('Google TTS splits long Unicode text within the byte limit and respects the configured voice', async () => {

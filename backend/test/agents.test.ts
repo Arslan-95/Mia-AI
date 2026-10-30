@@ -47,6 +47,73 @@ async function fixture(provider: ModelProvider, start = true) {
     }); } };
 }
 
+for (const scenario of [
+  { name: 'first narration fails', failAt: 0, delegated: false },
+  { name: 'second narration fails after a specialist lookup', failAt: 1, delegated: true },
+  { name: 'all three narrations succeed', failAt: -1, delegated: false },
+  { name: 'presentation is unconfirmed', failAt: 1, delegated: false, presentationUnknown: true },
+]) test(`sequential reading: ${scenario.name}`, async t => {
+  let chatId = '';
+  let sources: string[] = [];
+  let modelCalls = 0;
+  let readingStarted = false;
+  let delegated = false;
+  const provider: ModelProvider = { configured: true, async respond(request) {
+    modelCalls++;
+    if (request.instructions.startsWith("You are Mia's messaging specialist")) return answer(`Sources in order: ${sources.join(', ')}`);
+    if (scenario.delegated && !delegated) {
+      delegated = true;
+      return call('delegate_messaging', { goal: 'Find the first three messages in order.' });
+    }
+    if (!readingStarted) {
+      readingStarted = true;
+      // Even a model that batches all sources must not advance past failure.
+      const batch = sources.map((messageId, index) => call('show_message', {
+        chatId, messageId, focus: null, narration: `Message ${index + 1}.`,
+      }));
+      return { text: '', output: batch.flatMap(item => item.output), calls: batch.flatMap(item => item.calls) };
+    }
+    return answer('All three messages were read.');
+  } };
+  const c = await fixture(provider); t.after(() => c.close());
+  const chat = await c.messaging.createDirectChat(c.ids.alice, c.ids.anna); chatId = chat.id;
+  for (let index = 0; index < 3; index++) sources.push((await c.messaging.send(c.ids.anna, chatId,
+    { kind: 'text', text: `Message ${index + 1}.` }, randomUUID())).id);
+  const accepted = await c.submit('Read the first three messages.');
+  const handled: string[] = [];
+  const done = await waitFor(async () => {
+    const pending = await c.db.query<{ id: string; payload: { messageId: string } }>(
+      `SELECT id,payload FROM device_actions WHERE turn_id=$1 AND state='pending' ORDER BY sequence`, [accepted.turn.id]);
+    for (const action of pending) {
+      const index = sources.indexOf(action.payload.messageId); handled.push(action.payload.messageId);
+      const reference = { chatId, messageId: action.payload.messageId, revision: index + 1 };
+      await c.runtime.state.acknowledgeAction(c.ids.alice, action.id, index !== scenario.failAt, {
+        reference, context: { route: `/chat/${chatId}`, revision: 1, reference }, presentationConfirmed: !scenario.presentationUnknown,
+        ...(index === scenario.failAt ? { stage: scenario.presentationUnknown ? 'presentation' : 'narration', code: 'TTS_UNAVAILABLE' } : {}),
+      });
+    }
+    const turn = await c.runtime.state.turn(c.ids.alice, c.session.id, accepted.turn.id);
+    assert.notEqual(turn.status, 'failed');
+    return turn.status === 'completed' ? turn : undefined;
+  });
+  if (scenario.failAt < 0) {
+    assert.deepEqual(handled, sources);
+    assert.equal(done.assistantText, 'All three messages were read.');
+  } else {
+    assert.deepEqual(handled, sources.slice(0, scenario.failAt + 1));
+    if (scenario.presentationUnknown) {
+      assert.match(done.assistantText!, /couldn't confirm/);
+      assert.doesNotMatch(done.assistantText!, /message was not shown/);
+    } else assert.match(done.assistantText!, /appeared on screen.*couldn't finish its audio/);
+    assert.match(done.assistantText!, /request is not complete/);
+    assert.doesNotMatch(done.assistantText!, /All three messages were read/);
+    assert.equal(modelCalls, scenario.delegated ? 3 : 1, 'no model continuation may ignore the failed narration');
+    const events = await c.db.query<{ payload: { success: boolean } }>(
+      `SELECT payload FROM events WHERE type='agent.tool_completed' AND payload->>'turnId'=$1 ORDER BY id DESC`, [accepted.turn.id]);
+    assert.equal(events[0]?.payload.success, false);
+  }
+});
+
 test('coordinator delegates to a real specialist loop and sends only a later reviewed version', async (t) => {
   let rootStep = 0;
   let childStep = 0;

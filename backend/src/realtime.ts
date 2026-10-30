@@ -14,6 +14,7 @@ import { eventQuery } from './routes/messaging.js';
 import { assertContextAccess, clientContextSchema, deviceResultSchema, type ClientContext } from './agents/context.js';
 import { PlaybackEcho, WordBargeInGate } from './speech/barge-in.js';
 import { AcousticEvidence } from './speech/acoustic-evidence.js';
+import { SpeechSynthesisError } from './speech/google-tts.js';
 
 const frameSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('auth'), token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), after: eventQuery.shape.after }).strict(),
@@ -322,8 +323,13 @@ export function registerRealtime(app: FastifyInstance, deps: {
         }
         if (!signal.aborted) send({ type: 'speech.completed', requestId, turnId, chunks: sequence, totalBytes });
       } catch (error) {
-        if (!signal.aborted) send({ type: 'speech.failed', requestId, turnId,
-          code: error instanceof AppError ? error.code : 'TTS_UNAVAILABLE' });
+        if (!signal.aborted) {
+          const code = error instanceof AppError ? error.code : 'TTS_UNAVAILABLE';
+          // Keep actionable metadata, never source text, credentials or raw provider bodies.
+          request.log.warn({ code, requestId, turnId, actionId,
+            ...(error instanceof SpeechSynthesisError ? { providerStatus: error.providerStatus, attempts: error.attempts } : {}) }, 'Speech synthesis failed');
+          send({ type: 'speech.failed', requestId, turnId, code });
+        }
       } finally {
         if (signal.aborted) send({ type: 'speech.cancelled', requestId, turnId });
         if (synthesis === controller) { synthesis = undefined; synthesisGeneration = undefined; }
