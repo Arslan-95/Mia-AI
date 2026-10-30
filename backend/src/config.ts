@@ -16,6 +16,7 @@ const schema = z.object({
   META_ASR_MODEL: z.string().min(1).default('muse-voice-transcribe-1.0'),
   GOOGLE_TTS_API_KEY: z.string().trim().default(''),
   GOOGLE_TTS_VOICE: z.string().regex(/^en-US-[A-Za-z0-9-]+$/).default('en-US-Neural2-F'),
+  GOOGLE_TTS_STYLE: z.enum(['none', 'calm', 'empathetic', 'lively', 'firm', 'apologetic']).default('calm'),
   LOG_LEVEL: z.enum(['silent', 'fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 });
 
@@ -38,6 +39,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     metaAsrModel: input.META_ASR_MODEL,
     googleTtsApiKey: input.GOOGLE_TTS_API_KEY,
     googleTtsVoice: input.GOOGLE_TTS_VOICE,
+    googleTtsStyle: input.GOOGLE_TTS_STYLE,
     logLevel: input.LOG_LEVEL,
   };
 }

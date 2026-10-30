@@ -11,21 +11,26 @@ const maxResponseBytes = maxBase64Length + 1024;
 const responseSchema = z.object({ audioContent: z.string().min(1).max(maxBase64Length) });
 const invalidAudio = () => new AppError(503, 'INVALID_TTS_AUDIO', 'The speech provider returned invalid audio.');
 
-function* textParts(text: string) {
+const escapeSsml = (text: string) => text.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[character]!);
+
+function* textParts(text: string, maximumBytes: number, encode: (text: string) => string) {
   let remaining = text.trim();
   while (remaining) {
-    if (Buffer.byteLength(remaining, 'utf8') <= 4800) { yield remaining; return; }
+    if (Buffer.byteLength(encode(remaining), 'utf8') <= maximumBytes) { yield remaining; return; }
     let length = 0;
     let bytes = 0;
     let wordBoundary = 0;
     for (const character of remaining) {
-      const size = Buffer.byteLength(character, 'utf8');
-      if (bytes + size > 4800) break;
+      const size = Buffer.byteLength(encode(character), 'utf8');
+      if (bytes + size > maximumBytes) break;
       bytes += size;
       length += character.length;
       if (/\s/u.test(character)) wordBoundary = length;
     }
-    const end = wordBoundary > length / 2 ? wordBoundary : length;
+    // Prefer whole sentences so a styled chunk does not interrupt their delivery.
+    const sentence = [...remaining.slice(0, length).matchAll(/[.!?…]["'”’)]*\s+/gu)].at(-1);
+    const sentenceBoundary = sentence ? sentence.index + sentence[0].length : 0;
+    const end = sentenceBoundary > length / 2 ? sentenceBoundary : wordBoundary > length / 2 ? wordBoundary : length;
     yield remaining.slice(0, end).trim();
     remaining = remaining.slice(end).trimStart();
   }
@@ -57,12 +62,17 @@ export async function* synthesizeGoogleSpeech(config: Config, fetcher: typeof fe
   const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(90_000)]);
   throwIfAborted(requestSignal);
   let total = 0;
-  for (const part of textParts(text)) {
+  const styled = config.googleTtsStyle !== 'none' && ['en-US-Neural2-F', 'en-US-Neural2-J'].includes(config.googleTtsVoice);
+  const opening = `<speak><google:style name="${config.googleTtsStyle}">`;
+  const closing = '</google:style></speak>';
+  const encode = styled ? escapeSsml : (text: string) => text;
+  const maximumBytes = 4800 - (styled ? Buffer.byteLength(opening + closing, 'utf8') : 0);
+  for (const part of textParts(text, maximumBytes, encode)) {
     throwIfAborted(requestSignal);
     const response = await fetcher('https://texttospeech.googleapis.com/v1/text:synthesize', {
       method: 'POST', signal: requestSignal,
       headers: { 'x-goog-api-key': config.googleTtsApiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ input: { text: part }, voice: { languageCode: 'en-US', name: config.googleTtsVoice },
+      body: JSON.stringify({ input: styled ? { ssml: opening + encode(part) + closing } : { text: part }, voice: { languageCode: 'en-US', name: config.googleTtsVoice },
         audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: sampleRate } }),
     });
     throwIfAborted(requestSignal);

@@ -11,7 +11,7 @@ if (!config.googleTtsApiKey) {
     let bytes = 0;
     const provider = new CloudSpeechProvider(config);
     for await (const chunk of provider.synthesize('Hello, I am Mia.', AbortSignal.timeout(30_000))) bytes += chunk.byteLength;
-    console.info(`Google TTS succeeded: ${config.googleTtsVoice}, 24 kHz mono PCM, ${bytes} bytes.`);
+    console.info(`Google TTS succeeded: ${config.googleTtsVoice}, requested style ${config.googleTtsStyle}, 24 kHz mono PCM, ${bytes} bytes.`);
   } catch (error) {
     console.error(`Google TTS check failed: ${error instanceof AppError ? error.code : 'TTS_REQUEST_FAILED'}. Check API access, key restrictions and billing.`);
     process.exitCode = 1;

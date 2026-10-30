@@ -42,7 +42,7 @@ test('speech adapters use Meta transcription and Google API-key synthesis withou
     assert.equal(init?.method, 'POST');
     assert.equal(new Headers(init?.headers).get('x-goog-api-key'), 'tts-test');
     assert.ok(!String(url).includes('tts-test'));
-    assert.deepEqual(JSON.parse(String(init?.body)), { input: { text: 'Hello.' },
+    assert.deepEqual(JSON.parse(String(init?.body)), { input: { ssml: '<speak><google:style name="calm">Hello.</google:style></speak>' },
       voice: { languageCode: 'en-US', name: 'en-US-Neural2-F' },
       audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: 24_000 } });
     return Response.json({ audioContent: synthesizedWav().toString('base64') });
@@ -51,6 +51,37 @@ test('speech adapters use Meta transcription and Google API-key synthesis withou
   assert.equal(speech.synthesisConfigured, true);
   assert.equal(await speech.transcribe(wav(), new AbortController().signal), 'Seven works for me.');
   assert.deepEqual(await spokenAudio(speech), Buffer.from([1, 2, 3, 4, 5, 6]));
+});
+
+test('calm delivery treats source markup as literal text and budgets escaped SSML chunks', async () => {
+  const source = 'Hi <Ben> & "friends" 👩‍💻. '.repeat(800).trim();
+  const parts: string[] = [];
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { input: { ssml: string; text?: string } };
+    assert.equal(body.input.text, undefined);
+    assert.ok(Buffer.byteLength(body.input.ssml, 'utf8') <= 4800, 'the limit includes entities and wrapper tags');
+    assert.ok(body.input.ssml.startsWith('<speak><google:style name="calm">'));
+    assert.ok(body.input.ssml.endsWith('</google:style></speak>'));
+    assert.equal(body.input.ssml.includes('<Ben>'), false);
+    const encoded = body.input.ssml.replace(/^<speak><google:style name="calm">|<\/google:style><\/speak>$/g, '');
+    assert.equal(encoded.includes('\uFFFD'), false);
+    parts.push(encoded.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
+  });
+  await spokenAudio(provider, source);
+  assert.ok(parts.length > 1);
+  assert.equal(parts.join(' '), source);
+  assert.ok(parts.every(part => part.endsWith('.')), 'whole sentences stay together when they fit');
+});
+
+test('Neural2 can return to its original delivery without interpreting source markup', async () => {
+  const source = '<break time="10s"/> & goodbye.';
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test', GOOGLE_TTS_STYLE: 'none' }), async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { input: unknown };
+    assert.deepEqual(body.input, { text: source });
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
+  });
+  await spokenAudio(provider, source);
 });
 
 test('Google TTS rejects missing credentials, provider errors and malformed audio', async () => {
