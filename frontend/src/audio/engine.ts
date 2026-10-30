@@ -1,7 +1,7 @@
 import { AudioModule, AudioQuality, IOSOutputFormat, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import type { AudioPlayer, AudioRecorder } from 'expo-audio';
 import { File, Paths } from 'expo-file-system';
-import type { AudioEngine, Recording } from './types';
+import type { AudioEngine, Recording, PlaybackProgress } from './types';
 import { pcmWav } from './wav';
 import { AudioOwnership } from './ownership';
 import { CancelledError, UserFacingError } from '../errors';
@@ -72,7 +72,7 @@ export class Engine implements AudioEngine {
     if (recorder) { try { await recorder.stop(); } finally { const uri = recorder.uri; recorder.release(); if (uri) { const file = new File(uri); if (file.exists) file.delete(); } } }
     await setAudioModeAsync({ allowsRecording: false, shouldPlayInBackground: false });
   }
-  async play(uri: string, headers?: Record<string, string>, onStarted?: () => void) {
+  async play(uri: string, headers?: Record<string, string>, onStarted?: () => void, onProgress?: (progress: PlaybackProgress) => void) {
     let completion: Promise<void> | undefined;
     await this.owner.transition(async current => {
     await this.cleanup(); if (!current()) throw new CancelledError();
@@ -92,6 +92,10 @@ export class Engine implements AudioEngine {
       const timeout = setTimeout(() => finish(new UserFacingError('Playback did not finish. Please try again.')), 125000);
       let started = false;
       const listener = player.addListener('playbackStatusUpdate', status => {
+        if (settled) return;
+        if (Number.isFinite(status.currentTime)) onProgress?.({ positionMs: Math.max(0, status.currentTime * 1000),
+          ...(Number.isFinite(status.duration) && status.duration > 0 ? { durationMs: status.duration * 1000 } : {}),
+          playing: status.playing, buffering: status.isBuffering });
         if (status.playing && !started) { started = true; onStarted?.(); }
         if (status.didJustFinish) finish();
         else if (!status.playing && status.isLoaded && status.currentTime > 0 && !status.isBuffering) finish(new UserFacingError('Playback was interrupted. Please try again.'));

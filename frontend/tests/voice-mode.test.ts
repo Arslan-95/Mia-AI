@@ -6,7 +6,7 @@ import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { build } from 'esbuild';
 import type { Mia } from '../src/useMia';
-import type { Recording } from '../src/audio/types';
+import type { Recording, PlaybackProgress } from '../src/audio/types';
 import type { Frame } from '../src/realtime';
 import type { Contact, Draft, Message, MessageReference, ServerEvent, Turn } from '../src/types';
 import { pressGesture } from './pressability';
@@ -76,7 +76,7 @@ const sources: Record<string, string> = {
       async finish() { n.noteRecording = false; return { uri: 'file:///note.wav', durationMs: 1000 }; }
       async stop() { if (n.nativeSession) n.audioConflicts++; n.playback?.(); n.playback = null; n.noteRecording = false; }
       async playPcm() { n.playbacks++; await new Promise(resolve => { n.playback = resolve; }); }
-      async play(_, __, started) { started?.(); await this.playPcm(); }
+      async play(_, __, started, progress) { n.playbackProgress = progress; started?.(); await this.playPcm(); }
       async disposeRecording(recording) { n.deleted.push(recording.uri); }
     }`,
   '../../modules/mia-voice': `const n = globalThis.__miaNative;
@@ -406,19 +406,40 @@ test('shutter switches to a short whole-card fade under Reduce Motion without ac
 });
 
 test('original recording reports real completion and stop or mute bypass the presentation queue', async () => {
-  const h = await mount(true, false, true);
+  const h = await mount(true, true, true);
   try {
     await h.wait(() => !!h.n.nativePCM);
     const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
     const turn: Turn = { id: 'original-turn', sessionId: 'assistant', userId: 'user', generation: 1, userText: 'Play her recording.', assistantText: null, status: 'running', clientTurnId: 'original-client', context: stream.context as any };
     h.n.turns.push(turn);
+    h.n.referenceSources.push({ id: 'voice-message', chatId: 'anna', senderId: 'recipient', kind: 'voice',
+      text: 'This transcript must not replace the voice player.', mediaId: 'voice-source', createdAt: '2026-10-30T12:00:00Z' });
     await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: turn.clientTurnId }); h.n.frame({ type: 'turn.accepted', turn }); });
     const command = async (id: string, kind: string, payload: Record<string, unknown>) => {
       await act(async () => { await h.n.event({ id, type: 'device.action_requested', createdAt: new Date().toISOString(), payload: { actionId: id, sessionId: 'assistant', turnId: turn.id, kind, payload, expiresIn: 180000, context: turn.context } }, 0); });
     };
     await command('original-one', 'play_audio', { mediaId: 'voice-source', messageId: 'voice-message', chatId: 'anna' });
+    await h.wait(() => h.mia.messageReference?.messageId === 'voice-message');
+    assert.equal(h.n.playbacks, 0, 'the real source card must appear before original playback');
+    const region = h.tree.findAll(node => node.props.testID === 'message-reference-region')[0]!;
+    await act(async () => { region.props.onLayout({ nativeEvent: { layout: { width: 390, height: 500 } } }); });
+    const card = h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'message-reference-card')[0]!;
+    await act(async () => { card.props.onLayout({ nativeEvent: { layout: { width: 358, height: 250 } } }); });
     await h.wait(() => h.n.playbacks === 1);
     assert.equal(h.mia.originalPlayback?.state, 'playing');
+    assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Playing voice message').length);
+    assert.ok(h.tree.findAll(node => node.props.testID === 'voice-message-waveform').length);
+    assert.equal(card.findAll(node => node.type === 'Pressable' as any).length, 0);
+    assert.equal(h.tree.findAll(node => node.props.testID === 'audio-controls').length, 0);
+    assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'This transcript must not replace the voice player.').length, 0);
+    await act(async () => { h.n.playbackProgress?.({ positionMs: 2500, durationMs: 10000, playing: true, buffering: false }); });
+    const label = (id: string) => h.tree.findAll(node => node.type === 'Text' as any && node.props.testID === id)[0]!.props.children;
+    assert.equal(label('voice-message-position'), '0:02'); assert.equal(label('voice-message-duration'), '0:10');
+    assert.equal(label('voice-message-status'), 'Playing');
+    await act(async () => { h.n.playbackProgress?.({ positionMs: 2500, durationMs: 10000, playing: false, buffering: true }); });
+    assert.equal(label('voice-message-status'), 'Buffering');
+    assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Buffering voice message').length);
+    await act(async () => { h.n.playbackProgress?.({ positionMs: 3000, durationMs: 10000, playing: true, buffering: false }); });
     assert.equal(h.n.requests.some(r => r.path === '/v1/device-actions/original-one/result'), false);
     await command('input-mute', 'set_microphone_muted', { muted: true });
     await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/input-mute/result'));
@@ -432,13 +453,15 @@ test('original recording reports real completion and stop or mute bypass the pre
     await act(async () => { h.n.playback!(); });
     await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/original-one/result'));
     assert.equal(h.mia.originalPlayback?.state, 'finished');
+    assert.equal(label('voice-message-status'), 'Finished'); assert.equal(label('voice-message-position'), '0:10');
     assert.equal(h.n.requests.find(r => r.path === '/v1/device-actions/original-one/result')!.body.success, true);
-    await command('original-two', 'play_audio', { mediaId: 'voice-source' });
+    await command('original-two', 'play_audio', { mediaId: 'voice-source', messageId: 'voice-message', chatId: 'anna' });
     await h.wait(() => h.n.playbacks === 2);
     await command('stop-now', 'stop_audio', {});
     await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/stop-now/result'));
     await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/original-two/result'));
     assert.equal(h.mia.originalPlayback?.state, 'stopped');
+    assert.equal(label('voice-message-status'), 'Stopped');
     assert.equal(h.n.requests.find(r => r.path === '/v1/device-actions/original-two/result')!.body.success, false);
     assert.equal(h.mia.aiMode, true);
     assert.equal(h.mia.voiceFault, false, 'original media handoff preserves the native response controller');
@@ -454,6 +477,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     session, preferences: new Map([['mia.ai_mode', String(mode)]]), captures: 0, playbacks: 0, deleted: [] as string[],
     frames: [] as Frame[], requests: [] as { path: string; method: string; body: any }[], turns: [] as Turn[],
     capture: null as ((recording: Recording | null) => void) | null, playback: null as (() => void) | null,
+    playbackProgress: null as ((progress: PlaybackProgress) => void) | null,
     appState: (_state: string) => {}, event: async (_event: ServerEvent, _time: number, _replayed?: boolean) => {}, frame: (_frame: Frame) => {},
     connection: (_status: string) => {}, offline: false, holdHealth: false, healthHeld: false, healthCancelled: false,
     noteRecording: false, complete: true, text: 'Open Anna', holdRecognition: false, recognitionCancelled: false, failSpeech: false, permissionDenied: false, dropAcceptedTurn: false,

@@ -37,7 +37,7 @@ export function AgentInteraction({ mia, onHoldingChange }: { mia: Mia; onHolding
   }, []);
   const explainExit = () => AccessibilityInfo.announceForAccessibility('Tap anywhere to mute or unmute. To leave voice mode, hold anywhere for five seconds until it vibrates, or ask Mia and confirm.');
   const reference = mia.messageReference;
-  const referenceContext = reference ? ` Showing ${referenceDirection(reference, mia.session!.user.id)}, ${referenceDate(reference.source.createdAt)}${reference.source.kind === 'voice' ? ', voice message' : ''}${reference.displayFocus ? ', focused excerpt' : ''}.` : '';
+  const referenceContext = reference ? ` Showing ${referenceDirection(reference, mia.session!.user.id)}, ${referenceDate(reference.source.createdAt)}${reference.source.kind === 'voice' ? `, voice message, ${mia.originalPlayback?.mediaId === reference.source.mediaId ? mia.originalPlayback.state : 'ready'}` : ''}${reference.displayFocus ? ', focused excerpt' : ''}.` : '';
   const status = { off: 'Ready', waiting: 'Connecting', listening: 'Listening', transcribing: 'Understanding', thinking: 'Thinking', speaking: 'Speaking', paused: 'On standby', error: 'Connection needs attention' }[mia.voicePhase];
   return <Pressable testID="agent-interaction-layer" style={styles.layer} accessible accessibilityViewIsModal
     accessibilityRole="switch" accessibilityLabel={`Mia voice mode.${referenceContext} ${status}. ${mia.microphoneMuted ? 'Microphone muted' : 'Microphone on'}. Tap anywhere to ${mia.microphoneMuted ? 'unmute' : 'mute'} microphone.`}

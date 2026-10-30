@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import type { Engine } from '../src/audio/engine';
+import type { PlaybackProgress } from '../src/audio/types';
 
 const root = fileURLToPath(new URL('../', import.meta.url).toString()).replaceAll('\\', '/');
 const bundle = build({
@@ -97,4 +98,19 @@ test('spoken playback resolves only at device completion and cancellation remove
   await flush(); await engine.stop(); await rejected;
   assert.equal(n.playersReleased, 2); assert.equal(n.removed, 2); assert.equal(n.files.size, 0);
   delete (globalThis as any).__miaAudio;
+});
+
+test('original playback progress comes from device status and late callbacks cannot update stopped audio', async () => {
+  const { n, engine } = await device(); const positions: PlaybackProgress[] = []; let starts = 0;
+  try {
+    const playback = engine.play('file:///original.wav', undefined, () => { starts++; }, progress => positions.push(progress));
+    await flush();
+    n.status({ playing: true, currentTime: 2.5, duration: 10, isBuffering: false });
+    n.status({ playing: false, currentTime: 2.5, duration: 10, isBuffering: true });
+    n.status({ playing: false, currentTime: 10, duration: 10, didJustFinish: true, isBuffering: false });
+    await playback;
+    assert.equal(starts, 1); assert.deepEqual(positions.map(p => p.positionMs), [2500, 2500, 10000]);
+    assert.equal(positions[1]!.buffering, true); assert.ok(positions.every(p => p.durationMs === 10000));
+    n.status({ playing: true, currentTime: 12, duration: 10 }); assert.equal(positions.length, 3);
+  } finally { await engine.stop(); delete (globalThis as any).__miaAudio; }
 });

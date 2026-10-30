@@ -3,9 +3,9 @@ import { StyleSheet, Text, View } from 'react-native';
 import type { Mia } from '../useMia';
 import { Button, classicColors, agentColors, useUi } from '../ui';
 
-export function hasAudioControls(mia: Pick<Mia, 'devicePrompt' | 'audioState' | 'recording' | 'voicePhase'>) {
+export function hasAudioControls(mia: Pick<Mia, 'devicePrompt' | 'audioState' | 'recording' | 'voicePhase' | 'aiMode'>) {
   return Boolean(mia.devicePrompt || mia.audioState === 'recording' || mia.recording
-    || (mia.audioState === 'playing' || mia.audioState === 'loading') && mia.voicePhase !== 'speaking');
+    || !mia.aiMode && (mia.audioState === 'playing' || mia.audioState === 'loading') && mia.voicePhase !== 'speaking');
 }
 
 export function AudioControls({ mia, elapsed, bottomInset = 0 }: { mia: Mia; elapsed: number; bottomInset?: number }) {
@@ -41,7 +41,7 @@ export function AudioControls({ mia, elapsed, bottomInset = 0 }: { mia: Mia; ela
           </View>
         </View>
       ) : null}
-      {(mia.audioState === 'playing' || mia.audioState === 'loading') && mia.voicePhase !== 'speaking' && (
+      {!mia.aiMode && (mia.audioState === 'playing' || mia.audioState === 'loading') && mia.voicePhase !== 'speaking' && (
         <View style={a.audio}>
           <Text style={[s.small, a.description]}>{mia.audioState === 'loading' ? 'Preparing audio…' : mia.audioState === 'playing' ? 'Playing' : 'Ready when you are'}</Text>
           <Button secondary label="Stop audio" icon="stop-outline" onPress={() => void mia.stopAudio().catch(mia.fail)} />

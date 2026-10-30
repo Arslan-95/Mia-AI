@@ -10,6 +10,11 @@ const labels: Record<VoicePhase, string> = {
   paused: 'On standby', error: 'Let’s reconnect',
 };
 function voiceStatus(mia: Mia) {
+  if (!mia.voiceFault && mia.audioState === 'playing' && mia.originalPlayback) {
+    if (mia.originalPlayback.state === 'playing') return { phase: 'speaking' as VoicePhase, status: 'Playing voice message' };
+    if (mia.originalPlayback.state === 'preparing' || mia.originalPlayback.state === 'buffering') return { phase: 'thinking' as VoicePhase,
+      status: mia.originalPlayback.state === 'buffering' ? 'Buffering voice message' : 'Preparing voice message' };
+  }
   const working = mia.voicePhase === 'thinking' || mia.voicePhase === 'speaking';
   const phase = mia.microphoneMuted && !working ? 'paused' : mia.voicePhase;
   return { phase, status: mia.microphoneMuted && !working ? 'Microphone muted' : labels[phase] };

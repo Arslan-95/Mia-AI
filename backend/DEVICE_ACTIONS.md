@@ -38,3 +38,13 @@ Verification:
 
 The fix changes JavaScript/backend code only. Reload the development client to
 load the updated action validator; no new native iPhone build is required.
+
+In agent mode, original voice-message playback presents its verified chat/source
+in the same passive center card before starting audio, even if no earlier
+`show_message` action was issued. A voice card shows a schematic voice waveform,
+device-reported elapsed/total time and preparing/buffering/playing/stopped/
+finished/failed state, instead of the message transcript. It has no buttons.
+The ordinary playback footer is hidden throughout agent mode independently of
+the conversation phase, so reconnecting cannot expose a stray Stop audio panel.
+Input mute is separate from playback state. Stopping is not reported as pausing;
+the existing original-recording transport does not yet support resumable pause.

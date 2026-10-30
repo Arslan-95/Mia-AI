@@ -4,6 +4,7 @@ import type { MessageReference, OriginalPlayback } from '../types';
 import { useReducedMotion } from '../motion';
 import { referenceDate, referenceDirection, referenceKey, sourceExcerpt } from '../messageReference';
 import { ShutterCard, type ShutterPhase } from './ShutterCard';
+import { VoiceMessageContent } from './VoiceMessageContent';
 
 const passive = { pointerEvents: 'none' as const, accessible: false, accessibilityElementsHidden: true, importantForAccessibility: 'no-hide-descendants' as const };
 const backdropOpacity = .68;
@@ -46,8 +47,9 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
     }
   }
   function fittingBudget(value: MessageReference) {
+    if (value.source.kind === 'voice') return 0;
     const { available, fontScale, width, padding } = latest.current;
-    return Math.max(0, Math.floor(((available - (value.source.kind === 'voice' ? 210 : 155) * fontScale) / (25 * fontScale)) * ((width - padding * 2) / (10 * fontScale))));
+    return Math.max(0, Math.floor(((available - 155 * fontScale) / (25 * fontScale)) * ((width - padding * 2) / (10 * fontScale))));
   }
   function dismiss() {
     const revision = latest.current.dismissalRevision;
@@ -85,10 +87,9 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
   useEffect(() => () => { backdropToken.current++; backdrop.current?.stop(); current.current = null; }, []);
 
   const rendered = display?.reference;
-  const excerpt = rendered && display ? sourceExcerpt(rendered.source.text ?? '', rendered.focus, display.budget) : null;
+  const excerpt = rendered && display ? sourceExcerpt(rendered.source.kind === 'text' ? rendered.source.text ?? '' : '', rendered.focus, display.budget) : null;
   const sent = rendered?.source.senderId === userId;
-  const associated = rendered?.source.mediaId && playback?.mediaId === rendered.source.mediaId ? playback.state : null;
-  const status = associated ? { preparing: 'Preparing audio…', playing: 'Playing original', finished: 'Finished', stopped: 'Stopped', failed: "Couldn't play audio" }[associated] : 'Original audio';
+  const associated = rendered?.source.mediaId && playback?.mediaId === rendered.source.mediaId ? playback : null;
   return <View {...passive} testID="message-reference-region" style={styles.region} onLayout={event => {
     const { width, height } = event.nativeEvent.layout;
     setRegion(previous => previous.width === width && previous.height === height ? previous : { width, height });
@@ -102,9 +103,9 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
         const available = latest.current.available;
         if (event.nativeEvent.layout.height > available && view.budget > 0) {
           fitted.current = null; commit({ ...view, budget: Math.max(0, Math.floor(view.budget * .7)) });
-        } else if (event.nativeEvent.layout.height > available || (rendered.source.text && !excerpt.text)) latest.current.onPresented(view.reference.revision, false);
+        } else if (event.nativeEvent.layout.height > available || (rendered.source.kind === 'text' && rendered.source.text && !excerpt.text)) latest.current.onPresented(view.reference.revision, false);
         else {
-          fitted.current = { serial: view.serial, budget: view.budget, focus: excerpt.partial ? { start: excerpt.start, end: excerpt.end } : undefined };
+          fitted.current = { serial: view.serial, budget: view.budget, focus: rendered.source.kind === 'text' && excerpt.partial ? { start: excerpt.start, end: excerpt.end } : undefined };
           notifyIfReady();
         }
       }}
@@ -121,8 +122,8 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
         if (latest.current.source) present(); else dismiss();
       }}>
       <View {...passive} style={styles.metadata}><Text {...passive} style={[styles.direction, { color: sent ? '#D8C4F4' : '#D3C5E5' }]}>{referenceDirection(rendered, userId)}</Text></View>
-      {rendered.source.kind === 'voice' && <View {...passive} style={styles.metadata}><Text {...passive} style={styles.voice}>◉  Voice message</Text><Text {...passive} style={styles.date}>{status}</Text>{!!rendered.source.text && <Text {...passive} style={styles.date}>Transcript</Text>}</View>}
-      {!!rendered.source.text && <View {...passive}>{excerpt.partial && <Text {...passive} style={styles.partial}>Excerpt · {excerpt.end - excerpt.start} of {excerpt.total} characters</Text>}{excerpt.start > 0 && <Text {...passive} style={styles.date}>…</Text>}<Text {...passive} style={styles.body}>{excerpt.text}</Text>{excerpt.end < excerpt.total && <Text {...passive} style={styles.date}>…</Text>}{excerpt.partial && <Text {...passive} style={styles.hint}>Ask Mia for another part</Text>}</View>}
+      {rendered.source.kind === 'voice' && <VoiceMessageContent playback={associated} reduced={reduced} />}
+      {rendered.source.kind === 'text' && !!rendered.source.text && <View {...passive}>{excerpt.partial && <Text {...passive} style={styles.partial}>Excerpt · {excerpt.end - excerpt.start} of {excerpt.total} characters</Text>}{excerpt.start > 0 && <Text {...passive} style={styles.date}>…</Text>}<Text {...passive} style={styles.body}>{excerpt.text}</Text>{excerpt.end < excerpt.total && <Text {...passive} style={styles.date}>…</Text>}{excerpt.partial && <Text {...passive} style={styles.hint}>Ask Mia for another part</Text>}</View>}
       <Text {...passive} style={styles.date}>{referenceDate(rendered.source.createdAt)}</Text>
     </ShutterCard>}
   </View>;
@@ -132,6 +133,6 @@ const styles = StyleSheet.create({
   scrim: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: '#000000' },
   card: { borderRadius: 24, borderWidth: 1, borderColor: '#684A82', paddingVertical: 18, gap: 12, overflow: 'hidden' },
   metadata: { gap: 3 }, direction: { fontSize: 13, lineHeight: 19, fontWeight: '600' }, date: { fontSize: 12, lineHeight: 18, color: '#C9C0D2' },
-  voice: { fontSize: 17, lineHeight: 25, color: '#F5F1FA' }, body: { fontSize: 17, lineHeight: 25, color: '#F5F1FA', fontWeight: '400' },
+  body: { fontSize: 17, lineHeight: 25, color: '#F5F1FA', fontWeight: '400' },
   partial: { fontSize: 12, lineHeight: 18, color: '#C9C0D2', marginBottom: 6 }, hint: { fontSize: 12, lineHeight: 18, color: '#C9C0D2', marginTop: 8 },
 });
