@@ -162,13 +162,31 @@ export class AssistantState {
 
   async action(turn: Turn, signal: AbortSignal, kind: string, payload: unknown): Promise<DeviceAction> {
     return this.mutate(turn, signal, async (db) => {
+      const [count] = await db.query<{ count: number }>('SELECT count(*)::integer AS count FROM device_actions WHERE turn_id=$1', [turn.id]);
+      if ((count?.count ?? 0) >= 12) throw new AppError(422, 'ACTION_LIMIT', 'This turn reached its device action limit.');
+      const extended = ['show_message','dismiss_message','play_audio'].includes(kind);
       const id = randomUUID();
-      await db.query(`INSERT INTO device_actions(id,user_id,session_id,turn_id,generation,kind,payload,expires_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,now() + interval '20 seconds')`,
-      [id, turn.userId, turn.sessionId, turn.id, turn.generation, kind, JSON.stringify(payload)]);
-      await publish(db, turn.userId, 'device.action_requested', { sessionId: turn.sessionId, turnId: turn.id, actionId: id, kind, payload, context: turn.context });
+      const [stored] = await db.query<{ sequence: string }>(`INSERT INTO device_actions(id,user_id,session_id,turn_id,generation,kind,payload,expires_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,now() + ($8::integer * interval '1 second')) RETURNING sequence`,
+      [id, turn.userId, turn.sessionId, turn.id, turn.generation, kind, JSON.stringify(payload), extended ? 180 : 20]);
+      await publish(db, turn.userId, 'device.action_requested', { sessionId: turn.sessionId, turnId: turn.id, actionId: id, kind, payload, sequence: String(stored!.sequence), expiresIn: extended ? 180000 : 20000, context: turn.context });
       return { id, kind, payload, state: 'pending', result: null };
     });
+  }
+
+  async actionSpeech(userId: string, sessionId: string, turnId: string, actionId: string) {
+    const turn = await this.turn(userId, sessionId, turnId);
+    const session = await this.requireSession(userId, sessionId);
+    const [action] = await this.db.query<{ payload: { narration?: string }; state: string; current: boolean }>(`SELECT payload,state,expires_at>now() AS current FROM device_actions
+      WHERE id=$1 AND user_id=$2 AND session_id=$3 AND turn_id=$4 AND generation=$5 AND kind='show_message'`,
+      [actionId,userId,sessionId,turnId,session.generation]);
+    if (!action?.current || action.state !== 'pending' || !['running','completed'].includes(turn.status) || turn.generation !== session.generation || !action.payload.narration)
+      throw new AppError(409, 'STALE_SPEECH', 'This narration is no longer current.');
+    const claimed = await this.db.query(`UPDATE device_actions a SET narration_requested=true FROM assistant_sessions s,assistant_turns t
+      WHERE a.id=$1 AND a.session_id=s.id AND a.turn_id=t.id AND s.generation=a.generation
+      AND t.status IN ('running','completed') AND a.state='pending' AND a.expires_at>now() AND NOT a.narration_requested RETURNING a.id`, [actionId]);
+    if (!claimed.length) throw new AppError(409, 'STALE_SPEECH', 'This narration was already requested or cancelled.');
+    return { turn, text: action.payload.narration };
   }
 
   async acknowledgeAction(userId: string, actionId: string, success: boolean, result: unknown) {
@@ -183,6 +201,12 @@ export class AssistantState {
       if (action.state !== 'pending') return action;
       if (action.expired || session.generation !== action.generation) throw conflict('This device action has expired or was cancelled.');
       await assertContextAccess(sql, userId, feedback.context ?? null);
+      if (success && action.kind === 'show_message') {
+        const source = action.payload as { chatId: string; messageId: string };
+        if (feedback.reference?.chatId !== source.chatId || feedback.reference.messageId !== source.messageId || feedback.context?.route !== `/chat/${source.chatId}`)
+          throw conflict('Confirm the exact visible source and its opened chat.');
+      }
+      if (success && action.kind === 'dismiss_message' && feedback.context?.reference) throw conflict('The reference is still visible.');
       if (success && ['set_voice_mode', 'set_microphone_muted'].includes(action.kind)) {
         const requested = action.payload as { enabled?: boolean; muted?: boolean };
         if (!feedback.voice || (action.kind === 'set_voice_mode' ? feedback.voice.enabled !== requested.enabled : feedback.voice.microphoneMuted !== requested.muted)) {

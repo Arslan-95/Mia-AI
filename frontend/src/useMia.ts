@@ -15,7 +15,7 @@ import { concatBytes } from './audio/wav';
 import { pcmLevel } from './audio/level';
 import { VoiceConversation, checkVoice, voiceDelay, type VoicePhase, type VoiceRuntime } from './voiceConversation';
 import type { Recording } from './audio/types';
-import type { AssistantSession, Capabilities, Chat, ClientContext, Contact, DeviceAction, Draft, Message, OtpChallenge, PendingMessage, Profile, ServerEvent, Session, Turn, User } from './types';
+import type { AssistantSession, Capabilities, Chat, ClientContext, Contact, DeviceAction, Draft, Message, MessageReference, MessageReferenceIdentity, OriginalPlayback, OtpChallenge, PendingMessage, Profile, ServerEvent, Session, Turn, User } from './types';
 export type Tab = View;
 const address = (process.env.EXPO_PUBLIC_API_URL ?? '').trim().replace(/\/+$/, '');
 export function useMia() {
@@ -61,6 +61,52 @@ export function useMia() {
   const [composers, setComposers] = useState<Record<string, string>>({}); const [pending, setPending] = useState<PendingMessage[]>([]);
   const [assistantSession, setAssistantSession] = useState<AssistantSession | null>(null); const [turns, setTurns] = useState<Turn[]>([]);
   const [audioState, setAudioState] = useState<'idle' | 'recording' | 'loading' | 'playing'>('idle');
+  const [messageReference, setMessageReference] = useState<MessageReference | null>(null);
+  const reference = useRef<MessageReference | null>(null);
+  const referenceEpoch = useRef(0);
+  const referencePresentation = useRef<{ revision: number; resolve(): void; reject(reason: unknown): void } | null>(null);
+  const [originalPlayback, setOriginalPlayback] = useState<OriginalPlayback | null>(null);
+  const originalOperation = useRef<string | null>(null);
+  const originalMediaActive = useRef(false);
+  const presentationQueue = useRef<Promise<void>>(Promise.resolve());
+  const seenActions = useRef(new Set<string>());
+  function clearReference() {
+    const wasVisible = reference.current !== null;
+    referenceEpoch.current++;
+    referencePresentation.current?.reject(new CancelledError()); referencePresentation.current = null;
+    reference.current = null; setMessageReference(null);
+    if (wasVisible) publishVoiceState();
+  }
+  function awaitReferencePresentation(revision: number) {
+    referencePresentation.current?.reject(new CancelledError());
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (referencePresentation.current?.revision === revision) referencePresentation.current = null;
+        reject(new UserFacingError('The message could not be displayed. Ask Mia to try again.'));
+      }, 5000);
+      referencePresentation.current = { revision, resolve() { clearTimeout(timer); resolve(); }, reject(reason) { clearTimeout(timer); reject(reason); } };
+    });
+  }
+  function referenceIdentity(): MessageReferenceIdentity | undefined {
+    const value = reference.current;
+    const focus = value?.displayFocus ?? value?.focus;
+    return value ? { chatId: value.chatId, messageId: value.messageId, revision: value.revision, ...(focus ? { focus } : {}) } : undefined;
+  }
+  function referencePresented(revision: number, success = true, focus?: { start: number; end: number }) {
+    const pending = referencePresentation.current;
+    if (!success && reference.current?.revision === revision && !pending) {
+      clearReference(); setError('There is not enough space to display that message. Ask Mia to read it.'); return;
+    }
+    if (success && reference.current?.revision === revision && JSON.stringify(reference.current.displayFocus) !== JSON.stringify(focus)) {
+      reference.current = { ...reference.current, displayFocus: focus }; setMessageReference(reference.current);
+      publishVoiceState();
+    }
+    if (!pending || pending.revision !== revision) return;
+    referencePresentation.current = null;
+    if (success) {
+      pending.resolve();
+    } else { clearReference(); pending.reject(new UserFacingError('There is not enough space to display that message. Ask Mia to read it.')); }
+  }
   const [recording, setRecording] = useState<Recording | null>(null);
   const [recordChatId, setRecordChatId] = useState<string | null>(null); const [devicePrompt, setDevicePrompt] = useState<DeviceAction | null>(null);
   const lease = useRef(new PresentationLease()).current; const audio = useRef<Engine | null>(null); if (!audio.current) audio.current = new Engine();
@@ -68,7 +114,7 @@ export function useMia() {
   const navigation = useRef(new NavigationContext()).current;
   const [chatScrollPositions] = useState(() => new ChatScrollPositions());
   function clientSnapshot(): ClientContext {
-    return { ...navigation.snapshot(), voice: { enabled: aiModeRef.current, microphoneMuted: microphoneIntent.current, revision: voiceControlRevision.current } };
+    return { ...navigation.snapshot(), ...(referenceIdentity() ? { reference: referenceIdentity() } : {}), voice: { enabled: aiModeRef.current, microphoneMuted: microphoneIntent.current, revision: voiceControlRevision.current } };
   }
   function publishVoiceState() { socket.current?.send({ type: 'voice.context', context: clientSnapshot() }); }
   const requestContext = useRef<ClientContext | null>(null);
@@ -82,6 +128,7 @@ export function useMia() {
   const fail = useCallback((reason: unknown) => { const message = userErrorMessage(reason); if (message) setError(message); }, []);
   const api = useMemo(() => new Api(address, session, () => { void clearSession(); }), [address, session]);
   async function clearSession() {
+    clearReference(); seenActions.current.clear();
     chatScrollPositions.clear();
     finishingControl.current = null; setFinishingControlReply(false); appliedVoiceControl.current = null;
     void conversation.stop(); await stopNativeVoice();
@@ -212,6 +259,7 @@ export function useMia() {
     return duplex.hasInput && nativeStream.current !== null && nativeCapture.current === nativeStream.current ? 'listening' : 'waiting';
   }
   function startNativeRecognition(id: string) {
+    if (originalMediaActive.current) return;
     // A natural rotation can overtake the previous session's committed turn.
     // Explicit cancellation clears this allowance; retain only one prior id.
     nativeRecognitionSessions.current.add(id);
@@ -226,6 +274,7 @@ export function useMia() {
     }, 15000);
   }
   async function stopAudio() {
+    if (originalOperation.current) { const id = originalOperation.current; originalOperation.current = null; setOriginalPlayback(value => value?.operationId === id ? { ...value, state: 'stopped' } : value); }
     clearInterval(voiceEnvelope.current); voiceEnvelope.current = undefined; setVoiceLevel(0);
     speech.current?.settle(new CancelledError()); speech.current = null; socket.current?.send({ type: 'speech.cancel' });
     if (!nativeStream.current) socket.current?.send({ type: 'voice.cancel' });
@@ -244,12 +293,14 @@ export function useMia() {
   }, []);
   async function interrupt() {
     const stopped = Promise.all([conversation.stop(), stopNativeVoice()]);
+    referencePresentation.current?.reject(new CancelledError()); referencePresentation.current = null;
     lease.revoke(); requestContext.current = null; setDevicePrompt(null);
     const current = state.current.assistantSession;
     try { await Promise.all([stopAudio(), stopped, current && state.current.session ? assistantControl.stop(api, current.id) : Promise.resolve()]); }
     finally { if (!recording) setManualAudio(false); setVoiceRevision(value => value + 1); }
   }
   function presentView(next: Tab, chatId: string | null) {
+    if (reference.current && (next !== 'chats' || chatId !== reference.current.chatId)) clearReference();
     setTab(next); setActiveChatId(chatId);
     publishVoiceState();
     state.current = { ...state.current, tab: next, activeChatId: chatId };
@@ -270,17 +321,52 @@ export function useMia() {
     await stopped.catch(fail);
     if (chatId) await loadMessages(chatId).catch(fail);
   }
-  async function acknowledge(action: DeviceAction, success: boolean, result: { message?: string; mediaId?: string }) {
+  async function acknowledge(action: DeviceAction, success: boolean, result: { message?: string; mediaId?: string; reference?: MessageReferenceIdentity | null }) {
     await api.request(`/v1/device-actions/${action.actionId}/result`, 'POST', { success, result: { ...result, context: clientSnapshot(),
       ...(['set_voice_mode', 'set_microphone_muted'].includes(action.kind) ? { voice: clientSnapshot().voice } : {}) } });
   }
-  async function performAction(action: DeviceAction) {
-    const epoch = lease.snapshot();
+  async function performAction(action: DeviceAction, epoch = lease.snapshot()) {
     const valid = () => lease.current(epoch) && sameContext(action.context ?? null, requestContext.current)
-      && foreground.current && Date.now() - Date.parse(action.createdAt) < 18000;
+      && foreground.current && Date.now() - Date.parse(action.createdAt) < (action.expiresIn ?? 18000);
     try {
       if (!valid()) throw new Error('This device request belongs to a previous view.');
-      if (action.kind === 'set_voice_mode' || action.kind === 'set_microphone_muted') {
+      if (action.kind === 'show_message') {
+        if (!aiModeRef.current || typeof action.payload.chatId !== 'string' || typeof action.payload.messageId !== 'string') throw new CancelledError();
+        const operation = referenceEpoch.current;
+        const chatId = action.payload.chatId, messageId = action.payload.messageId;
+        const [chat, source] = await Promise.all([
+          api.request<Chat>(`/v1/chats/${chatId}`),
+          api.request<Message>(`/v1/chats/${chatId}/messages/${messageId}`),
+        ]);
+        if (!valid() || operation !== referenceEpoch.current || !chat || source.id !== messageId || source.chatId !== chatId) throw new CancelledError();
+        // Keep the source out of the paginated recent timeline. Open real chat first.
+        setChats(previous => [...previous.filter(item => item.id !== chat.id), chat]);
+        setView('chats', chat.id);
+        await loadMessages(chat.id);
+        if (!valid() || !aiModeRef.current || state.current.activeChatId !== chatId) throw new CancelledError();
+        const focus = action.payload.focus as { start: number; end: number } | undefined;
+        if (focus && (!Number.isInteger(focus.start) || !Number.isInteger(focus.end) || focus.start < 0 || focus.end <= focus.start || focus.end > (source.text?.length ?? 0))) throw new Error('Invalid source excerpt.');
+        const revision = Number(action.sequence ?? Date.now());
+        const value: MessageReference = { chatId, messageId, revision, source, recipient: chat.recipient, ...(focus ? { focus } : {}) };
+        const presented = awaitReferencePresentation(revision);
+        reference.current = value; setMessageReference(value); publishVoiceState();
+        await presented;
+        if (!valid()) throw new CancelledError();
+        if (typeof action.payload.narration === 'string' && action.payload.narration) {
+          setVoicePhase('speaking'); await speak({ id: action.turnId, status: 'running' } as Turn, undefined, action.actionId);
+        }
+        if (!valid()) throw new CancelledError();
+        await acknowledge(action, true, { message: 'Exact source displayed; requested narration finished.', reference: referenceIdentity() });
+      } else if (action.kind === 'dismiss_message') {
+        const revision = Number(action.sequence ?? Date.now());
+        if (reference.current) {
+          const presented = awaitReferencePresentation(revision);
+          reference.current = null; setMessageReference(null); publishVoiceState();
+          await presented;
+        }
+        if (!valid()) throw new CancelledError();
+        await acknowledge(action, true, { message: 'Reference dismissed.', reference: null });
+      } else if (action.kind === 'set_voice_mode'  || action.kind === 'set_microphone_muted') {
         const ownPrevious = appliedVoiceControl.current?.turnId === action.turnId && appliedVoiceControl.current.revision === voiceControlRevision.current;
         if (!action.context?.voice || action.context.voice.revision !== voiceControlRevision.current && !ownPrevious) throw new Error('Voice controls changed after that request.');
         if (action.kind === 'set_voice_mode') {
@@ -290,7 +376,7 @@ export function useMia() {
           if (!enabled && respondingTurn.current === action.turnId) { finishingControl.current = action.turnId; setFinishingControlReply(true); }
           else { finishingControl.current = null; setFinishingControlReply(false); }
           microphoneEpoch.current++; voiceControlRevision.current++;
-          aiModeRef.current = enabled; setAiMode(enabled);
+          aiModeRef.current = enabled; setAiMode(enabled); if (!enabled) clearReference();
           if (!enabled && state.current.tab === 'assistant') setView('chats');
           microphoneIntent.current = false; setMicrophoneMuted(false);
           duplex.setInputMuted(!enabled); conversation.setInputMuted(!enabled);
@@ -330,16 +416,19 @@ export function useMia() {
         if (state.current.audioState === 'playing' || state.current.audioState === 'loading') await stopAudio();
         await acknowledge(action, true, { message: 'Audio stopped on this device.' });
       } else if (action.kind === 'play_audio' && typeof action.payload.mediaId === 'string') {
-        let acknowledged = false;
+        const mediaId = action.payload.mediaId;
+        const operationId = action.actionId;
         const captureActive = state.current.voicePhase === 'listening' || state.current.voicePhase === 'transcribing';
         if (captureActive) { setManualAudio(true); await conversation.stop(); }
-        try { await playMedia(action.payload.mediaId, () => {
-          if (valid()) {
-            acknowledged = true;
-            void acknowledge(action, true, { message: 'Playback started on this device.' }).catch(fail);
-          }
-        }, valid); } finally { if (captureActive) setManualAudio(false); }
-        if (!acknowledged) throw new Error('Playback did not start.');
+        try {
+          await playMedia(mediaId, () => { if (valid()) setOriginalPlayback({ mediaId, operationId, state: 'playing' }); }, valid, operationId);
+          if (!valid() || originalOperation.current !== operationId) throw new CancelledError();
+          originalOperation.current = null; setOriginalPlayback({ mediaId, operationId, state: 'finished' });
+          await acknowledge(action, true, { message: 'Original recording finished playing on this device.' });
+        } catch (reason) {
+          if (originalOperation.current === operationId) { originalOperation.current = null; setOriginalPlayback({ mediaId, operationId, state: reason instanceof CancelledError ? 'stopped' : 'failed' }); }
+          throw reason;
+        } finally { if (captureActive) setManualAudio(false); }
       } else if (action.kind === 'record_voice') {
         setDevicePrompt(action);
       } else throw new Error('This device action is not supported.');
@@ -366,7 +455,15 @@ export function useMia() {
     if (event.type === 'device.action_cancelled' && state.current.devicePrompt?.actionId === p.actionId) setDevicePrompt(null);
     if (event.type === 'device.action_requested' && isLiveAction(event, connectedAt) && foreground.current && lease.owns(p.turnId)) {
       const id = String(p.actionId);
-      const task = performAction({ ...p, createdAt: event.createdAt } as DeviceAction).finally(() => deviceTasks.delete(id));
+      if (seenActions.current.has(id)) return;
+      seenActions.current.add(id);
+      while (seenActions.current.size > 200) seenActions.current.delete(seenActions.current.values().next().value!);
+      const action = { ...p, createdAt: event.createdAt } as DeviceAction;
+      const epoch = lease.snapshot();
+      const immediate = ['stop_audio', 'set_microphone_muted', 'set_voice_mode'].includes(action.kind);
+      const work = immediate ? performAction(action, epoch) : presentationQueue.current.catch(() => {}).then(() => performAction(action, epoch));
+      if (!immediate) presentationQueue.current = work;
+      const task = work.finally(() => deviceTasks.delete(id));
       deviceTasks.set(id, task);
     }
   };
@@ -498,9 +595,10 @@ export function useMia() {
     voiceControlRevision.current++;
     microphoneIntent.current = false; setMicrophoneMuted(false);
     duplex.setInputMuted(!enabled); conversation.setInputMuted(!enabled);
-    aiModeRef.current = enabled; setAiMode(enabled); setVoiceFault(false); setVoiceRecoverable(false); setError('');
+    aiModeRef.current = enabled; setAiMode(enabled); if (!enabled) clearReference(); setVoiceFault(false); setVoiceRecoverable(false); setError('');
     if (enabled) {
-      lease.revoke(); requestContext.current = null; setDevicePrompt(null);
+      referencePresentation.current?.reject(new CancelledError()); referencePresentation.current = null;
+    lease.revoke(); requestContext.current = null; setDevicePrompt(null);
       setView('assistant');
     } else if (state.current.tab === 'assistant') setView('chats');
     if (!enabled) setVoicePhase('off');
@@ -543,7 +641,7 @@ export function useMia() {
         if (!aiModeRef.current || microphoneIntent.current || epoch !== microphoneEpoch.current) return;
         if (voiceFault) await resumeAssistant();
         if (!aiModeRef.current || microphoneIntent.current || epoch !== microphoneEpoch.current) return;
-        if (duplex.available && realtimeReady && foreground.current && !nativeStream.current) {
+        if (duplex.available && realtimeReady && foreground.current && !nativeStream.current && !originalMediaActive.current) {
           if (!['thinking', 'speaking'].includes(state.current.voicePhase)) setVoicePhase('waiting');
           startNativeRecognition(Crypto.randomUUID());
         }
@@ -556,6 +654,7 @@ export function useMia() {
     const epoch = microphoneEpoch.current;
     nativeResponse.current?.abort(); nativeResponse.current = null;
     nativeCandidate.current = null; cancelNativeRecognition();
+    referencePresentation.current?.reject(new CancelledError()); referencePresentation.current = null;
     lease.revoke(); requestContext.current = null; setDevicePrompt(null);
     const current = state.current.assistantSession;
     await Promise.all([stopAudio(), conversation.stop(), current ? assistantControl.stop(api, current.id) : Promise.resolve()]);
@@ -609,11 +708,11 @@ export function useMia() {
     await syncAssistant(signal);
     return response.turn;
   }
-  async function speak(turn: Turn, signal?: AbortSignal) {
+  async function speak(turn: Turn, signal?: AbortSignal, actionId?: string) {
     const epoch = lease.snapshot();
     await stopAudio();
     if (signal) checkVoice(signal);
-    if (!lease.current(epoch) || !foreground.current || turn.status !== 'completed') return;
+    if (!lease.current(epoch) || !foreground.current || (!actionId && turn.status !== 'completed')) return;
     const requestId = Crypto.randomUUID();
     await new Promise<void>((resolve, reject) => {
       const cancel = () => { void stopAudio(); };
@@ -630,18 +729,27 @@ export function useMia() {
       };
       speech.current = current;
       signal?.addEventListener('abort', cancel, { once: true });
-      if (!socket.current?.send({ type: 'speech.request', requestId, turnId: turn.id })) current.settle(new ApiError(0, 'OFFLINE', ''));
+      if (!socket.current?.send({ type: 'speech.request', requestId, turnId: turn.id, ...(actionId ? { actionId } : {}) })) current.settle(new ApiError(0, 'OFFLINE', ''));
       else setAudioState('loading');
     });
   }
-  async function playMedia(mediaId: string, onStarted?: () => void, allowed = () => true) {
+  async function playMedia(mediaId: string, onStarted?: () => void, allowed = () => true, operationId?: string) {
     const pauseNative = duplex.ownsSession;
-    if (!onStarted || pauseNative) { setManualAudio(true); await Promise.all([conversation.stop(), stopNativeVoice()]); }
+    if (operationId) originalMediaActive.current = true;
     try {
-      await stopAudio(); if (!allowed() || !foreground.current) throw new CancelledError(); setAudioState('playing');
+      if (!onStarted) { setManualAudio(true); await Promise.all([conversation.stop(), stopNativeVoice()]); }
+      else if (pauseNative) { cancelNativeRecognition(); await duplex.stop(); }
+      await stopAudio(); if (!allowed() || !foreground.current) throw new CancelledError();
+      if (operationId) { originalOperation.current = operationId; setOriginalPlayback({ mediaId, operationId, state: 'preparing' }); }
+      setAudioState('playing');
       await audio.current!.play(`${address}/v1/media/${mediaId}`, { Authorization: `Bearer ${session!.token}` }, onStarted);
     }
-    finally { setAudioState('idle'); if (!onStarted || pauseNative) setManualAudio(false); }
+    finally {
+      if (operationId) originalMediaActive.current = false;
+      setAudioState('idle');
+      if (!onStarted) setManualAudio(false);
+      else if (pauseNative && allowed() && foreground.current && aiModeRef.current && !microphoneIntent.current && !nativeStream.current) startNativeRecognition(Crypto.randomUUID());
+    }
   }
   async function startRecording() {
     setManualAudio(true); await Promise.all([conversation.stop(), stopNativeVoice()]);
@@ -703,7 +811,7 @@ export function useMia() {
     return () => clearTimeout(timer);
   }, [devicePrompt]);
   async function respondToTurn(accepted: Turn, signal: AbortSignal) {
-    const deadline = Date.now() + 90000;
+    const deadline = Date.now() + 660000;
     let turn = accepted;
     while (turn.status === 'queued' || turn.status === 'running') {
       await voiceDelay(1000, signal);
@@ -796,6 +904,7 @@ export function useMia() {
     }
     let cancelled = false;
     if (duplex.available) {
+      if (originalMediaActive.current) return;
       if (!aiModeRef.current) return () => { void stopNativeVoice(); };
       const id = Crypto.randomUUID(); nativeStream.current = id; nativeCandidate.current = null;
       setVoicePhase('waiting');
@@ -819,7 +928,7 @@ export function useMia() {
     });
     return () => { cancelled = true; void conversation.stop(); };
   }, [voiceSessionEnabled, session?.token, session?.user.profileComplete, assistantSession?.id, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, inForeground, manualAudio, voiceRevision, voiceFault, voiceRecoverable, realtimeReady]);
-  return { booting, session, aiMode, microphoneMuted, toggleMicrophone, stopAssistantReply, voiceLevel, voicePhase, voiceFault, error, setError, busy, tab, capabilities, chats, contacts, drafts, messages, chatScrollPositions, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, devicePrompt, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, navigateBack, startChat, sendText, sendPending, draftAction, interrupt, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice, acceptDeviceRecording,
+  return { messageReference, originalPlayback, referencePresented, referenceDismissalRevision: referencePresentation.current?.revision, booting, session, aiMode, microphoneMuted, toggleMicrophone, stopAssistantReply, voiceLevel, voicePhase, voiceFault, error, setError, busy, tab, capabilities, chats, contacts, drafts, messages, chatScrollPositions, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, devicePrompt, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, navigateBack, startChat, sendText, sendPending, draftAction, interrupt, playMedia, startRecording, finishRecording, useRecording, discardRecording, preview, stopAudio, declineDevice, acceptDeviceRecording,
     setComposer: (text: string) => { if (activeChatId) setComposers(previous => ({ ...previous, [activeChatId]: text })); },
   };
 }

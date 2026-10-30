@@ -1,6 +1,9 @@
 export type Profile = { id: string; username: string; displayName: string };
 export type VoiceState = { enabled: boolean; microphoneMuted: boolean; revision: number };
-export type ClientContext = { route: string; revision: number; previousRoute?: string; voice?: VoiceState };
+export type MessageReferenceIdentity = { chatId: string; messageId: string; revision: number; focus?: { start: number; end: number } };
+export type MessageReference = MessageReferenceIdentity & { source: Message; recipient: Profile; displayFocus?: { start: number; end: number } };
+export type OriginalPlayback = { mediaId: string; operationId: string; state: 'preparing' | 'playing' | 'finished' | 'stopped' | 'failed' };
+export type ClientContext = { route: string; revision: number; previousRoute?: string; reference?: MessageReferenceIdentity; voice?: VoiceState };
 export type AssistantRequest = { clientTurnId: string; text: string; context: ClientContext };
 export type User = Profile & { phoneNumber: string; profileComplete: boolean };
 export type Session = { user: User; token: string; expiresAt: string };
@@ -14,5 +17,5 @@ export type Turn = { id: string; sessionId: string; userId: string; generation: 
 export type AssistantSession = { id: string; generation: number; activeChatId: string | null };
 export type ServerEvent = { id: string; type: string; payload: Record<string, unknown>; createdAt: string };
 export type Capabilities = { agent: boolean; speechRecognition: boolean; speechSynthesis: boolean };
-export type DeviceAction = { sessionId: string; turnId: string; actionId: string; kind: string; payload: Record<string, unknown>; createdAt: string; context?: ClientContext | null };
+export type DeviceAction = { sessionId: string; turnId: string; actionId: string; kind: string; payload: Record<string, unknown>; createdAt: string; sequence?: string; expiresIn?: number; context?: ClientContext | null };
 export type PendingMessage = { clientMessageId: string; chatId: string; content: Content; status: 'sending' | 'failed' };

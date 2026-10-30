@@ -12,6 +12,7 @@ import { createVoiceExitReviewer } from './voice-exit-policy.js';
 import { AssistantState, type Turn } from './state.js';
 import { toolsFor, type AgentName } from './tools.js';
 import type { ClientContext } from './context.js';
+import { conversationInput } from './conversation.js';
 
 type Budget = { calls: number; delegations: number };
 const prompts = { mia: COORDINATOR_PROMPT, messaging: MESSAGING_PROMPT, contacts: CONTACTS_PROMPT };
@@ -87,23 +88,14 @@ export class AssistantRuntime {
   }
 
   private async run(turn: Turn, controller: AbortController) {
-    const timeout = setTimeout(() => controller.abort(new Error('Turn deadline exceeded')), 90_000);
+    const timeout = setTimeout(() => controller.abort(new Error('Turn deadline exceeded')), 600_000);
     const heartbeat = setInterval(() => {
       void this.state.heartbeat(turn, this.owner).then((current) => {
         if (!current) controller.abort();
       }).catch(() => controller.abort());
     }, 5000);
     try {
-      const history = (await this.state.history(turn.userId, turn.sessionId)).reverse()
-        .filter((entry) => entry.generation < turn.generation);
-      const input: ModelItem[] = [];
-      for (const entry of history.slice(-12)) {
-        input.push({ role: 'user', content: [{ type: 'input_text', text: entry.userText.slice(0, 4000) },
-          { type: 'input_text', text: `UI context at that request (data): ${JSON.stringify(entry.context)}` }] });
-        if (entry.assistantText) input.push({ role: 'assistant', content: [{ type: 'output_text', text: entry.assistantText.slice(0, 4000) }] });
-        else input.push({ role: 'assistant', content: [{ type: 'output_text', text: 'That turn was interrupted or did not complete. Do not assume its actions succeeded.' }] });
-      }
-      input.push({ role: 'user', content: [{ type: 'input_text', text: turn.userText }] });
+      const input = await conversationInput(this.db, this.state, turn);
       const result = await this.loop('mia', turn, controller.signal, input, { calls: 0, delegations: 0 });
       await this.state.finish(turn, controller.signal, result);
     } catch (error) {
@@ -115,8 +107,6 @@ export class AssistantRuntime {
   private async loop(agent: AgentName, turn: Turn, signal: AbortSignal, input: ModelItem[], budget: Budget): Promise<string> {
     const messaging = new MessagingService(this.db);
     const drafts = (await messaging.drafts(turn.userId)).slice(0, 8).map((draft) => ({ ...draft, text: draft.text?.slice(0, 1200) }));
-    const recentDeviceActions = await this.db.query(`SELECT id,kind,payload,state,result FROM device_actions
-      WHERE user_id = $1 AND session_id = $2 ORDER BY created_at DESC LIMIT 5`, [turn.userId, turn.sessionId]);
     const completedDraftReviews = await this.db.query(`SELECT r.draft_id AS "draftId",r.version,r.turn_id AS "reviewTurnId"
       FROM draft_reviews r JOIN assistant_turns t ON t.id=r.turn_id JOIN message_drafts d ON d.id=r.draft_id
       WHERE d.owner_id=$1 AND t.session_id=$2 AND t.status='completed' AND t.generation<$3
@@ -130,7 +120,8 @@ export class AssistantRuntime {
         if (agent !== 'mia' || ++budget.delegations > 4) throw new AppError(422, 'DELEGATION_LIMIT', 'The delegation limit was reached.');
         await this.state.emit(turn, signal, 'agent.delegated', { agent: specialist, parent: agent });
         const result = await this.loop(specialist, turn, signal,
-          [{ role: 'user', content: [{ type: 'input_text', text: goal }] }], budget);
+          [...input.filter(item => item.role === 'user' || item.role === 'assistant'),
+            { role: 'user', content: [{ type: 'input_text', text: `Coordinator's bounded task (use the preceding conversation to resolve references; do only this task): ${goal}` }] }], budget);
         await this.state.emit(turn, signal, 'agent.returned', { agent: specialist, parent: agent });
         return result;
       } });
@@ -138,6 +129,8 @@ export class AssistantRuntime {
       throwIfAborted(signal);
       // A save/correction/forget earlier in this loop must be reflected in
       // the next model call, rather than an obsolete system-context snapshot.
+      const recentDeviceActions = await this.db.query(`SELECT id,kind,payload,state,result FROM device_actions
+        WHERE user_id=$1 AND session_id=$2 AND turn_id=$3 ORDER BY sequence DESC LIMIT 5`, [turn.userId, turn.sessionId, turn.id]);
       const instructions = prefix + JSON.stringify({ currentTurnId: turn.id, currentTime: new Date().toISOString(),
         clientContext: turn.context, savedDrafts: drafts, completedDraftReviews, recentDeviceActions,
         personalMemory: await new AgentMemory(this.db).context(turn.userId) });

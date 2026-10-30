@@ -138,6 +138,25 @@ export class MessagingService {
     return message;
   }
 
+  async source(ownerId: string, chatId: string, messageId: string) {
+    const message = await this.message(ownerId, messageId);
+    if (message.chatId !== chatId) throw notFound();
+    return message;
+  }
+
+  async searchMessages(ownerId: string, chatId: string, options: { query?: string; afterDate?: string; beforeDate?: string; before?: string; limit?: number }) {
+    await this.assertMember(ownerId, chatId);
+    if (options.before) await this.source(ownerId, chatId, options.before);
+    const limit = Math.min(20, Math.max(1, options.limit ?? 10));
+    const items = await this.db.query<Message>(`SELECT ${messageColumns} FROM messages WHERE chat_id=$1
+      AND ($2::text IS NULL OR text ILIKE $2 ESCAPE '\\')
+      AND ($3::timestamptz IS NULL OR created_at >= $3) AND ($4::timestamptz IS NULL OR created_at < $4)
+      AND ($5::uuid IS NULL OR (created_at,id) < (SELECT created_at,id FROM messages WHERE id=$5))
+      ORDER BY created_at DESC,id DESC LIMIT $6`, [chatId, options.query ? `%${escapeLike(options.query)}%` : null,
+      options.afterDate ?? null, options.beforeDate ?? null, options.before ?? null, limit + 1]);
+    return { messages: items.slice(0, limit), next: items.length > limit ? items[limit - 1]!.id : null };
+  }
+
   async markRead(ownerId: string, chatId: string, messageId: string) {
     return this.db.transaction(async (sql) => {
       await this.assertMember(ownerId, chatId, sql);

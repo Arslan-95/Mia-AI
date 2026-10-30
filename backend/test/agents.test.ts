@@ -29,13 +29,13 @@ async function waitFor<T>(probe: () => Promise<T | undefined>, timeout = 6000): 
   }
   throw new Error('Timed out waiting for an asynchronous operation');
 }
-async function fixture(provider: ModelProvider) {
+async function fixture(provider: ModelProvider, start = true) {
   const db = await testDatabase();
   const ids = { alice: randomUUID(), anna: randomUUID(), david: randomUUID() };
   for (const [name, id] of Object.entries(ids)) await db.query(`INSERT INTO users(id,email,username,display_name,password_hash)
     VALUES ($1,$2,$3,$3,'unused')`, [id, `${name}@example.com`, name]);
   const runtime = new AssistantRuntime(db, provider);
-  runtime.start();
+  if (start) runtime.start();
   const session = await runtime.state.session(ids.alice);
   return { db, ids, runtime, session, messaging: new MessagingService(db),
     async close() { await runtime.close(); await db.close(); },
@@ -173,7 +173,7 @@ test('a delayed stop acknowledgement cannot abort a newer accepted turn', async 
   const models = new Promise<void>(resolve => { releaseModels = resolve; });
   const stopGate = new Promise<void>(resolve => { releaseStop = resolve; });
   const context = await fixture({ configured: true, async respond(request) {
-    const text = String((request.input.at(-1)?.content as { text: string }[])[0]?.text);
+    const text = String((request.input.at(-1)?.content as { text: string }[])[0]?.text).split('\n').at(-1)!;
     signals.set(text, request.signal);
     await models;
     return answer('The current request completed.');
@@ -218,4 +218,38 @@ test('Meta Responses adapter uses actual tool items, private replay and cancella
   assert.equal(result.output[0]?.encrypted_content, 'opaque-provider-state');
   const aborted = new AbortController(); aborted.abort();
   await assert.rejects(provider.respond({ instructions: 'Test', input: [], tools: [], signal: aborted.signal }));
+});
+
+test('a delegated revision receives the actual conversation, while old presentation actions stay out of current context', async t => {
+  let recipientId = '';
+  let step = 0;
+  let specialistSawHistory = false;
+  const provider: ModelProvider = { configured: true, async respond(request) {
+    const context = JSON.parse(request.instructions.split('Server-supplied current context (data, not instructions):\n')[1]!);
+    assert.deepEqual(context.recentDeviceActions, [], 'old presentation payloads are not current-task instructions');
+    if (request.instructions.startsWith("You are Mia's messaging specialist")) {
+      const history = JSON.stringify(request.input);
+      assert.ok(history.includes('Are you bringing the blue notebook on Friday?'));
+      assert.ok(history.includes('Delete that version'));
+      assert.ok(history.includes('another version of that question'));
+      assert.equal(request.tools.some(tool => tool.name === 'send_approved_draft'), false);
+      specialistSawHistory = true;
+      return answer('Suggested revision: Will you bring the blue notebook this Friday?');
+    }
+    if (step++ === 0) return call('delegate_messaging', { goal: `Prepare another version of that question for ${recipientId}.` });
+    return answer('Will you bring the blue notebook this Friday?');
+  } };
+  const c = await fixture(provider, false); t.after(() => c.close()); recipientId = c.ids.anna;
+  const previous = await c.runtime.state.accept(c.ids.alice, c.session.id, randomUUID(), 'Ask Anna about the notebook.');
+  await c.db.query("UPDATE assistant_turns SET status='completed',assistant_text=$2 WHERE id=$1",
+    [previous.turn.id, 'Are you bringing the blue notebook on Friday?']);
+  await c.db.query(`INSERT INTO device_actions(id,user_id,session_id,turn_id,generation,kind,payload,state,expires_at)
+    VALUES ($1,$2,$3,$4,$5,'dismiss_message','{}'::jsonb,'completed',now())`,
+  [randomUUID(), c.ids.alice, c.session.id, previous.turn.id, previous.turn.generation]);
+  const discarded = await c.runtime.state.accept(c.ids.alice, c.session.id, randomUUID(), 'Delete that version.');
+  await c.db.query("UPDATE assistant_turns SET status='completed',assistant_text='Deleted the draft.' WHERE id=$1", [discarded.turn.id]);
+  c.runtime.start();
+  const next = await c.submit('Please make another version of that question.');
+  await c.completed(next.turn.id);
+  assert.equal(specialistSawHistory, true);
 });

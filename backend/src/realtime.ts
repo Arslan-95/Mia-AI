@@ -25,7 +25,7 @@ const frameSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('voice.mute'), requestId: z.uuid(), muted: z.boolean(), revision: z.int().nonnegative() }).strict(),
   z.object({ type: z.literal('voice.context'), context: clientContextSchema }).strict(),
   z.object({ type: z.literal('speech.playback'), turnId: z.uuid(), playing: z.boolean() }).strict(),
-  z.object({ type: z.literal('speech.request'), requestId: z.uuid(), turnId: z.uuid() }).strict(),
+  z.object({ type: z.literal('speech.request'), requestId: z.uuid(), turnId: z.uuid(), actionId: z.uuid().optional() }).strict(),
   z.object({ type: z.literal('speech.cancel') }).strict(),
   z.object({ type: z.literal('device.result'), actionId: z.uuid(), success: z.boolean(),
     result: deviceResultSchema.default({}) }).strict(),
@@ -290,24 +290,26 @@ export function registerRealtime(app: FastifyInstance, deps: {
       }).catch((error: unknown) => { if (!signal.aborted) { failure(error); cancelVoice(); } });
     }
 
-    async function synthesize(turnId: string, requestId: string) {
+    async function synthesize(turnId: string, requestId: string, actionId?: string) {
       cancelSpeech();
       const controller = new AbortController();
       synthesis = controller;
       const signal = AbortSignal.any([controller.signal, lifetime.signal]);
       try {
-        const turn = await assistant.state.turn(user!.id, sessionId, turnId);
+        const segment = actionId ? await assistant.state.actionSpeech(user!.id, sessionId, turnId, actionId) : null;
+        const turn = segment?.turn ?? await assistant.state.turn(user!.id, sessionId, turnId);
+        const text = segment?.text ?? turn.assistantText;
         const session = await assistant.state.requireSession(user!.id, sessionId);
         throwIfAborted(signal);
-        if (turn.status !== 'completed' || !turn.assistantText || turn.generation !== session.generation) {
+        if ((!segment && turn.status !== 'completed') || !text || turn.generation !== session.generation) {
           throw new AppError(409, 'STALE_SPEECH', 'This response is not current.');
         }
         synthesisGeneration = turn.generation;
-        playback.remember(turnId, turn.assistantText);
+        playback.remember(turnId, text);
         send({ type: 'speech.started', requestId, turnId, format: 'pcm_s16le', sampleRate: 24000, channels: 1 });
         let sequence = 0;
         let totalBytes = 0;
-        for await (const bytes of speech.synthesize(turn.assistantText, signal)) {
+        for await (const bytes of speech.synthesize(text, signal)) {
           throwIfAborted(signal);
           const current = await assistant.state.requireSession(user!.id, sessionId);
           throwIfAborted(signal);
@@ -421,7 +423,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
         if (requestedSpeech.has(frame.requestId)) throw new AppError(409, 'DUPLICATE_SPEECH', 'That speech request was already handled.');
         requestedSpeech.add(frame.requestId);
         if (requestedSpeech.size > 64) requestedSpeech.delete(requestedSpeech.values().next().value!);
-        void synthesize(frame.turnId, frame.requestId);
+        void synthesize(frame.turnId, frame.requestId, frame.actionId);
       } else if (frame.type === 'device.result') {
         send({ type: 'device.result_accepted', action: await assistant.state.acknowledgeAction(user.id, frame.actionId, frame.success, frame.result) });
       }

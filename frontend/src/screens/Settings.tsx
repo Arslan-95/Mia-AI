@@ -1,11 +1,13 @@
 import React, { useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import type { Mia } from '../useMia';
-import { Avatar, HeaderAction, Icon, ScreenAtmosphere, ScreenHeader, SectionCaption, s, colors } from '../ui';
+import { Avatar, HeaderAction, Icon, ScreenAtmosphere, ScreenHeader, SectionCaption, agentColors, classicColors, useUi } from '../ui';
 import { Reveal } from '../motion';
 import { ConfirmationDialog } from './ConfirmationDialog';
 
 export function Settings({ mia }: { mia: Mia }) {
+  const { agent, colors, s } = useUi();
+  const p = agent ? agentStyles : classicStyles;
   const { width, fontScale } = useWindowDimensions();
   const stacked = fontScale >= 1.6;
   const [confirmation, setConfirmation] = useState<'voice' | 'logout' | null>(null);
@@ -28,19 +30,19 @@ export function Settings({ mia }: { mia: Mia }) {
     finally { pending.current = false; setBusy(false); }
   }
   return <>
-    <View style={{ flex: 1 }}><ScreenAtmosphere /><Reveal style={{ flex: 1 }}><ScrollView contentContainerStyle={[s.content, { paddingHorizontal: width < 375 ? 16 : 20 }]}>
+    <View style={{ flex: 1 }}>{agent && <ScreenAtmosphere />}<Reveal style={{ flex: 1 }}><ScrollView contentContainerStyle={[s.content, { paddingHorizontal: width < 375 ? 16 : 20 }]}>
       <ScreenHeader title="Settings" action={<HeaderAction label="Sign out" icon="log-out-outline" onPress={() => setConfirmation('logout')} />} />
-      <View style={[s.card, p.profile, stacked && p.stacked]}><Avatar name={mia.session!.user.displayName} size={60} /><View style={[p.identity, stacked && p.stackedText]}><Text style={s.sectionTitle}>{mia.session!.user.displayName}</Text><Text style={s.body}>@{mia.session!.user.username}</Text><Text style={[s.body, { marginTop: 3 }]}>{mia.session!.user.phoneNumber}</Text></View></View>
-      <View style={p.assistantSection}><SectionCaption>Your assistant</SectionCaption>
+      <View style={[s.card, p.profile, stacked && p.stacked]}><Avatar name={mia.session!.user.displayName} size={agent ? 60 : 48} /><View style={[p.identity, stacked && p.stackedText]}><Text style={s.sectionTitle}>{mia.session!.user.displayName}</Text><Text style={agent ? s.body : s.small}>@{mia.session!.user.username}</Text><Text style={[agent ? s.body : s.small, agent && { marginTop: 3 }]}>{mia.session!.user.phoneNumber}</Text></View></View>
+      <View style={p.assistantSection}>{agent ? <SectionCaption>Your assistant</SectionCaption> : <Text style={p.groupTitle}>YOUR ASSISTANT</Text>}
       <Pressable accessibilityRole="button" accessibilityLabel="Mia voice mode" accessibilityHint={mia.aiMode ? 'Hands-free assistance is on. Opens Mia home.' : 'Opens a confirmation before enabling hands-free assistance.'}
         onPress={() => { if (mia.aiMode) void mia.navigate('assistant'); else setConfirmation('voice'); }} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
         style={({ pressed }) => [s.card, p.assistantCard, pressed && { backgroundColor: colors.surfacePressed }, focused && s.focus]}>
-        <View style={[p.assistantTop, stacked && p.stacked]}><View accessible={false} accessibilityElementsHidden style={p.symbol}><View style={p.reflection} /><View style={p.icon}><Icon name="sparkles-outline" color={colors.accentLight} size={25} /></View></View>
-          <View style={[p.description, stacked && p.stackedText]}><Text style={p.assistantTitle}>Mia voice mode</Text><View style={p.stateBadge}><Text style={p.stateText}>{mia.aiMode ? 'On' : 'Off'}</Text></View></View>
-          {!stacked && <Icon name="chevron-forward" size={18} color={colors.accentLight} />}</View>
-        <Text style={s.body}>{mia.aiMode ? 'Mia is with you. Return to your assistant.' : 'Open chats, hear messages and reply hands-free.'}</Text>
+        <View style={[p.assistantTop, stacked && p.stacked]}><View accessible={false} accessibilityElementsHidden style={p.symbol}>{agent && <View style={p.reflection} />}<View style={p.icon}><Icon name="sparkles-outline" color={colors.accentLight} size={agent ? 25 : 22} /></View></View>
+          <View style={[p.description, stacked && p.stackedText]}><Text style={agent ? p.assistantTitle : s.label}>Mia voice mode{!agent && mia.aiMode ? ' \u00b7 On' : ''}</Text>{agent ? <View style={p.stateBadge}><Text style={p.stateText}>{mia.aiMode ? 'On' : 'Off'}</Text></View> : <Text style={s.small}>{mia.aiMode ? 'Mia is with you. Return to your assistant.' : 'Open chats, hear messages and reply hands-free.'}</Text>}</View>
+          {!stacked && <Icon name="chevron-forward" size={18} color={agent ? colors.accentLight : colors.muted} />}</View>
+        {agent && <Text style={s.body}>{mia.aiMode ? 'Mia is with you. Return to your assistant.' : 'Open chats, hear messages and reply hands-free.'}</Text>}
       </Pressable>
-      <Text style={p.helper}>Tap anywhere to mute. Hold anywhere for 5 seconds to exit.</Text></View>
+      {agent && <Text style={p.helper}>Tap anywhere to mute. Hold anywhere for 5 seconds to exit.</Text>}</View>
     </ScrollView></Reveal></View>
     <ConfirmationDialog visible={confirmation !== null} busy={busy} onCancel={cancel} onConfirm={() => void confirm()}
       title={confirmation === 'voice' ? 'Enable hands-free voice mode?' : 'Sign out?'}
@@ -52,12 +54,15 @@ export function Settings({ mia }: { mia: Mia }) {
       cancelLabel={confirmation === 'voice' ? 'Keep voice mode off' : 'Keep me signed in'} />
   </>;
 }
-const p = StyleSheet.create({
-  profile: { flexDirection: 'row', alignItems: 'center', borderTopColor: '#4D3B63' }, identity: { flex: 1, minWidth: 0, gap: 3 },
+function createStyles(colors: typeof agentColors, agent: boolean) { return StyleSheet.create({
+  groupTitle: { color: colors.muted, fontSize: 10, lineHeight: 16, letterSpacing: 2, fontWeight: '600', marginTop: 6 },
+  profile: { flexDirection: 'row', alignItems: 'center', borderTopColor: agent ? '#4D3B63' : colors.line }, identity: { flex: 1, minWidth: 0, gap: 3 },
   stacked: { flexDirection: 'column', alignItems: 'flex-start' }, stackedText: { flex: 0, width: '100%' },
-  assistantSection: { gap: 12, marginTop: 4 }, assistantCard: { backgroundColor: colors.elevated, borderColor: colors.borderAccent, gap: 12 },
+  assistantSection: { gap: agent ? 12 : 18, marginTop: agent ? 4 : 0 }, assistantCard: { backgroundColor: agent ? colors.elevated : colors.paper, borderColor: agent ? colors.borderAccent : colors.line, gap: agent ? 12 : 14 },
   assistantTop: { flexDirection: 'row', alignItems: 'center', gap: 14 }, assistantTitle: { fontSize: 19, lineHeight: 25, color: colors.ink, fontWeight: '600', letterSpacing: -.3 },
-  symbol: { width: 48, height: 48 }, reflection: { position: 'absolute', width: 52, height: 38, borderRadius: 20, left: -3, bottom: -4, backgroundColor: '#8C94E8', opacity: .18, transform: [{ rotate: '-18deg' }] },
-  icon: { width: 48, height: 48, borderRadius: 16, borderWidth: 1, borderColor: '#775C99', backgroundColor: colors.soft, alignItems: 'center', justifyContent: 'center' },
-  description: { flex: 1, minWidth: 0, gap: 6 }, stateBadge: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, backgroundColor: colors.soft, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.borderAccent }, stateText: { color: colors.accentLight, fontSize: 12, lineHeight: 17, fontWeight: '500' }, helper: { color: colors.muted, fontSize: 13, lineHeight: 19, paddingHorizontal: 4 },
-});
+  symbol: { width: agent ? 48 : 42, height: agent ? 48 : 42 }, reflection: { position: 'absolute', width: 52, height: 38, borderRadius: 20, left: -3, bottom: -4, backgroundColor: '#8C94E8', opacity: .18, transform: [{ rotate: '-18deg' }] },
+  icon: { width: agent ? 48 : 42, height: agent ? 48 : 42, borderRadius: agent ? 16 : 15, borderWidth: agent ? 1 : 0, borderColor: '#775C99', backgroundColor: colors.soft, alignItems: 'center', justifyContent: 'center' },
+  description: { flex: 1, minWidth: 0, gap: agent ? 6 : 4 }, stateBadge: { alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8, backgroundColor: colors.soft, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.borderAccent }, stateText: { color: colors.accentLight, fontSize: 12, lineHeight: 17, fontWeight: '500' }, helper: { color: colors.muted, fontSize: 13, lineHeight: 19, paddingHorizontal: 4 },
+}); }
+const classicStyles = createStyles(classicColors, false);
+const agentStyles = createStyles(agentColors, true);

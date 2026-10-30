@@ -2,8 +2,9 @@ import React, { useState } from 'react';
 import { Text, View } from 'react-native';
 import type { Mia } from '../useMia';
 import type { Draft } from '../types';
-import { Button, Field, Notice, s } from '../ui';
+import { Button, Field, Notice, useUi } from '../ui';
 export function DraftCard({ draft, mia }: { draft: Draft; mia: Mia }) {
+  const { s } = useUi();
   const [editing, setEditing] = useState(false); const [text, setText] = useState(draft.text ?? ''); const [busy, setBusy] = useState(false);
   const recipient = draft.recipient?.displayName ?? mia.contacts.find(contact => contact.id === draft.recipientId)?.name ?? mia.chats.find(chat => chat.recipient.id === draft.recipientId)?.recipient.displayName;
   async function action(kind: 'review' | 'confirm' | 'discard' | 'edit') { setBusy(true); try { await mia.draftAction(draft, kind, text); setEditing(false); } catch (reason) { mia.fail(reason); await mia.refresh().catch(mia.fail); } finally { setBusy(false); } }

@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import { FlatList, StyleSheet, Text, View, type FlatListProps } from 'react-native';
 import type { ChatScrollPositions } from '../chatScrollPositions';
 import type { Message } from '../types';
-import { colors } from '../ui';
+import { agentColors, classicColors, useUi } from '../ui';
 
 type Props = Omit<FlatListProps<Message>, 'data' | 'inverted' | 'contentOffset' | 'onScroll' | 'maintainVisibleContentPosition'> & {
   userId: string; chatId: string; positions: ChatScrollPositions; data: readonly Message[];
@@ -11,6 +11,8 @@ type Props = Omit<FlatListProps<Message>, 'data' | 'inverted' | 'contentOffset' 
 // Keyed by account/chat at the call site: this is a native initial offset,
 // not a scrollToEnd after the history has appeared on screen.
 export function MessageList({ userId, chatId, positions, data, ...props }: Props) {
+  const { agent } = useUi();
+  const p = agent ? agentStyles : classicStyles;
   const [initial] = useState(() => positions.read(userId, chatId));
   const [initialData, setInitialData] = useState(() => initial.offset ? initial.messages : undefined);
   const offset = useRef({ x: 0, y: initial.offset ?? 0 }).current;
@@ -41,4 +43,6 @@ export function MessageList({ userId, chatId, positions, data, ...props }: Props
       props.onContentSizeChange?.(width, height);
     }} />;
 }
-const p = StyleSheet.create({ day: { alignItems: 'center', marginVertical: 20 }, dayLabel: { color: colors.muted, fontSize: 12, lineHeight: 17, textAlign: 'center', paddingVertical: 6, paddingHorizontal: 10, backgroundColor: colors.surfaceInset, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.line, borderRadius: 12 } });
+function createStyles(colors: typeof agentColors, agent: boolean) { return StyleSheet.create({ day: { alignItems: 'center', marginTop: agent ? 20 : 4, marginBottom: agent ? 20 : 18 }, dayLabel: { color: colors.muted, fontSize: agent ? 12 : 11, lineHeight: 17, textAlign: 'center', paddingVertical: agent ? 6 : 0, paddingHorizontal: agent ? 10 : 0, backgroundColor: agent ? colors.surfaceInset : 'transparent', borderWidth: agent ? StyleSheet.hairlineWidth : 0, borderColor: colors.line, borderRadius: agent ? 12 : 0 } }); }
+const classicStyles = createStyles(classicColors, false);
+const agentStyles = createStyles(agentColors, true);

@@ -1,7 +1,7 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import type { Mia } from '../useMia';
-import { Button, colors, s } from '../ui';
+import { Button, classicColors, agentColors, useUi } from '../ui';
 
 export function hasAudioControls(mia: Pick<Mia, 'devicePrompt' | 'audioState' | 'recording' | 'voicePhase'>) {
   return Boolean(mia.devicePrompt || mia.audioState === 'recording' || mia.recording
@@ -9,6 +9,8 @@ export function hasAudioControls(mia: Pick<Mia, 'devicePrompt' | 'audioState' | 
 }
 
 export function AudioControls({ mia, elapsed, bottomInset = 0 }: { mia: Mia; elapsed: number; bottomInset?: number }) {
+  const { agent, colors, s } = useUi();
+  const a = agent ? agentAudio : classicAudio;
   if (!hasAudioControls(mia)) return null;
   return (
     <View testID="audio-controls" style={{ paddingBottom: bottomInset, backgroundColor: mia.audioState === 'recording' || mia.recording ? colors.yellow : colors.soft }}>
@@ -49,11 +51,13 @@ export function AudioControls({ mia, elapsed, bottomInset = 0 }: { mia: Mia; ela
   );
 }
 
-const a = StyleSheet.create({
+function audioStyles(colors: typeof classicColors) { return StyleSheet.create({
   prompt: { margin: 15 },
   description: { flex: 1 },
   audio: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, alignItems: 'center', padding: 15, borderTopWidth: 1, borderTopColor: colors.line, backgroundColor: colors.soft },
   recordingBackground: { backgroundColor: colors.yellow },
   recording: { padding: 18, backgroundColor: colors.yellow, gap: 10 },
   actions: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 12 },
-});
+}); }
+const classicAudio = audioStyles(classicColors);
+const agentAudio = audioStyles(agentColors);

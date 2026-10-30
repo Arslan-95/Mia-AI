@@ -54,6 +54,7 @@ export function registerMessagingRoutes(app: FastifyInstance, deps: {
     return reply.code(201).send(await messaging.addContact(request.user.id, input.userId, input.name));
   });
   app.get('/v1/chats', async (request) => messaging.chats(request.user.id));
+  app.get('/v1/chats/:id', async request => messaging.chat(request.user.id, idParams.parse(request.params).id));
   app.post('/v1/chats', async (request, reply) => {
     const { recipientId } = z.object({ recipientId: id }).strict().parse(request.body);
     return reply.code(201).send(await messaging.createDirectChat(request.user.id, recipientId));
@@ -62,6 +63,10 @@ export function registerMessagingRoutes(app: FastifyInstance, deps: {
     const { id: chatId } = idParams.parse(request.params);
     const { limit, before } = z.object({ limit: z.coerce.number().int().min(1).max(100).default(30), before: id.optional() }).parse(request.query);
     return messaging.messages(request.user.id, chatId, limit, before);
+  });
+  app.get('/v1/chats/:id/messages/:messageId', async request => {
+    const { id: chatId, messageId } = idParams.extend({ messageId: id }).parse(request.params);
+    return messaging.source(request.user.id, chatId, messageId);
   });
   app.post('/v1/chats/:id/messages', async (request, reply) => {
     const { id: chatId } = idParams.parse(request.params);

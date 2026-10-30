@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AccessibilityInfo, Animated, Easing, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import type { Mia } from '../useMia';
 import type { VoicePhase } from '../voiceConversation';
-import { Icon, colors, s } from '../ui';
+import { Icon, agentColors as colors, agentStyles as s } from '../ui';
 
 const labels: Record<VoicePhase, string> = {
   off: 'Ready when you are', waiting: 'Connecting', listening: 'Listening to you',

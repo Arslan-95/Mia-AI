@@ -13,7 +13,7 @@ export function routeView(route: string): { view: View; chatId: string | null } 
   return { view: pageView(route) ?? 'chats', chatId: null };
 }
 export function sameContext(left: ClientContext | null, right: ClientContext | null) {
-  return left?.route === right?.route && left?.revision === right?.revision && left?.previousRoute === right?.previousRoute;
+  return left?.route === right?.route && left?.revision === right?.revision && left?.previousRoute === right?.previousRoute && JSON.stringify(left?.reference ?? null) === JSON.stringify(right?.reference ?? null);
 }
 export class NavigationContext {
   private current: ClientContext = { route: '/chats', revision: 0 };

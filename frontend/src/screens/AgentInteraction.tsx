@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { AccessibilityInfo, AppState, Pressable, StyleSheet, Vibration } from 'react-native';
 import type { Mia } from '../useMia';
+import { referenceDate, referenceDirection } from '../messageReference';
 
 const holdThreshold = 500;
 const exitDelay = 5000;
@@ -35,9 +36,11 @@ export function AgentInteraction({ mia, onHoldingChange }: { mia: Mia; onHolding
     return () => { held.current = false; clearTimeout(timer.current); subscription.remove(); };
   }, []);
   const explainExit = () => AccessibilityInfo.announceForAccessibility('Tap anywhere to mute or unmute. To leave voice mode, hold anywhere for five seconds until it vibrates, or ask Mia and confirm.');
+  const reference = mia.messageReference;
+  const referenceContext = reference ? ` Showing ${referenceDirection(reference, mia.session!.user.id)}, ${referenceDate(reference.source.createdAt)}${reference.source.kind === 'voice' ? ', voice message' : ''}${reference.displayFocus ? ', focused excerpt' : ''}.` : '';
   const status = { off: 'Ready', waiting: 'Connecting', listening: 'Listening', transcribing: 'Understanding', thinking: 'Thinking', speaking: 'Speaking', paused: 'On standby', error: 'Connection needs attention' }[mia.voicePhase];
   return <Pressable testID="agent-interaction-layer" style={styles.layer} accessible accessibilityViewIsModal
-    accessibilityRole="switch" accessibilityLabel={`Mia voice mode. ${status}. ${mia.microphoneMuted ? 'Microphone muted' : 'Microphone on'}. Tap anywhere to ${mia.microphoneMuted ? 'unmute' : 'mute'} microphone.`}
+    accessibilityRole="switch" accessibilityLabel={`Mia voice mode.${referenceContext} ${status}. ${mia.microphoneMuted ? 'Microphone muted' : 'Microphone on'}. Tap anywhere to ${mia.microphoneMuted ? 'unmute' : 'mute'} microphone.`}
     accessibilityHint={`${mia.voicePhase === 'error' ? 'Mute, then unmute to reconnect. ' : ''}Double tap anywhere to mute or unmute input. Mia can keep speaking. Double tap and hold for five seconds until it vibrates to exit. Pages are controlled by Mia.`}
     accessibilityState={{ checked: !mia.microphoneMuted }} onAccessibilityEscape={explainExit}
     onTouchStart={event => {

@@ -7,6 +7,7 @@ import WebSocket from 'ws';
 import type { SpeechProvider, RecognitionEvent } from '../src/speech/providers.js';
 import { phoneSignIn, testApp } from './helpers.js';
 import { MessagingService } from '../src/messaging.js';
+import { AssistantState } from '../src/agents/state.js';
 
 type Frame = Record<string, unknown> & { type: string };
 async function waitFor<T>(probe: () => T | undefined, timeout = 6000): Promise<T> {
@@ -26,6 +27,42 @@ async function connect(url: string, origin?: string) {
     next: (type: string, predicate: (frame: Frame) => boolean = () => true) => waitFor(() => frames.find((frame) => frame.type === type && predicate(frame))),
     async close() { if (socket.readyState === WebSocket.OPEN) { socket.close(); await once(socket, 'close'); } } };
 }
+
+test('running-turn narration synthesizes only the persisted owned action once and rejects superseded or caller-authored speech', async t => {
+  const spoken: string[] = [];
+  const speech: SpeechProvider = { recognitionConfigured: true, synthesisConfigured: true, transcribe: async () => '',
+    async *synthesize(text) { spoken.push(text); yield new Uint8Array([0, 0, 0, 0]); },
+    async recognize() { return { write() {}, end() {}, close() {} }; } };
+  const c = await testApp({ speech }); t.after(() => c.close());
+  const owner = await phoneSignIn(c.app, '+15551112201', 'narration_owner');
+  const friend = await phoneSignIn(c.app, '+15551112202', 'narration_friend');
+  const service = new MessagingService(c.db), state = new AssistantState(c.db);
+  const chat = await service.createDirectChat(owner.user.id, friend.user.id);
+  const source = await service.send(friend.user.id, chat.id, { kind: 'text', text: 'This exact source is never auto-read.' }, randomUUID());
+  const session = await state.session(owner.user.id);
+  await state.accept(owner.user.id, session.id, randomUUID(), 'Explain this message.');
+  const turn = await state.claim(randomUUID()); assert.ok(turn);
+  const action = await state.action(turn, new AbortController().signal, 'show_message', { chatId: chat.id, messageId: source.id, narration: 'Her question refers to your earlier plan.' });
+  const url = (await c.app.listen({ host: '127.0.0.1', port: 0 })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: owner.token, after: '0' }); await client.next('ready');
+  const foreign = await connect(url); t.after(() => foreign.close());
+  foreign.send({ type: 'auth', token: friend.token, after: '0' }); await foreign.next('ready');
+  const stolen = randomUUID(); foreign.send({ type: 'speech.request', requestId: stolen, turnId: turn.id, actionId: action.id });
+  assert.equal((await foreign.next('speech.failed', frame => frame.requestId === stolen)).code, 'NOT_FOUND');
+  const first = randomUUID(); client.send({ type: 'speech.request', requestId: first, turnId: turn.id, actionId: action.id });
+  await client.next('speech.completed', frame => frame.requestId === first);
+  assert.deepEqual(spoken, ['Her question refers to your earlier plan.']);
+  const repeat = randomUUID(); client.send({ type: 'speech.request', requestId: repeat, turnId: turn.id, actionId: action.id });
+  assert.equal((await client.next('speech.failed', frame => frame.requestId === repeat)).code, 'STALE_SPEECH');
+  client.send({ type: 'speech.request', requestId: randomUUID(), turnId: turn.id, text: 'Untrusted caller text' });
+  await client.next('error'); assert.equal(spoken.length, 1);
+  const late = await state.action(turn, new AbortController().signal, 'show_message', { chatId: chat.id, messageId: source.id, narration: 'Never speak this cancelled segment.' });
+  await state.interrupt(owner.user.id, session.id);
+  const stale = randomUUID(); client.send({ type: 'speech.request', requestId: stale, turnId: turn.id, actionId: late.id });
+  assert.equal((await client.next('speech.failed', frame => frame.requestId === stale)).code, 'STALE_SPEECH');
+  assert.equal(spoken.length, 1);
+});
 
 test('native iPhone API-origin sockets authenticate while foreign browser origins remain rejected', { timeout: 10_000 }, async t => {
   const context = await testApp(); t.after(() => context.close());

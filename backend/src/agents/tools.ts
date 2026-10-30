@@ -9,6 +9,7 @@ import type { FunctionDefinition } from './model.js';
 import { AgentMemory, memoryInput } from './memory.js';
 import type { MemoryReviewer, MemoryChange } from './memory-policy.js';
 import type { VoiceExitReviewer } from './voice-exit-policy.js';
+import { assertSourceFocus } from './context.js';
 
 export type AgentName = 'mia' | 'messaging' | 'contacts';
 export type Tool = { definition: FunctionDefinition; execute(input: unknown): Promise<unknown> };
@@ -53,6 +54,17 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
     }
     return action;
   };
+  const presentationAction = async (kind: string, payload: unknown) => {
+    const action = await state.action(turn, signal, kind, payload);
+    const until = Date.now() + 175000;
+    while (Date.now() < until) {
+      signal.throwIfAborted();
+      const [current] = await db.query(`SELECT id,kind,state,result FROM device_actions WHERE id=$1 AND user_id=$2`, [action.id, turn.userId]);
+      if (current?.state !== 'pending') return current;
+      await delay(100, undefined, { signal });
+    }
+    return { ...action, message: 'Device completion was not confirmed. Do not claim it displayed or played.' };
+  };
   const mutate = <T>(fn: (service: MessagingService, scoped: Database) => Promise<T>) =>
     state.mutate(turn, signal, (scoped) => fn(new MessagingService(scoped), scoped));
   const tools = [
@@ -90,6 +102,11 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
     define('read_messages', 'Read actual messages in a chat, newest first. Use a before ID to read older messages.',
       z.object({ chatId: uuid, limit: z.int().min(1).max(30), before: uuid.nullable() }).strict(),
       ({ chatId, limit, before }) => messaging.messages(turn.userId, chatId, limit, before ?? undefined)),
+    define('get_message', 'Fetch one exact authorized source even when it is years old. Chat and message IDs must match.',
+      z.object({ chatId: uuid, messageId: uuid }).strict(), ({ chatId, messageId }) => messaging.source(turn.userId, chatId, messageId)),
+    define('search_messages', 'Search stored messages in one resolved chat by literal text and/or absolute date window, newest first. Bounded pages, next cursor; use for old sources instead of reading an entire history.',
+      z.object({ chatId: uuid, query: z.string().trim().max(200).nullable(), afterDate: z.iso.datetime().nullable(), beforeDate: z.iso.datetime().nullable(), before: uuid.nullable(), limit: z.int().min(1).max(20) }).strict(),
+      ({ chatId, query, afterDate, beforeDate, before, limit }) => messaging.searchMessages(turn.userId, chatId, { query: query ?? undefined, afterDate: afterDate ?? undefined, beforeDate: beforeDate ?? undefined, before: before ?? undefined, limit })),
     define('list_drafts', 'List saved unsent drafts, including drafts parked when the user changed tasks.', empty,
       () => messaging.drafts(turn.userId)),
     define('get_draft', 'Read the exact saved content and current version of a draft.', z.object({ draftId: uuid }).strict(),
@@ -104,6 +121,15 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       versionedDraft, ({ draftId, version }) => mutate((service) => service.discardDraft(turn.userId, draftId, version, signal))),
   ];
   const coordinator = [
+    define('show_message', 'Show or replace a passive visual reference to an exact stored source, opening its real chat. Optional narration is your natural spoken explanation about THIS source (not an automatic reading); it plays before this tool completes. Wait for completed device feedback before claiming success or advancing to another source. Keep it visible for follow-up. focus uses exact UTF-16 offsets into source text, never replacement display text.',
+      z.object({ chatId: uuid, messageId: uuid, focus: z.object({ start: z.int().nonnegative(), end: z.int().positive() }).strict().nullable(), narration: z.string().trim().min(1).max(1800).nullable() }).strict(), async ({ chatId, messageId, focus, narration }) => {
+        const message = await messaging.source(turn.userId, chatId, messageId);
+        if (focus && (focus.start >= focus.end || focus.end > (message.text?.length ?? 0))) throw new AppError(400, 'INVALID_FOCUS', 'Select exact valid source offsets.');
+        if (focus) assertSourceFocus(message.text ?? '', focus);
+        return presentationAction('show_message', { chatId, messageId, ...(focus ? { focus } : {}), ...(narration ? { narration } : {}) });
+      }),
+    define('dismiss_message', 'Dismiss the current visual reference when it no longer helps or the user wants it put away. No fixed end-of-speech dismissal. Wait for device feedback.', empty,
+      () => presentationAction('dismiss_message', {})),
     define('get_voice_mode', 'Read the actual voice-mode and microphone state reported with this request. This is a device snapshot, not an inferred/default mode. If unreported, say you cannot verify it.',
       empty, async () => {
         const [confirmed] = await db.query<{ result: { voice?: unknown } }>(`SELECT result FROM device_actions
@@ -202,7 +228,7 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       z.object({ messageId: uuid }).strict(), async ({ messageId }) => {
         const message = await messaging.message(turn.userId, messageId);
         if (message.kind !== 'voice' || !message.mediaId) throw new AppError(400, 'NOT_VOICE', 'This message has no voice recording.');
-        return state.action(turn, signal, 'play_audio', { messageId, mediaId: message.mediaId, path: `/v1/media/${message.mediaId}` });
+        return presentationAction('play_audio', { chatId: message.chatId, messageId, mediaId: message.mediaId, path: `/v1/media/${message.mediaId}` });
       }),
     define('stop_audio', 'Request that the phone stop current audio playback.', empty,
       () => state.action(turn, signal, 'stop_audio', {})),
