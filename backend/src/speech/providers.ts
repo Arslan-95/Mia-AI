@@ -5,6 +5,7 @@ import { AppError, throwIfAborted } from '../errors.js';
 import { inspectWav } from '../media.js';
 import { synthesizeGoogleSpeech } from './google-tts.js';
 import { googleSpeechHeaders, type GoogleSpeechHeaders } from './google-auth.js';
+import type { SpeechOptions } from './delivery.js';
 
 export type RecognitionEvent = (
   | { type: 'speechStart'; turnId: number }
@@ -18,7 +19,7 @@ export interface SpeechProvider {
   transcribe(audio: Buffer, signal: AbortSignal): Promise<string>;
   recognize(keywords: string[], onEvent: (event: RecognitionEvent) => void,
     onFailure: () => void, signal: AbortSignal): Promise<RecognitionStream>;
-  synthesize(text: string, signal: AbortSignal): AsyncIterable<Uint8Array>;
+  synthesize(text: string, signal: AbortSignal, options?: SpeechOptions): AsyncIterable<Uint8Array>;
 }
 
 const audioPosition = { audioProcessedMs: z.number().finite().nonnegative().optional() };
@@ -136,8 +137,8 @@ export class CloudSpeechProvider implements SpeechProvider {
     });
   }
 
-  async *synthesize(text: string, signal: AbortSignal): AsyncIterable<Uint8Array> {
+  async *synthesize(text: string, signal: AbortSignal, options: SpeechOptions = {}): AsyncIterable<Uint8Array> {
     if (!this.synthesisConfigured) throw new AppError(503, 'TTS_UNAVAILABLE', 'Speech synthesis is not configured yet.');
-    yield* synthesizeGoogleSpeech(this.config, this.fetcher, text, signal, this.ttsHeaders);
+    yield* synthesizeGoogleSpeech(this.config, this.fetcher, text, signal, this.ttsHeaders, options);
   }
 }

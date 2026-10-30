@@ -8,6 +8,7 @@ import type { SpeechProvider, RecognitionEvent } from '../src/speech/providers.j
 import { phoneSignIn, testApp } from './helpers.js';
 import { MessagingService } from '../src/messaging.js';
 import { AssistantState } from '../src/agents/state.js';
+import type { SpeechOptions } from '../src/speech/delivery.js';
 
 type Frame = Record<string, unknown> & { type: string };
 async function waitFor<T>(probe: () => T | undefined, timeout = 6000): Promise<T> {
@@ -30,8 +31,9 @@ async function connect(url: string, origin?: string) {
 
 test('running-turn narration synthesizes only the persisted owned action once and rejects superseded or caller-authored speech', async t => {
   const spoken: string[] = [];
+  const deliveries: (SpeechOptions | undefined)[] = [];
   const speech: SpeechProvider = { recognitionConfigured: true, synthesisConfigured: true, transcribe: async () => '',
-    async *synthesize(text) { spoken.push(text); yield new Uint8Array([0, 0, 0, 0]); },
+    async *synthesize(text, _signal, options) { spoken.push(text); deliveries.push(options); yield new Uint8Array([0, 0, 0, 0]); },
     async recognize() { return { write() {}, end() {}, close() {} }; } };
   const c = await testApp({ speech }); t.after(() => c.close());
   const owner = await phoneSignIn(c.app, '+15551112201', 'narration_owner');
@@ -42,7 +44,8 @@ test('running-turn narration synthesizes only the persisted owned action once an
   const session = await state.session(owner.user.id);
   await state.accept(owner.user.id, session.id, randomUUID(), 'Explain this message.');
   const turn = await state.claim(randomUUID()); assert.ok(turn);
-  const action = await state.action(turn, new AbortController().signal, 'show_message', { chatId: chat.id, messageId: source.id, narration: 'Her question refers to your earlier plan.' });
+  const delivery = { tone: 'gentle', pace: 'steady', warmth: 'reserved' } as const;
+  const action = await state.action(turn, new AbortController().signal, 'show_message', { chatId: chat.id, messageId: source.id, narration: 'Her question refers to your earlier plan.', delivery });
   const url = (await c.app.listen({ host: '127.0.0.1', port: 0 })).replace('http:', 'ws:') + '/v1/realtime';
   const client = await connect(url); t.after(() => client.close());
   client.send({ type: 'auth', token: owner.token, after: '0' }); await client.next('ready');
@@ -53,6 +56,7 @@ test('running-turn narration synthesizes only the persisted owned action once an
   const first = randomUUID(); client.send({ type: 'speech.request', requestId: first, turnId: turn.id, actionId: action.id });
   await client.next('speech.completed', frame => frame.requestId === first);
   assert.deepEqual(spoken, ['Her question refers to your earlier plan.']);
+  assert.deepEqual(deliveries, [{ narration: true, delivery }], 'the narration keeps its own persisted delivery');
   const repeat = randomUUID(); client.send({ type: 'speech.request', requestId: repeat, turnId: turn.id, actionId: action.id });
   assert.equal((await client.next('speech.failed', frame => frame.requestId === repeat)).code, 'STALE_SPEECH');
   client.send({ type: 'speech.request', requestId: randomUUID(), turnId: turn.id, text: 'Untrusted caller text' });
@@ -62,6 +66,29 @@ test('running-turn narration synthesizes only the persisted owned action once an
   const stale = randomUUID(); client.send({ type: 'speech.request', requestId: stale, turnId: turn.id, actionId: late.id });
   assert.equal((await client.next('speech.failed', frame => frame.requestId === stale)).code, 'STALE_SPEECH');
   assert.equal(spoken.length, 1);
+});
+
+test('final speech uses server-owned delivery and rejects caller-provided speech controls', async t => {
+  const spoken: { text: string; options?: SpeechOptions }[] = [];
+  const speech: SpeechProvider = { recognitionConfigured: true, synthesisConfigured: true, transcribe: async () => '',
+    async *synthesize(text, _signal, options) { spoken.push({ text, options }); yield new Uint8Array(4); },
+    async recognize() { return { write() {}, end() {}, close() {} }; } };
+  const c = await testApp({ speech }); t.after(() => c.close());
+  const owner = await phoneSignIn(c.app, '+15551112203', 'delivery_speaker');
+  const state = new AssistantState(c.db), session = await state.session(owner.user.id);
+  await state.accept(owner.user.id, session.id, randomUUID(), 'Take this gently.');
+  const turn = await state.claim(randomUUID()); assert.ok(turn);
+  const signal = new AbortController().signal;
+  const delivery = { tone: 'gentle', pace: 'unhurried', warmth: 'reserved' } as const;
+  await state.setSpeechDelivery(turn, signal, delivery); await state.finish(turn, signal, 'We can take this one step at a time.');
+  const url = (await c.app.listen({ host: '127.0.0.1', port: 0 })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: owner.token, after: '0' }); await client.next('ready');
+  client.send({ type: 'speech.request', requestId: randomUUID(), turnId: turn.id, delivery: { tone: 'shout' } });
+  await client.next('error'); assert.equal(spoken.length, 0);
+  const id = randomUUID(); client.send({ type: 'speech.request', requestId: id, turnId: turn.id });
+  await client.next('speech.completed', frame => frame.requestId === id);
+  assert.deepEqual(spoken, [{ text: 'We can take this one step at a time.', options: { delivery, narration: false } }]);
 });
 
 test('native iPhone API-origin sockets authenticate while foreign browser origins remain rejected', { timeout: 10_000 }, async t => {

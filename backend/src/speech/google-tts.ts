@@ -3,6 +3,7 @@ import type { Config } from '../config.js';
 import { AppError, throwIfAborted } from '../errors.js';
 import { inspectWav } from '../media.js';
 import { googleSpeechEndpoint, googleSpeechHeaders, type GoogleSpeechHeaders } from './google-auth.js';
+import { speechPrompt, type SpeechOptions } from './delivery.js';
 
 const sampleRate = 24_000;
 const maxPcmBytes = sampleRate * 2 * 180;
@@ -59,7 +60,7 @@ async function readAudio(response: Response, signal: AbortSignal) {
 }
 
 export async function* synthesizeGoogleSpeech(config: Config, fetcher: typeof fetch,
-  text: string, signal: AbortSignal, authorize: GoogleSpeechHeaders = googleSpeechHeaders(config)): AsyncIterable<Uint8Array> {
+  text: string, signal: AbortSignal, authorize: GoogleSpeechHeaders = googleSpeechHeaders(config), options: SpeechOptions = {}): AsyncIterable<Uint8Array> {
   const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(90_000)]);
   throwIfAborted(requestSignal);
   let total = 0;
@@ -69,6 +70,8 @@ export async function* synthesizeGoogleSpeech(config: Config, fetcher: typeof fe
   const closing = '</google:style></speak>';
   const encode = styled ? escapeSsml : (text: string) => text;
   const maximumBytes = gemini ? 4000 : 4800 - (styled ? Buffer.byteLength(opening + closing, 'utf8') : 0);
+  const prompt = speechPrompt(config.googleTtsPrompt, options);
+  if (gemini && Buffer.byteLength(prompt, 'utf8') > 4000) throw new AppError(503, 'TTS_PROMPT_LIMIT', 'The speech delivery configuration is too long.');
   for (const part of textParts(text, maximumBytes, encode)) {
     throwIfAborted(requestSignal);
     const headers = await authorize(requestSignal);
@@ -77,7 +80,7 @@ export async function* synthesizeGoogleSpeech(config: Config, fetcher: typeof fe
     const response = await fetcher(googleSpeechEndpoint, {
       method: 'POST', signal: requestSignal,
       headers,
-      body: JSON.stringify({ input: gemini ? { text: part, prompt: config.googleTtsPrompt } : styled ? { ssml: opening + encode(part) + closing } : { text: part },
+      body: JSON.stringify({ input: gemini ? { text: part, prompt } : styled ? { ssml: opening + encode(part) + closing } : { text: part },
         voice: { languageCode: 'en-US', name: config.googleTtsVoice, ...(gemini ? { modelName: config.googleTtsModel } : {}) },
         audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: sampleRate } }),
     });

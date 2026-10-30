@@ -3,13 +3,14 @@ import type { Database, Sql } from '../db/database.js';
 import { AppError, conflict, notFound, throwIfAborted } from '../errors.js';
 import { publish } from '../events.js';
 import { assertContextAccess, clientContextSchema, deviceResultSchema, sameContext, type ClientContext } from './context.js';
+import { speechDeliverySchema, defaultSpeechDelivery, type SpeechDelivery } from '../speech/delivery.js';
 
 export type Session = { id: string; userId: string; generation: number; activeChatId: string | null };
 export type Turn = { id: string; sessionId: string; userId: string; generation: number; userText: string;
-  status: 'queued' | 'running' | 'completed' | 'interrupted' | 'failed'; assistantText: string | null; clientTurnId: string; context: ClientContext | null };
+  status: 'queued' | 'running' | 'completed' | 'interrupted' | 'failed'; assistantText: string | null; clientTurnId: string; context: ClientContext | null; speechDelivery?: SpeechDelivery | null };
 export type DeviceAction = { id: string; kind: string; payload: unknown; state: string; result: unknown };
 const sessionColumns = 'id,user_id AS "userId",generation,active_chat_id AS "activeChatId"';
-const turnColumns = 't.id,t.session_id AS "sessionId",s.user_id AS "userId",t.generation,t.user_text AS "userText",t.status,t.assistant_text AS "assistantText",t.client_turn_id AS "clientTurnId",t.client_context AS context';
+const turnColumns = 't.id,t.session_id AS "sessionId",s.user_id AS "userId",t.generation,t.user_text AS "userText",t.status,t.assistant_text AS "assistantText",t.client_turn_id AS "clientTurnId",t.client_context AS context,t.speech_delivery AS "speechDelivery"';
 
 export class AssistantState {
   constructor(readonly db: Database) {}
@@ -142,6 +143,15 @@ export class AssistantState {
     });
   }
 
+  async setSpeechDelivery(turn: Turn, signal: AbortSignal, value: SpeechDelivery) {
+    const delivery = speechDeliverySchema.parse(value);
+    await this.mutate(turn, signal, async db => {
+      await db.query('UPDATE assistant_turns SET speech_delivery=$2::jsonb WHERE id=$1', [turn.id, JSON.stringify(delivery)]);
+    });
+    turn.speechDelivery = delivery;
+    return { delivery, scope: 'this turn only; no persistent preference changed' };
+  }
+
   async finish(turn: Turn, signal: AbortSignal, text: string) {
     await this.mutate(turn, signal, async (db) => {
       await db.query("UPDATE assistant_turns SET status = 'completed',assistant_text = $2,completed_at = now(),lease_expires_at = NULL WHERE id = $1", [turn.id, text]);
@@ -177,7 +187,7 @@ export class AssistantState {
   async actionSpeech(userId: string, sessionId: string, turnId: string, actionId: string) {
     const turn = await this.turn(userId, sessionId, turnId);
     const session = await this.requireSession(userId, sessionId);
-    const [action] = await this.db.query<{ payload: { narration?: string }; state: string; current: boolean }>(`SELECT payload,state,expires_at>now() AS current FROM device_actions
+    const [action] = await this.db.query<{ payload: { narration?: string; delivery?: unknown }; state: string; current: boolean }>(`SELECT payload,state,expires_at>now() AS current FROM device_actions
       WHERE id=$1 AND user_id=$2 AND session_id=$3 AND turn_id=$4 AND generation=$5 AND kind='show_message'`,
       [actionId,userId,sessionId,turnId,session.generation]);
     if (!action?.current || action.state !== 'pending' || !['running','completed'].includes(turn.status) || turn.generation !== session.generation || !action.payload.narration)
@@ -186,7 +196,7 @@ export class AssistantState {
       WHERE a.id=$1 AND a.session_id=s.id AND a.turn_id=t.id AND s.generation=a.generation
       AND t.status IN ('running','completed') AND a.state='pending' AND a.expires_at>now() AND NOT a.narration_requested RETURNING a.id`, [actionId]);
     if (!claimed.length) throw new AppError(409, 'STALE_SPEECH', 'This narration was already requested or cancelled.');
-    return { turn, text: action.payload.narration };
+    return { turn, text: action.payload.narration, delivery: speechDeliverySchema.safeParse(action.payload.delivery).data ?? defaultSpeechDelivery };
   }
 
   async acknowledgeAction(userId: string, actionId: string, success: boolean, result: unknown) {

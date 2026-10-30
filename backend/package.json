@@ -15,6 +15,8 @@
     "test:voice:live": "node --env-file-if-exists=.env --import tsx test/live-voice-controls.ts && node --env-file-if-exists=.env --import tsx test/live-voice-exit-policy.ts",
     "test:conversation:live": "node --env-file-if-exists=.env --import tsx test/live-conversation.ts",
     "test:presentation:live": "node --env-file-if-exists=.env --import tsx test/live-message-presentation.ts",
+    "test:delivery:live": "node --env-file-if-exists=.env --import tsx test/live-speech-delivery.ts",
+    "speech:samples": "node --env-file-if-exists=.env --import tsx test/live-speech-samples.ts",
     "speech:check": "node --env-file-if-exists=.env --import tsx src/speech/check.ts",
     "db:migrate": "node --env-file-if-exists=.env --import tsx src/db/migrate.ts"
   },

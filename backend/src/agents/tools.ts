@@ -10,6 +10,7 @@ import { AgentMemory, memoryInput } from './memory.js';
 import type { MemoryReviewer, MemoryChange } from './memory-policy.js';
 import type { VoiceExitReviewer } from './voice-exit-policy.js';
 import { assertSourceFocus } from './context.js';
+import { speechDeliverySchema, defaultSpeechDelivery } from '../speech/delivery.js';
 
 export type AgentName = 'mia' | 'messaging' | 'contacts';
 export type Tool = { definition: FunctionDefinition; execute(input: unknown): Promise<unknown> };
@@ -121,12 +122,14 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       versionedDraft, ({ draftId, version }) => mutate((service) => service.discardDraft(turn.userId, draftId, version, signal))),
   ];
   const coordinator = [
-    define('show_message', 'Required before discussing a specific stored chat message unless that exact source/relevant excerpt is already confirmed visible or the user explicitly requests no display. Use for last/first-message questions, reading, quoting, summarizing, interpreting and help replying; fetching data or opening a chat alone does not show its card. Opens the real chat and shows/replaces the exact source. Put THIS source\'s substantive answer or commentary in narration: the card appears before speech and the tool waits for speech completion. For multiple sources, show and narrate each sequentially before replacing it. Keep an already visible source for follow-up without re-showing. Counts/navigation and proposed draft revisions need no arbitrary card. Wait for completed feedback; failure is not a confirmed display. focus uses exact UTF-16 source offsets, never replacement display text.',
-      z.object({ chatId: uuid, messageId: uuid, focus: z.object({ start: z.int().nonnegative(), end: z.int().positive() }).strict().nullable(), narration: z.string().trim().min(1).max(1800).nullable() }).strict(), async ({ chatId, messageId, focus, narration }) => {
+    define('set_speech_delivery', 'Choose restrained delivery for your final spoken reply by meaning and current conversation. Default is calm/steady/reserved; no call is needed for ordinary neutral replies or greetings. Use gentle for a delicate topic, light only for supported casual humor, unhurried when useful, and friendly only with evidence it suits this user. Use saved voice preferences as context, but current instructions take priority. Changes apply only to this turn; use memory tools for an actual enduring preference. No freeform voice prompts or exaggerated emotion. For individual show_message narration use that tool\'s delivery field instead.',
+      speechDeliverySchema, delivery => state.setSpeechDelivery(turn, signal, delivery)),
+    define('show_message', 'First check current clientContext.reference: if it already shows this exact chat/message and relevant excerpt, DO NOT call this tool again; keep that card and answer directly. Otherwise required before discussing a specific stored chat message unless the user explicitly requests no display. Use for last/first-message questions, reading, quoting, summarizing, interpreting and help replying; fetching data or opening a chat alone does not show its card. Opens the real chat and shows/replaces the exact source. Put THIS source\'s substantive answer or commentary in narration: the card appears before speech and the tool waits for speech completion. For multiple sources, show and narrate each sequentially before replacing it. Counts/navigation and proposed draft revisions need no arbitrary card. Wait for completed feedback; failure is not a confirmed display. focus uses exact UTF-16 source offsets, never replacement display text. Optional delivery controls only this narration; it is not a reason to replay a visible card.',
+      z.object({ chatId: uuid, messageId: uuid, focus: z.object({ start: z.int().nonnegative(), end: z.int().positive() }).strict().nullable(), narration: z.string().trim().min(1).max(1800).nullable(), delivery: speechDeliverySchema.nullish() }).strict(), async ({ chatId, messageId, focus, narration, delivery }) => {
         const message = await messaging.source(turn.userId, chatId, messageId);
         if (focus && (focus.start >= focus.end || focus.end > (message.text?.length ?? 0))) throw new AppError(400, 'INVALID_FOCUS', 'Select exact valid source offsets.');
         if (focus) assertSourceFocus(message.text ?? '', focus);
-        return presentationAction('show_message', { chatId, messageId, ...(focus ? { focus } : {}), ...(narration ? { narration } : {}) });
+        return presentationAction('show_message', { chatId, messageId, ...(focus ? { focus } : {}), ...(narration ? { narration } : {}), delivery: delivery ?? turn.speechDelivery ?? defaultSpeechDelivery });
       }),
     define('dismiss_message', 'Dismiss the current visual reference when it no longer helps or the user wants it put away. No fixed end-of-speech dismissal. Wait for device feedback.', empty,
       () => presentationAction('dismiss_message', {})),

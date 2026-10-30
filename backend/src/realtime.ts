@@ -309,7 +309,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
         send({ type: 'speech.started', requestId, turnId, format: 'pcm_s16le', sampleRate: 24000, channels: 1 });
         let sequence = 0;
         let totalBytes = 0;
-        for await (const bytes of speech.synthesize(text, signal)) {
+        for await (const bytes of speech.synthesize(text, signal, { delivery: segment?.delivery ?? turn.speechDelivery, narration: Boolean(segment) })) {
           throwIfAborted(signal);
           const current = await assistant.state.requireSession(user!.id, sessionId);
           throwIfAborted(signal);

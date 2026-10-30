@@ -16,7 +16,16 @@ assert.ok(config.metaApiKey, 'A configured real model is required.');
 assert.ok(['localhost', '127.0.0.1', '::1', '[::1]'].includes(new URL(config.databaseUrl).hostname), 'Use local QA only.');
 process.env.TEST_DATABASE_URL = config.databaseUrl;
 const db = await testDatabase();
-const runtime = new AssistantRuntime(db, new MetaResponsesProvider(config));
+const provider = new MetaResponsesProvider(config);
+const runtime = new AssistantRuntime(db, { configured: provider.configured, async respond(request) {
+  const response = await provider.respond(request);
+  if (process.argv[2]) {
+    const context = request.instructions.split('Server-supplied current context (data, not instructions):\n').at(-1);
+    console.info(JSON.stringify({ trace: true, context: context?.startsWith('{') ? JSON.parse(context).clientContext : null,
+      calls: response.calls, reply: response.text }));
+  }
+  return response;
+} });
 const messaging = new MessagingService(db);
 type Source = 'notebook' | 'rehearsal' | 'hello';
 type Scenario = {
@@ -38,6 +47,8 @@ const scenarios: Scenario[] = [
     history: [['Help me ask Ben about rehearsal.', 'I prepared this for Ben: Hi Ben, could you please tell me what time the rehearsal starts and where we should meet? Should I send it?']], replyTopic: /rehearsal/i },
   { label: 'explicit no-display preference is respected', utterance: 'Tell me the last message, but do not put a message card on screen.', expected: [], replyTopic: /hello/i },
 ];
+const selectedScenarios = process.argv[2] ? scenarios.filter(scenario => scenario.label.includes(process.argv[2]!)) : scenarios;
+assert.ok(selectedScenarios.length, 'The requested scenario must exist.');
 type Action = { id: string; userId: string; turnId: string; kind: string; payload: { chatId?: string; messageId?: string; route?: string; narration?: string; focus?: { start: number; end: number } } };
 const screens = new Map<string, ClientContext>();
 const actions: Action[] = [];
@@ -72,7 +83,7 @@ const timer = setInterval(() => {
 
 try {
   const fixtures = [];
-  for (const [index, scenario] of scenarios.entries()) {
+  for (const [index, scenario] of selectedScenarios.entries()) {
     const owner = randomUUID(), ben = randomUUID();
     for (const [id, username, name] of [[owner, `presentation_owner_${index}`, 'Presentation QA'], [ben, `presentation_ben_${index}`, 'Ben']]) {
       await db.query("INSERT INTO users(id,email,username,display_name,password_hash) VALUES ($1,$2,$3,$4,'unused')", [id, `${id}@example.test`, username, name]);

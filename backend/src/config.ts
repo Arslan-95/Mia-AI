@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { z } from 'zod';
+import { calmSpeechPrompt } from './speech/delivery.js';
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -21,7 +22,7 @@ const schema = z.object({
   GOOGLE_TTS_VOICE: z.string().regex(/^(?:en-US-[A-Za-z0-9-]+|[A-Za-z]{2,40})$/).optional(),
   GOOGLE_TTS_STYLE: z.enum(['none', 'calm', 'empathetic', 'lively', 'firm', 'apologetic']).default('calm'),
   GOOGLE_TTS_PROMPT: z.string().trim().min(1).refine(value => Buffer.byteLength(value, 'utf8') <= 4000,
-    'The TTS prompt must fit within 4000 UTF-8 bytes.').default('Read aloud in a warm, welcoming tone.'),
+    'The TTS prompt must fit within 4000 UTF-8 bytes.').default(calmSpeechPrompt),
   LOG_LEVEL: z.enum(['silent', 'fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 });
 

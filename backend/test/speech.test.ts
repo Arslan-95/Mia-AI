@@ -6,6 +6,7 @@ import { readConfig } from '../src/config.js';
 import { CloudSpeechProvider, type RecognitionEvent } from '../src/speech/providers.js';
 import { inspectWav } from '../src/media.js';
 import { wav } from './helpers.js';
+import { calmSpeechPrompt } from '../src/speech/delivery.js';
 
 function synthesizedWav(pcm = Buffer.from([1, 2, 3, 4, 5, 6]), rate = 24_000) {
   const audio = Buffer.concat([wav(0), pcm]);
@@ -84,11 +85,11 @@ test('Neural2 can return to its original delivery without interpreting source ma
   await spokenAudio(provider, source);
 });
 
-test('Gemini TTS uses Kore and a separate warm prompt with refreshed authorization and bounded source chunks', async () => {
+test('Gemini TTS uses Kore and separate calm delivery instructions with refreshed authorization and bounded source chunks', async () => {
   const config = readConfig({ GOOGLE_TTS_MODEL: 'gemini-3.1-flash-tts-preview', GOOGLE_TTS_PROJECT: 'tts-project' });
   assert.equal(config.googleTtsVoice, 'Kore');
   assert.equal(config.googleTtsAuth, 'adc');
-  assert.equal(config.googleTtsPrompt, 'Read aloud in a warm, welcoming tone.');
+  assert.equal(config.googleTtsPrompt, calmSpeechPrompt);
   const source = 'Hello <Ben> & friends 👋. '.repeat(400).trim();
   const parts: string[] = [];
   let authorizations = 0;
@@ -99,7 +100,8 @@ test('Gemini TTS uses Kore and a separate warm prompt with refreshed authorizati
     const body = JSON.parse(String(init?.body)) as { input: { text: string; prompt: string; ssml?: string }; voice: unknown; audioConfig: unknown };
     assert.deepEqual(body.voice, { languageCode: 'en-US', name: 'Kore', modelName: 'gemini-3.1-flash-tts-preview' });
     assert.deepEqual(body.audioConfig, { audioEncoding: 'LINEAR16', sampleRateHertz: 24000 });
-    assert.equal(body.input.prompt, 'Read aloud in a warm, welcoming tone.');
+    assert.ok(body.input.prompt.startsWith(calmSpeechPrompt));
+    assert.ok(body.input.prompt.includes('matter-of-fact'));
     assert.equal(body.input.ssml, undefined);
     assert.ok(Buffer.byteLength(body.input.text, 'utf8') <= 4000);
     assert.equal(body.input.text.includes('Read aloud'), false, 'delivery instructions are not mixed into message contents');

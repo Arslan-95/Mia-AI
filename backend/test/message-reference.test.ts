@@ -51,12 +51,16 @@ test('show tools use stored source only and await real ACK; narration is owned, 
   const tools = toolsFor('mia', { db: c.db, state, turn, signal: new AbortController().signal, delegate: async () => '' });
   await assert.rejects(tools.get('show_message')!.execute({ chatId: chat.id, messageId: source.id, focus: null, narration: null, text: 'Fabrication' }));
   let finished = false;
-  const work = tools.get('show_message')!.execute({ chatId: chat.id, messageId: source.id, focus: null, narration: 'She is referring to your earlier plan.' }).then(result => { finished = true; return result; });
+  const delivery = { tone: 'gentle', pace: 'steady', warmth: 'reserved' } as const;
+  const work = tools.get('show_message')!.execute({ chatId: chat.id, messageId: source.id, focus: null, narration: 'She is referring to your earlier plan.', delivery }).then(result => { finished = true; return result; });
   let action: { id: string; payload: { narration: string } } | undefined;
   for (let attempt = 0; !action && attempt < 100; attempt++) { [action] = await c.db.query('SELECT id,payload FROM device_actions WHERE turn_id=$1', [turn.id]); if (!action) await delay(10); }
   assert.ok(action); assert.equal(finished, false);
   await assert.rejects(state.actionSpeech(friend.user.id, session.id, turn.id, action.id), { status: 404 });
-  assert.equal((await state.actionSpeech(owner.user.id, session.id, turn.id, action.id)).text, action.payload.narration);
+  await tools.get('set_speech_delivery')!.execute({ tone: 'light', pace: 'steady', warmth: 'friendly' });
+  const spoken = await state.actionSpeech(owner.user.id, session.id, turn.id, action.id);
+  assert.equal(spoken.text, action.payload.narration);
+  assert.deepEqual(spoken.delivery, delivery, 'a later final-reply style cannot change a source narration snapshot');
   await assert.rejects(state.actionSpeech(owner.user.id, session.id, turn.id, action.id), { code: 'STALE_SPEECH' });
   await assert.rejects(state.acknowledgeAction(owner.user.id, action.id, true, { context: { route: '/mia', revision: 0 } }), { status: 409 });
   const reference = { chatId: chat.id, messageId: source.id, revision: 1 };
