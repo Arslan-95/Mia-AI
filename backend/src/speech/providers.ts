@@ -4,6 +4,7 @@ import type { Config } from '../config.js';
 import { AppError, throwIfAborted } from '../errors.js';
 import { inspectWav } from '../media.js';
 import { synthesizeGoogleSpeech } from './google-tts.js';
+import { googleSpeechHeaders, type GoogleSpeechHeaders } from './google-auth.js';
 
 export type RecognitionEvent = (
   | { type: 'speechStart'; turnId: number }
@@ -31,10 +32,13 @@ const recognitionEventSchema = z.discriminatedUnion('type', [
 export class CloudSpeechProvider implements SpeechProvider {
   readonly recognitionConfigured: boolean;
   readonly synthesisConfigured: boolean;
+  private readonly ttsHeaders: GoogleSpeechHeaders;
   constructor(private readonly config: Config, private readonly fetcher: typeof fetch = fetch,
-    private readonly socketFactory: (url: string) => WebSocket = (url) => new WebSocket(url, { maxPayload: 256_000, handshakeTimeout: 10_000 })) {
+    private readonly socketFactory: (url: string) => WebSocket = (url) => new WebSocket(url, { maxPayload: 256_000, handshakeTimeout: 10_000 }),
+    ttsHeaders?: GoogleSpeechHeaders) {
     this.recognitionConfigured = Boolean(config.metaApiKey);
-    this.synthesisConfigured = Boolean(config.googleTtsApiKey);
+    this.synthesisConfigured = config.googleTtsAuth === 'adc' || Boolean(config.googleTtsApiKey);
+    this.ttsHeaders = ttsHeaders ?? googleSpeechHeaders(config);
   }
 
   async transcribe(audio: Buffer, signal: AbortSignal): Promise<string> {
@@ -134,6 +138,6 @@ export class CloudSpeechProvider implements SpeechProvider {
 
   async *synthesize(text: string, signal: AbortSignal): AsyncIterable<Uint8Array> {
     if (!this.synthesisConfigured) throw new AppError(503, 'TTS_UNAVAILABLE', 'Speech synthesis is not configured yet.');
-    yield* synthesizeGoogleSpeech(this.config, this.fetcher, text, signal);
+    yield* synthesizeGoogleSpeech(this.config, this.fetcher, text, signal, this.ttsHeaders);
   }
 }

@@ -84,6 +84,51 @@ test('Neural2 can return to its original delivery without interpreting source ma
   await spokenAudio(provider, source);
 });
 
+test('Gemini TTS uses Kore and a separate warm prompt with refreshed authorization and bounded source chunks', async () => {
+  const config = readConfig({ GOOGLE_TTS_MODEL: 'gemini-3.1-flash-tts-preview', GOOGLE_TTS_PROJECT: 'tts-project' });
+  assert.equal(config.googleTtsVoice, 'Kore');
+  assert.equal(config.googleTtsAuth, 'adc');
+  assert.equal(config.googleTtsPrompt, 'Read aloud in a warm, welcoming tone.');
+  const source = 'Hello <Ben> & friends 👋. '.repeat(400).trim();
+  const parts: string[] = [];
+  let authorizations = 0;
+  const speech = new CloudSpeechProvider(config, async (url, init) => {
+    assert.equal(String(url), 'https://texttospeech.googleapis.com/v1/text:synthesize');
+    assert.equal(new Headers(init?.headers).get('authorization'), `Bearer refreshed-${parts.length + 1}`);
+    assert.equal(new Headers(init?.headers).has('x-goog-api-key'), false);
+    const body = JSON.parse(String(init?.body)) as { input: { text: string; prompt: string; ssml?: string }; voice: unknown; audioConfig: unknown };
+    assert.deepEqual(body.voice, { languageCode: 'en-US', name: 'Kore', modelName: 'gemini-3.1-flash-tts-preview' });
+    assert.deepEqual(body.audioConfig, { audioEncoding: 'LINEAR16', sampleRateHertz: 24000 });
+    assert.equal(body.input.prompt, 'Read aloud in a warm, welcoming tone.');
+    assert.equal(body.input.ssml, undefined);
+    assert.ok(Buffer.byteLength(body.input.text, 'utf8') <= 4000);
+    assert.equal(body.input.text.includes('Read aloud'), false, 'delivery instructions are not mixed into message contents');
+    parts.push(body.input.text);
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
+  }, undefined, async () => new Headers({ authorization: `Bearer refreshed-${++authorizations}` }));
+  assert.equal(speech.synthesisConfigured, true, 'ADC does not require an API key');
+  const output = await spokenAudio(speech, source);
+  assert.ok(parts.length > 1); assert.equal(authorizations, parts.length);
+  assert.equal(parts.join(' '), source); assert.equal(output.length, parts.length * 6);
+});
+
+test('Gemini TTS cancellation during authorization cannot issue a later synthesis request', async () => {
+  const config = readConfig({ GOOGLE_TTS_MODEL: 'gemini-3.1-flash-tts-preview' });
+  const cancelled = new AbortController();
+  let requests = 0;
+  const speech = new CloudSpeechProvider(config, async () => { requests++; return Response.json({}); }, undefined,
+    async () => { cancelled.abort(); return new Headers({ authorization: 'Bearer obsolete' }); });
+  await assert.rejects(() => spokenAudio(speech, 'Hello.', cancelled.signal), { name: 'AbortError' });
+  assert.equal(requests, 0);
+});
+
+test('Gemini configuration rejects mismatched voices and prompts exceeding its UTF-8 limit', () => {
+  assert.throws(() => readConfig({ GOOGLE_TTS_MODEL: 'gemini-3.1-flash-tts-preview', GOOGLE_TTS_VOICE: 'en-US-Neural2-F' }));
+  assert.throws(() => readConfig({ GOOGLE_TTS_MODEL: 'standard', GOOGLE_TTS_VOICE: 'Kore' }));
+  assert.throws(() => readConfig({ GOOGLE_TTS_PROMPT: '👋'.repeat(1001) }));
+  assert.equal(readConfig({ GOOGLE_TTS_PROMPT: '👋'.repeat(1000) }).googleTtsPrompt.length, 2000);
+});
+
 test('Google TTS rejects missing credentials, provider errors and malformed audio', async () => {
   let requests = 0;
   const missing = new CloudSpeechProvider(readConfig({}), async () => { requests++; return Response.json({}); });

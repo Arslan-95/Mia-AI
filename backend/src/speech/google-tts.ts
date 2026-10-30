@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { Config } from '../config.js';
 import { AppError, throwIfAborted } from '../errors.js';
 import { inspectWav } from '../media.js';
+import { googleSpeechEndpoint, googleSpeechHeaders, type GoogleSpeechHeaders } from './google-auth.js';
 
 const sampleRate = 24_000;
 const maxPcmBytes = sampleRate * 2 * 180;
@@ -58,21 +59,26 @@ async function readAudio(response: Response, signal: AbortSignal) {
 }
 
 export async function* synthesizeGoogleSpeech(config: Config, fetcher: typeof fetch,
-  text: string, signal: AbortSignal): AsyncIterable<Uint8Array> {
+  text: string, signal: AbortSignal, authorize: GoogleSpeechHeaders = googleSpeechHeaders(config)): AsyncIterable<Uint8Array> {
   const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(90_000)]);
   throwIfAborted(requestSignal);
   let total = 0;
-  const styled = config.googleTtsStyle !== 'none' && ['en-US-Neural2-F', 'en-US-Neural2-J'].includes(config.googleTtsVoice);
+  const gemini = config.googleTtsModel !== 'standard';
+  const styled = !gemini && config.googleTtsStyle !== 'none' && ['en-US-Neural2-F', 'en-US-Neural2-J'].includes(config.googleTtsVoice);
   const opening = `<speak><google:style name="${config.googleTtsStyle}">`;
   const closing = '</google:style></speak>';
   const encode = styled ? escapeSsml : (text: string) => text;
-  const maximumBytes = 4800 - (styled ? Buffer.byteLength(opening + closing, 'utf8') : 0);
+  const maximumBytes = gemini ? 4000 : 4800 - (styled ? Buffer.byteLength(opening + closing, 'utf8') : 0);
   for (const part of textParts(text, maximumBytes, encode)) {
     throwIfAborted(requestSignal);
-    const response = await fetcher('https://texttospeech.googleapis.com/v1/text:synthesize', {
+    const headers = await authorize(requestSignal);
+    throwIfAborted(requestSignal);
+    headers.set('Content-Type', 'application/json'); headers.set('Accept', 'application/json');
+    const response = await fetcher(googleSpeechEndpoint, {
       method: 'POST', signal: requestSignal,
-      headers: { 'x-goog-api-key': config.googleTtsApiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({ input: styled ? { ssml: opening + encode(part) + closing } : { text: part }, voice: { languageCode: 'en-US', name: config.googleTtsVoice },
+      headers,
+      body: JSON.stringify({ input: gemini ? { text: part, prompt: config.googleTtsPrompt } : styled ? { ssml: opening + encode(part) + closing } : { text: part },
+        voice: { languageCode: 'en-US', name: config.googleTtsVoice, ...(gemini ? { modelName: config.googleTtsModel } : {}) },
         audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: sampleRate } }),
     });
     throwIfAborted(requestSignal);
