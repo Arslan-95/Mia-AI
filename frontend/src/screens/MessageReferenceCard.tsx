@@ -3,9 +3,14 @@ import { Animated, StyleSheet, Text, useWindowDimensions, View } from 'react-nat
 import type { MessageReference, OriginalPlayback } from '../types';
 import { useReducedMotion } from '../motion';
 import { referenceDate, referenceDirection, referenceKey, sourceExcerpt } from '../messageReference';
+import { ShutterCard, type ShutterPhase } from './ShutterCard';
 
 const passive = { pointerEvents: 'none' as const, accessible: false, accessibilityElementsHidden: true, importantForAccessibility: 'no-hide-descendants' as const };
 const backdropOpacity = .68;
+type Display = { reference: MessageReference; budget: number; phase: ShutterPhase; serial: number };
+type Fit = { serial: number; budget: number; focus?: { start: number; end: number } };
+const sameSource = (a: MessageReference | null, b: MessageReference | null) => referenceKey(a) === referenceKey(b) && a?.source.text === b?.source.text;
+
 /** Passive sibling under the sole AgentInteraction touch and accessibility target. */
 export function MessageReferenceCard({ source, userId, playback, dismissalRevision, onPresented }: {
   source: MessageReference | null; userId: string; playback: OriginalPlayback | null;
@@ -14,64 +19,73 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
   const reduced = useReducedMotion();
   const { fontScale } = useWindowDimensions();
   const [region, setRegion] = useState({ width: 0, height: 0 });
-  const [rendered, setRendered] = useState<MessageReference | null>(null);
-  const [budget, setBudget] = useState(0);
-  const opacity = useRef(new Animated.Value(0)).current;
+  const [display, setDisplay] = useState<Display | null>(null);
+  const current = useRef<Display | null>(null);
+  const fitted = useRef<Fit | null>(null);
+  const serial = useRef(0);
   const scrim = useRef(new Animated.Value(0)).current;
-  const y = useRef(new Animated.Value(12)).current;
-  const scale = useRef(new Animated.Value(.98)).current;
-  const token = useRef(0);
-  const visibleKey = useRef<string | null>(null);
-  const entered = useRef(false);
-  const fitted = useRef(false);
-  const actualFocus = useRef<{ start: number; end: number } | undefined>(undefined);
-  const callback = useRef(onPresented); callback.current = onPresented;
-  const width = Math.min(420, region.width - (region.width <= 320 ? 24 : 32));
+  const backdrop = useRef<Animated.CompositeAnimation | null>(null);
+  const backdropToken = useRef(0);
+  const width = Math.max(0, Math.min(420, region.width - (region.width <= 320 ? 24 : 32)));
   const available = region.height - 24;
   const padding = region.width <= 320 ? 16 : 20;
-  useEffect(() => {
-    const operation = ++token.current;
-    opacity.stopAnimation(); scrim.stopAnimation(); y.stopAnimation(); scale.stopAnimation();
-    const animate = (value: Animated.Value, toValue: number, ms: number, complete?: () => void) => {
-      Animated.timing(value, { toValue, duration: reduced ? Math.min(80, ms) : ms, useNativeDriver: true }).start(({ finished }) => {
-        if (finished && operation === token.current) complete?.();
-      });
-    };
-    if (!source) {
-      animate(y, reduced ? 0 : 6, 180); animate(opacity, 0, 180);
-      animate(scrim, 0, 220, () => { setRendered(null); visibleKey.current = null; if (dismissalRevision !== undefined) callback.current(dismissalRevision); });
-      return () => { token.current++; };
+  const latest = useRef({ source, dismissalRevision, onPresented, width, available, padding, fontScale, reduced });
+  latest.current = { source, dismissalRevision, onPresented, width, available, padding, fontScale, reduced };
+
+  function commit(next: Display | null) { current.current = next; setDisplay(next); }
+  function fadeBackdrop(toValue: number, duration: number, done?: () => void) {
+    const operation = ++backdropToken.current;
+    backdrop.current?.stop();
+    backdrop.current = Animated.timing(scrim, { toValue, duration: latest.current.reduced ? 80 : duration, useNativeDriver: true, isInteraction: false });
+    backdrop.current.start(({ finished }) => { if (finished && operation === backdropToken.current) done?.(); });
+  }
+  function notifyIfReady() {
+    const view = current.current, fit = fitted.current, request = latest.current;
+    if (view?.phase === 'shown' && fit?.serial === view.serial && fit.budget === view.budget && sameSource(request.source, view.reference)) {
+      request.onPresented(view.reference.revision, true, fit.focus);
     }
-    if (!region.height || width <= 0) return;
-    const key = referenceKey(source);
-    if (visibleKey.current === key) {
-      setRendered(source);
-      if (available < 130 * fontScale) { callback.current(source.revision, false); return; }
-      const fittingBudget = Math.max(0, Math.floor(((available - (source.source.kind === 'voice' ? 210 : 155) * fontScale) / (25 * fontScale)) * ((width - padding * 2) / (10 * fontScale))));
-      if (fittingBudget < budget) { fitted.current = false; setBudget(fittingBudget); }
-      if (!entered.current) {
-        animate(scrim, backdropOpacity, 80); animate(y, 0, 80); animate(scale, 1, 80);
-        animate(opacity, 1, 80, () => { entered.current = true; if (fitted.current) callback.current(source.revision, true, actualFocus.current); });
-      } else if (fitted.current) callback.current(source.revision, true, actualFocus.current);
+  }
+  function fittingBudget(value: MessageReference) {
+    const { available, fontScale, width, padding } = latest.current;
+    return Math.max(0, Math.floor(((available - (value.source.kind === 'voice' ? 210 : 155) * fontScale) / (25 * fontScale)) * ((width - padding * 2) / (10 * fontScale))));
+  }
+  function dismiss() {
+    const revision = latest.current.dismissalRevision;
+    fadeBackdrop(0, 220, () => {
+      const request = latest.current;
+      if (!request.source && !current.current && revision !== undefined && request.dismissalRevision === revision) request.onPresented(revision);
+    });
+  }
+  function present() {
+    const request = latest.current;
+    if (!request.source || request.width <= 0) return;
+    if (request.available < 130 * request.fontScale) { request.onPresented(request.source.revision, false); return; }
+    fitted.current = null;
+    commit({ reference: request.source, budget: fittingBudget(request.source), phase: 'enter', serial: ++serial.current });
+    fadeBackdrop(backdropOpacity, 260);
+  }
+  useEffect(() => {
+    const view = current.current;
+    if (!source) {
+      if (view) { if (view.phase !== 'exit') commit({ ...view, phase: 'exit' }); }
+      else dismiss();
       return;
     }
-    const swap = () => {
-      setBudget(Math.max(0, Math.floor(((available - (source.source.kind === 'voice' ? 210 : 155) * fontScale) / (25 * fontScale)) * ((width - padding * 2) / (10 * fontScale)))));
-      setRendered(source); visibleKey.current = key;
-      entered.current = false; fitted.current = false;
-      opacity.setValue(0); y.setValue(reduced ? 0 : 12); scale.setValue(reduced ? 1 : .98);
-      animate(y, 0, rendered ? 220 : 260); animate(scale, 1, rendered ? 220 : 260);
-      animate(opacity, 1, rendered ? 220 : 260, () => {
-        entered.current = true;
-        if (fitted.current) callback.current(source.revision, true, actualFocus.current);
-        else if (available < 130 * fontScale) callback.current(source.revision, false);
-      });
-    };
-    animate(scrim, backdropOpacity, 220);
-    if (rendered && !reduced) { animate(y, -6, 120); animate(opacity, 0, 120, swap); } else swap();
-    return () => { token.current++; opacity.stopAnimation(); scrim.stopAnimation(); y.stopAnimation(); scale.stopAnimation(); };
-  }, [source, dismissalRevision, region.width, region.height, fontScale, reduced]);
-  const excerpt = rendered ? sourceExcerpt(rendered.source.text ?? '', rendered.focus, budget) : null;
+    if (!region.height || width <= 0) return;
+    if (available < 130 * fontScale) { onPresented(source.revision, false); return; }
+    // Keep the outgoing snapshot intact, even if several newer requests arrive.
+    if (view?.phase === 'exit') return;
+    if (!view) { present(); return; }
+    if (!sameSource(view.reference, source)) { commit({ ...view, phase: 'exit' }); return; }
+    const budget = Math.min(view.budget, fittingBudget(source));
+    if (budget !== view.budget) fitted.current = null;
+    if (view.reference !== source || view.budget !== budget) commit({ ...view, reference: source, budget });
+    notifyIfReady();
+  }, [source, dismissalRevision, region.width, region.height, fontScale]);
+  useEffect(() => () => { backdropToken.current++; backdrop.current?.stop(); current.current = null; }, []);
+
+  const rendered = display?.reference;
+  const excerpt = rendered && display ? sourceExcerpt(rendered.source.text ?? '', rendered.focus, display.budget) : null;
   const sent = rendered?.source.senderId === userId;
   const associated = rendered?.source.mediaId && playback?.mediaId === rendered.source.mediaId ? playback.state : null;
   const status = associated ? { preparing: 'Preparing audio…', playing: 'Playing original', finished: 'Finished', stopped: 'Stopped', failed: "Couldn't play audio" }[associated] : 'Original audio';
@@ -80,25 +94,43 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
     setRegion(previous => previous.width === width && previous.height === height ? previous : { width, height });
   }}>
     <Animated.View {...passive} testID="message-reference-scrim" style={[styles.scrim, { opacity: scrim }]} />
-    {rendered && excerpt && <Animated.View key={`${referenceKey(rendered)}/${budget}`} {...passive} testID="message-reference-card" onLayout={event => {
-      if (event.nativeEvent.layout.height > available && budget > 0) { fitted.current = false; setBudget(value => Math.max(0, Math.floor(value * .7))); }
-      else if (event.nativeEvent.layout.height > available || (rendered.source.text && !excerpt.text)) callback.current(rendered.revision, false);
-      else {
-        fitted.current = true; actualFocus.current = excerpt.partial ? { start: excerpt.start, end: excerpt.end } : undefined;
-        if (entered.current) callback.current(rendered.revision, true, actualFocus.current);
-      }
-    }} style={[styles.card, { width, paddingHorizontal: padding, backgroundColor: sent ? '#2A1E40' : '#172A35', borderColor: sent ? '#725395' : '#3E6175', opacity, transform: [{ translateY: y }, { scale }] }]}>
-      <View {...passive} style={styles.metadata}><Text {...passive} style={[styles.direction, { color: sent ? '#D8C4F4' : '#B7DAE9' }]}>{referenceDirection(rendered, userId)}</Text></View>
+    {display && rendered && excerpt && <ShutterCard key={`${display.serial}/${display.budget}`} width={width} phase={display.phase} reduced={reduced}
+      style={[styles.card, { paddingHorizontal: padding, backgroundColor: sent ? '#2A1E40' : '#211D2B' }]}
+      onLayout={event => {
+        const view = current.current;
+        if (!view || view.serial !== display.serial || view.budget !== display.budget || view.phase === 'exit') return;
+        const available = latest.current.available;
+        if (event.nativeEvent.layout.height > available && view.budget > 0) {
+          fitted.current = null; commit({ ...view, budget: Math.max(0, Math.floor(view.budget * .7)) });
+        } else if (event.nativeEvent.layout.height > available || (rendered.source.text && !excerpt.text)) latest.current.onPresented(view.reference.revision, false);
+        else {
+          fitted.current = { serial: view.serial, budget: view.budget, focus: excerpt.partial ? { start: excerpt.start, end: excerpt.end } : undefined };
+          notifyIfReady();
+        }
+      }}
+      onEntered={() => {
+        const view = current.current;
+        if (view?.serial !== display.serial || view.budget !== display.budget || view.phase !== 'enter') return;
+        commit({ ...view, phase: 'shown' }); notifyIfReady();
+      }}
+      onExited={() => {
+        const view = current.current;
+        if (view?.serial !== display.serial || view.phase !== 'exit') return;
+        fitted.current = null;
+        commit(null);
+        if (latest.current.source) present(); else dismiss();
+      }}>
+      <View {...passive} style={styles.metadata}><Text {...passive} style={[styles.direction, { color: sent ? '#D8C4F4' : '#D3C5E5' }]}>{referenceDirection(rendered, userId)}</Text></View>
       {rendered.source.kind === 'voice' && <View {...passive} style={styles.metadata}><Text {...passive} style={styles.voice}>◉  Voice message</Text><Text {...passive} style={styles.date}>{status}</Text>{!!rendered.source.text && <Text {...passive} style={styles.date}>Transcript</Text>}</View>}
       {!!rendered.source.text && <View {...passive}>{excerpt.partial && <Text {...passive} style={styles.partial}>Excerpt · {excerpt.end - excerpt.start} of {excerpt.total} characters</Text>}{excerpt.start > 0 && <Text {...passive} style={styles.date}>…</Text>}<Text {...passive} style={styles.body}>{excerpt.text}</Text>{excerpt.end < excerpt.total && <Text {...passive} style={styles.date}>…</Text>}{excerpt.partial && <Text {...passive} style={styles.hint}>Ask Mia for another part</Text>}</View>}
       <Text {...passive} style={styles.date}>{referenceDate(rendered.source.createdAt)}</Text>
-    </Animated.View>}
+    </ShutterCard>}
   </View>;
 }
 const styles = StyleSheet.create({
   region: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 20, alignItems: 'center', justifyContent: 'center' },
   scrim: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: '#000000' },
-  card: { borderRadius: 24, borderWidth: 1, paddingVertical: 18, gap: 12, shadowColor: '#000000', shadowOpacity: .22, shadowRadius: 22, shadowOffset: { width: 0, height: 10 }, elevation: 8 },
+  card: { borderRadius: 24, borderWidth: 1, borderColor: '#684A82', paddingVertical: 18, gap: 12, overflow: 'hidden' },
   metadata: { gap: 3 }, direction: { fontSize: 13, lineHeight: 19, fontWeight: '600' }, date: { fontSize: 12, lineHeight: 18, color: '#C9C0D2' },
   voice: { fontSize: 17, lineHeight: 25, color: '#F5F1FA' }, body: { fontSize: 17, lineHeight: 25, color: '#F5F1FA', fontWeight: '400' },
   partial: { fontSize: 12, lineHeight: 18, color: '#C9C0D2', marginBottom: 6 }, hint: { fontSize: 12, lineHeight: 18, color: '#C9C0D2', marginTop: 8 },

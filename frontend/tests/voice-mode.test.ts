@@ -8,7 +8,7 @@ import { build } from 'esbuild';
 import type { Mia } from '../src/useMia';
 import type { Recording } from '../src/audio/types';
 import type { Frame } from '../src/realtime';
-import type { Contact, Draft, Message, ServerEvent, Turn } from '../src/types';
+import type { Contact, Draft, Message, MessageReference, ServerEvent, Turn } from '../src/types';
 import { pressGesture } from './pressability';
 
 // Run the real hook, API and conversation loop. Only OS audio, secure storage
@@ -27,9 +27,18 @@ const sources: Record<string, string> = {
     export const Platform = { OS: 'ios' };
     export const useWindowDimensions = () => n.dimensions;
     export const PanResponder = { create: handlers => { n.backGesture = handlers; return { panHandlers: {} }; } };
-    export const Easing = { inOut: value => value, sin: x => x, linear: x => x };
-    const animation = () => ({ start(callback) { if (callback) { const finish = () => callback({ finished: true }); if (n.holdAnimation) n.finishAnimation = finish; else finish(); } }, stop() {} });
-    export const Animated = { add: () => 0, Value: class { constructor(value) { this.value = value; } setValue(value) { this.value = value; } stopAnimation() {} interpolate() { return 0; } }, View: 'AnimatedView', loop: animation, sequence: animation, timing: (value, config) => { n.animations.push(config); return animation(); }, spring: animation };
+    export const Easing = { inOut: value => value, sin: x => x, linear: x => x, bezier: () => x => x };
+    const animation = (config, value) => {
+      let stopped = false, completed = false;
+      return { start(callback) { if (callback) {
+        const finish = () => { if (stopped || completed) return; completed = true; if (value && config) value.setValue(config.toValue); callback({ finished: true }); };
+        if (n.holdAnimation) {
+          n.pendingAnimations.push({ config, finish, active: () => !stopped && !completed });
+          n.finishAnimation = () => { const pending = n.pendingAnimations.splice(0); for (const item of pending) item.finish(); };
+        } else finish();
+      } }, stop() { stopped = true; } };
+    };
+    export const Animated = { add: () => 0, Value: class { constructor(value) { this.value = value; } setValue(value) { this.value = value; } stopAnimation() {} interpolate() { return 0; } }, View: 'AnimatedView', loop: animation, sequence: animation, timing: (value, config) => { n.animations.push(config); return animation(config, value); }, spring: animation };
     export const ActivityIndicator='ActivityIndicator', KeyboardAvoidingView='KeyboardAvoidingView', Pressable='Pressable', Modal='Modal', StatusBar='StatusBar', Text='Text', View='View', ScrollView='ScrollView', TextInput='TextInput', FlatList='FlatList', Switch='Switch';
     export const StyleSheet = { create: value => value };
     export const Linking = { openSettings: async () => {} };
@@ -115,7 +124,7 @@ const sources: Record<string, string> = {
     }`,
 };
 const bundle = build({
-  stdin: { contents: `export { useMia } from './src/useMia'; export { default as App } from './src/App'; export { UiProvider, Button } from './src/ui'; export { Reveal } from './src/motion';`, resolveDir: root },
+  stdin: { contents: `export { useMia } from './src/useMia'; export { default as App } from './src/App'; export { UiProvider, Button } from './src/ui'; export { Reveal } from './src/motion'; export { MessageReferenceCard } from './src/screens/MessageReferenceCard';`, resolveDir: root },
   bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react'],
   define: { 'process.env.EXPO_PUBLIC_API_URL': JSON.stringify('http://mia.test') },
   plugins: [{ name: 'native-test', setup(build) {
@@ -213,6 +222,106 @@ test('leaving agent mode fences a pending exact-source reveal and replay cannot 
   } finally { await h.close(); }
 });
 
+test('shutter replacement finishes the old card first, coalesces requests and acknowledges only fully presented content', async () => {
+  const h = await mount(false);
+  let probe: ReactTestRenderer | undefined;
+  const presented: number[] = [];
+  const reference = (id: string, text: string, revision: number): MessageReference => ({
+    chatId: 'anna', messageId: id, revision, recipient: { id: 'recipient', username: 'anna', displayName: 'Anna' },
+    source: { id, chatId: 'anna', senderId: 'recipient', kind: 'text', text, mediaId: null, createdAt: '2026-10-30T12:00:00Z' },
+  });
+  const sample = (source: MessageReference | null, dismissalRevision?: number) => React.createElement(h.components.MessageReferenceCard, {
+    source, userId: 'user', playback: null, dismissalRevision, onPresented: revision => presented.push(revision),
+  });
+  const card = () => probe!.root.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'message-reference-card')[0]!;
+  const text = () => card().findAll(node => node.type === 'Text' as any).map(node => node.props.children).join(' ');
+  const measure = async () => { await act(async () => { card().props.onLayout({ nativeEvent: { layout: { width: 296, height: 180 } } }); }); };
+  const pending = (duration: number, toValue: number) => h.n.pendingAnimations.filter(item => item.active() && item.config.duration === duration && item.config.toValue === toValue);
+  const finish = async (duration: number, toValue: number) => { const batch = pending(duration, toValue); await act(async () => { batch.forEach(item => item.finish()); }); };
+  try {
+    h.n.holdAnimation = true;
+    await act(async () => { probe = create(sample(reference('one', 'First source.', 1))); });
+    const region = probe!.root.findAll(node => node.props.testID === 'message-reference-region')[0]!;
+    await act(async () => { region.props.onLayout({ nativeEvent: { layout: { width: 320, height: 400 } } }); });
+    assert.deepEqual(presented, [], 'measuring and mounting are not a presentation acknowledgement');
+    await measure();
+    const incoming = pending(650, 1);
+    assert.equal(incoming.length, 6);
+    assert.ok(incoming.every(item => item.config.useNativeDriver && item.config.isInteraction === false));
+    await act(async () => { incoming.slice(0, -1).forEach(item => item.finish()); });
+    assert.deepEqual(presented, [], 'narration waits for the last strip');
+    await act(async () => { incoming.at(-1)!.finish(); });
+    assert.deepEqual(presented, [1]);
+
+    await act(async () => { probe!.update(sample(reference('two', 'Second source.', 2))); });
+    assert.match(text(), /First source/);
+    const outgoing = pending(420, 0);
+    assert.equal(outgoing.length, 6);
+    await act(async () => { probe!.update(sample(reference('three', 'Third source.', 3))); });
+    assert.match(text(), /First source/, 'a newer request cannot replace the outgoing snapshot');
+    await act(async () => { outgoing.slice(0, -1).forEach(item => item.finish()); });
+    assert.match(text(), /First source/);
+    await act(async () => { region.props.onLayout({ nativeEvent: { layout: { width: 0, height: 400 } } }); });
+    await act(async () => { outgoing.at(-1)!.finish(); });
+    assert.equal(probe!.root.findAll(node => node.props.testID === 'message-reference-card').length, 0, 'a temporarily collapsed region waits for geometry');
+    await act(async () => { region.props.onLayout({ nativeEvent: { layout: { width: 320, height: 400 } } }); });
+    assert.match(text(), /Third source/);
+    assert.equal(text().includes('Second source.'), false, 'superseded content is never mounted');
+    assert.deepEqual(presented, [1]);
+    await measure(); await finish(650, 1);
+    assert.deepEqual(presented, [1, 3]);
+
+    await act(async () => { probe!.update(sample(reference('three', 'Other source.', 4))); });
+    assert.match(text(), /Third source/, 'equal-length edits also use exit, then entrance');
+    await finish(420, 0); await measure(); await finish(650, 1);
+    assert.deepEqual(presented, [1, 3, 4]);
+
+    await act(async () => { probe!.update(sample(reference('four', 'Never narrated.', 5))); });
+    await finish(420, 0); await measure();
+    const cancelledEntrance = pending(650, 1);
+    await act(async () => { probe!.update(sample(null, 6)); });
+    await act(async () => { cancelledEntrance.forEach(item => item.finish()); });
+    assert.deepEqual(presented, [1, 3, 4], 'a cancelled entrance cannot start narration');
+    await finish(420, 0);
+    assert.equal(probe!.root.findAll(node => node.props.testID === 'message-reference-card').length, 0);
+    assert.deepEqual(presented, [1, 3, 4], 'dismissal also waits for its backdrop');
+    await finish(220, 0);
+    assert.deepEqual(presented, [1, 3, 4, 6]);
+
+    await act(async () => { probe!.update(sample(reference('five', 'Unmounted source.', 7))); });
+    await measure();
+    await act(async () => { probe!.unmount(); }); probe = undefined;
+    await act(async () => { h.n.finishAnimation!(); });
+    assert.deepEqual(presented, [1, 3, 4, 6], 'late native callbacks cannot revive an unmounted card');
+  } finally { if (probe) await act(async () => { probe!.unmount(); }); await h.close(); }
+});
+
+test('shutter switches to a short whole-card fade under Reduce Motion without acknowledging hidden text', async () => {
+  const h = await mount(false);
+  let probe: ReactTestRenderer | undefined;
+  const presented: number[] = [];
+  try {
+    await act(async () => { h.n.reducedMotion = true; for (const handler of h.n.motionHandlers) handler(true); });
+    h.n.holdAnimation = true;
+    const source: MessageReference = {
+      chatId: 'anna', messageId: 'reduced', revision: 8, recipient: { id: 'recipient', username: 'anna', displayName: 'Anna' },
+      source: { id: 'reduced', chatId: 'anna', senderId: 'recipient', kind: 'text', text: 'Still readable.', mediaId: null, createdAt: '2026-10-30T12:00:00Z' },
+    };
+    await act(async () => { probe = create(React.createElement(h.components.MessageReferenceCard, { source, userId: 'user', playback: null, onPresented: revision => presented.push(revision) })); });
+    const region = probe!.root.findAll(node => node.props.testID === 'message-reference-region')[0]!;
+    await act(async () => { region.props.onLayout({ nativeEvent: { layout: { width: 320, height: 400 } } }); });
+    const card = probe!.root.findAll(node => node.props.testID === 'message-reference-card')[0]!;
+    await act(async () => { card.props.onLayout({ nativeEvent: { layout: { width: 296, height: 180 } } }); });
+    assert.equal(probe!.root.findAll(node => node.props.testID?.startsWith('message-reference-strip-')).length, 0);
+    assert.deepEqual(presented, []);
+    const fade = h.n.pendingAnimations.filter(item => item.active() && item.config.duration === 80 && item.config.toValue === 1);
+    assert.equal(fade.length, 1);
+    await act(async () => { fade[0]!.finish(); });
+    assert.deepEqual(presented, [8]);
+    assert.equal(h.n.animations.some(animation => animation.duration === 10000), false, 'the contour stays still');
+  } finally { if (probe) await act(async () => { probe!.unmount(); }); await h.close(); }
+});
+
 test('original recording reports real completion and stop or mute bypass the presentation queue', async () => {
   const h = await mount(true, false, true);
   try {
@@ -275,6 +384,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     motionHandlers: new Set<(value: boolean) => void>(), animations: [] as { duration: number; useNativeDriver: boolean; toValue: number }[],
     keyboardHandlers: new Map<string, () => void>(), insets: { top: 47, bottom: 34, left: 0, right: 0 },
     backGesture: null as Record<string, (...args: any[]) => any> | null, holdAnimation: false, finishAnimation: null as (() => void) | null,
+    pendingAnimations: [] as { config: { duration: number; toValue: number; delay?: number; useNativeDriver: boolean; isInteraction?: boolean }; finish(): void; active(): boolean }[],
     savedContacts: [] as Contact[],
     savedDrafts: [] as Draft[],
     holdContacts: false, contactsHeld: false, releaseContacts: null as (() => void) | null,
@@ -347,7 +457,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     if (path.startsWith('/v1/device-actions/')) return response({});
     throw new Error(`Unexpected API call: ${method} ${path}`);
   };
-  const module = { exports: {} as { useMia: () => Mia; App: React.ComponentType; UiProvider: React.ComponentType<any>; Button: React.ComponentType<any>; Reveal: React.ComponentType<any> } };
+  const module = { exports: {} as { useMia: () => Mia; App: React.ComponentType; UiProvider: React.ComponentType<any>; Button: React.ComponentType<any>; Reveal: React.ComponentType<any>; MessageReferenceCard: React.ComponentType<React.ComponentProps<typeof import('../src/screens/MessageReferenceCard').MessageReferenceCard>> } };
   new Function('require', 'module', 'exports', code)(createRequire(import.meta.url), module, module.exports);
   let mia!: Mia; let renderer!: ReactTestRenderer;
   function Host() { mia = module.exports.useMia(); return null; }
