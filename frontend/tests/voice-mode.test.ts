@@ -30,7 +30,7 @@ const sources: Record<string, string> = {
     export const Easing = { inOut: value => value, sin: x => x, linear: x => x, bezier: () => x => x };
     const animation = (config, value) => {
       let stopped = false, completed = false;
-      return { start(callback) { if (callback) {
+      return { config, start(callback) { if (callback) {
         const finish = () => { if (stopped || completed) return; completed = true; if (value && config) value.setValue(config.toValue); callback({ finished: true }); };
         if (n.holdAnimation) {
           n.pendingAnimations.push({ config, finish, active: () => !stopped && !completed });
@@ -38,7 +38,10 @@ const sources: Record<string, string> = {
         } else finish();
       } }, stop() { stopped = true; } };
     };
-    export const Animated = { add: () => 0, Value: class { constructor(value) { this.value = value; } setValue(value) { this.value = value; } stopAnimation() {} interpolate() { return 0; } }, View: 'AnimatedView', loop: animation, sequence: animation, timing: (value, config) => { n.animations.push(config); return animation(config, value); }, spring: animation };
+    export const Animated = { add: () => 0, Value: class { constructor(value) { this.value = value; } setValue(value) { this.value = value; } stopAnimation() {} interpolate() { return 0; } }, View: 'AnimatedView', loop: child => {
+      const loop = { child, started: false, stopped: false }; n.loops.push(loop);
+      return { start() { loop.started = true; }, stop() { loop.stopped = true; } };
+    }, sequence: children => ({ ...animation(), children }), timing: (value, config) => { n.animations.push(config); return animation(config, value); }, spring: animation };
     export const ActivityIndicator='ActivityIndicator', KeyboardAvoidingView='KeyboardAvoidingView', Pressable='Pressable', Modal='Modal', StatusBar='StatusBar', Text='Text', View='View', ScrollView='ScrollView', TextInput='TextInput', FlatList='FlatList', Switch='Switch';
     export const StyleSheet = { create: value => value };
     export const Linking = { openSettings: async () => {} };
@@ -321,6 +324,7 @@ test('shutter replacement finishes the old card first, coalesces requests and ac
   const measure = async () => { await act(async () => { card().props.onLayout({ nativeEvent: { layout: { width: 296, height: 180 } } }); }); };
   const pending = (duration: number, toValue: number) => h.n.pendingAnimations.filter(item => item.active() && item.config.duration === duration && item.config.toValue === toValue);
   const finish = async (duration: number, toValue: number) => { const batch = pending(duration, toValue); await act(async () => { batch.forEach(item => item.finish()); }); };
+  const breathingLoops = () => h.n.loops.filter(loop => loop.child.children?.some((motion: any) => motion.config?.duration === 2000));
   try {
     h.n.holdAnimation = true;
     await act(async () => { probe = create(sample(reference('one', 'First source.', 1))); });
@@ -333,11 +337,24 @@ test('shutter replacement finishes the old card first, coalesces requests and ac
     assert.ok(incoming.every(item => item.config.useNativeDriver && item.config.isInteraction === false));
     await act(async () => { incoming.slice(0, -1).forEach(item => item.finish()); });
     assert.deepEqual(presented, [], 'narration waits for the last strip');
+    assert.equal(breathingLoops().length, 0, 'idle motion must not run over an unfinished entrance');
     await act(async () => { incoming.at(-1)!.finish(); });
     assert.deepEqual(presented, [1]);
+    const breath = breathingLoops().at(-1)!;
+    assert.equal(breath.started, true); assert.equal(breath.stopped, false);
+    assert.deepEqual(breath.child.children.map((motion: any) => [motion.config.toValue, motion.config.duration]), [[1.04, 2000], [1, 2000]]);
+    assert.ok(breath.child.children.every((motion: any) => motion.config.useNativeDriver && motion.config.isInteraction === false));
+    await act(async () => { h.n.reducedMotion = true; for (const handler of h.n.motionHandlers) handler(true); });
+    assert.equal(breath.stopped, true);
+    const shell = probe!.root.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'message-reference-shutter')[0]!;
+    assert.equal(shell.props.style.transform[0].scale.value, 1);
+    assert.deepEqual(presented, [1], 'changing idle motion cannot repeat presentation acknowledgement');
+    await act(async () => { h.n.reducedMotion = false; for (const handler of h.n.motionHandlers) handler(false); });
+    const resumedBreath = breathingLoops().at(-1)!; assert.equal(resumedBreath.stopped, false);
 
     await act(async () => { probe!.update(sample(reference('two', 'Second source.', 2))); });
     assert.match(text(), /First source/);
+    assert.equal(resumedBreath.stopped, true, 'outgoing card stops its idle loop before shutter exit');
     const outgoing = pending(420, 0);
     assert.equal(outgoing.length, 6);
     await act(async () => { probe!.update(sample(reference('three', 'Third source.', 3))); });
@@ -376,6 +393,7 @@ test('shutter replacement finishes the old card first, coalesces requests and ac
     await act(async () => { probe!.unmount(); }); probe = undefined;
     await act(async () => { h.n.finishAnimation!(); });
     assert.deepEqual(presented, [1, 3, 4, 6], 'late native callbacks cannot revive an unmounted card');
+    assert.ok(breathingLoops().every(loop => loop.stopped), 'unmount must leave no idle loop running');
   } finally { if (probe) await act(async () => { probe!.unmount(); }); await h.close(); }
 });
 
@@ -402,6 +420,7 @@ test('shutter switches to a short whole-card fade under Reduce Motion without ac
     await act(async () => { fade[0]!.finish(); });
     assert.deepEqual(presented, [8]);
     assert.equal(h.n.animations.some(animation => animation.duration === 10000), false, 'the contour stays still');
+    assert.equal(h.n.animations.some(animation => animation.duration === 2000), false, 'breathing stays disabled under Reduce Motion');
   } finally { if (probe) await act(async () => { probe!.unmount(); }); await h.close(); }
 });
 
@@ -489,6 +508,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     appStateHandlers: new Set<(state: string) => void>(), announcements: [] as string[], vibrations: 0,
     dimensions: { width: 390, height: 844, scale: 3, fontScale: 1 }, reducedMotion: false,
     motionHandlers: new Set<(value: boolean) => void>(), animations: [] as { duration: number; useNativeDriver: boolean; toValue: number }[],
+    loops: [] as { child: any; started: boolean; stopped: boolean }[],
     keyboardHandlers: new Map<string, () => void>(), insets: { top: 47, bottom: 34, left: 0, right: 0 },
     backGesture: null as Record<string, (...args: any[]) => any> | null, holdAnimation: false, finishAnimation: null as (() => void) | null,
     pendingAnimations: [] as { config: { duration: number; toValue: number; delay?: number; useNativeDriver: boolean; isInteraction?: boolean }; finish(): void; active(): boolean }[],

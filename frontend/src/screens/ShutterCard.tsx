@@ -5,15 +5,17 @@ const strips = 6;
 const passive = { pointerEvents: 'none' as const, accessible: false, accessibilityElementsHidden: true, importantForAccessibility: 'no-hide-descendants' as const };
 export type ShutterPhase = 'enter' | 'shown' | 'exit';
 
-/** Clip full-size copies instead of scaling text or animating layout on the JS thread. */
-export function ShutterCard({ children, width, phase, reduced, style, onLayout, onEntered, onExited }: {
-  children: React.ReactNode; width: number; phase: ShutterPhase; reduced: boolean; style: StyleProp<ViewStyle>;
+/** Reveal clipped full-size copies, then give the shown card a small native idle scale. */
+export function ShutterCard({ children, width, maximumHeight, phase, reduced, style, onLayout, onEntered, onExited }: {
+  children: React.ReactNode; width: number; maximumHeight: number; phase: ShutterPhase; reduced: boolean; style: StyleProp<ViewStyle>;
   onLayout(event: LayoutChangeEvent): void; onEntered(): void; onExited(): void;
 }) {
   const [height, setHeight] = useState(0);
   const bands = useRef(Array.from({ length: strips }, () => new Animated.Value(0))).current;
   const opacity = useRef(new Animated.Value(0)).current;
   const orbit = useRef(new Animated.Value(0)).current;
+  const breathing = useRef(new Animated.Value(1)).current;
+  const restingScale = height > 0 ? Math.max(1, Math.min(1.04, maximumHeight / height)) : 1.04;
   const callbacks = useRef({ onEntered, onExited }); callbacks.current = { onEntered, onExited };
   const path = useMemo(() => contourPath(width, height), [width, height]);
 
@@ -40,6 +42,21 @@ export function ShutterCard({ children, width, phase, reduced, style, onLayout, 
     animation.start(); return () => animation.stop();
   }, [reduced, orbit]);
 
+  useEffect(() => {
+    // The reveal owns presentation completion. Idle motion starts afterwards
+    // and never waits on JS frames or holds up narration/device feedback.
+    if (reduced) { breathing.setValue(1); return; }
+    if (phase !== 'shown') {
+      const settle = Animated.timing(breathing, { toValue: 1, duration: 180, useNativeDriver: true, isInteraction: false });
+      settle.start(); return () => settle.stop();
+    }
+    const animation = Animated.loop(Animated.sequence([
+      Animated.timing(breathing, { toValue: restingScale, duration: 2000, easing: Easing.bezier(.45, 0, .55, 1), useNativeDriver: true, isInteraction: false }),
+      Animated.timing(breathing, { toValue: 1, duration: 2000, easing: Easing.bezier(.45, 0, .55, 1), useNativeDriver: true, isInteraction: false }),
+    ]));
+    animation.start(); return () => animation.stop();
+  }, [phase, reduced, restingScale, breathing]);
+
   const surface = <>{children}{height > 0 && <View {...passive} style={styles.contour}>
     <Animated.View {...passive} style={[styles.highlight, { opacity: reduced ? 0 : .75, transform: [
       { translateX: orbit.interpolate({ inputRange: path.stops, outputRange: path.x }) },
@@ -47,7 +64,7 @@ export function ShutterCard({ children, width, phase, reduced, style, onLayout, 
       { rotate: orbit.interpolate({ inputRange: path.stops, outputRange: path.angle }) },
     ] }]} />
   </View>}</>;
-  return <View {...passive} testID="message-reference-shutter" style={{ width }}>
+  return <Animated.View {...passive} testID="message-reference-shutter" style={{ width, transform: [{ scale: breathing }] }}>
     <Animated.View {...passive} testID="message-reference-card" style={[style, { width, opacity: phase === 'shown' ? 1 : reduced ? opacity : 0 }]} onLayout={event => {
       const next = event.nativeEvent.layout.height;
       if (next > 0) setHeight(previous => previous === next ? previous : next);
@@ -63,7 +80,7 @@ export function ShutterCard({ children, width, phase, reduced, style, onLayout, 
         <View {...passive} style={[style, { position: 'absolute', top: -top, left: 0, width, height }]}>{surface}</View>
       </Animated.View>;
     })}
-  </View>;
+  </Animated.View>;
 }
 
 /** Constant-distance samples of the rounded border; only transforms animate. */

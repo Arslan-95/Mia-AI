@@ -95,7 +95,7 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
     setRegion(previous => previous.width === width && previous.height === height ? previous : { width, height });
   }}>
     <Animated.View {...passive} testID="message-reference-scrim" style={[styles.scrim, { opacity: scrim }]} />
-    {display && rendered && excerpt && <ShutterCard key={`${display.serial}/${display.budget}`} width={width} phase={display.phase} reduced={reduced}
+    {display && rendered && excerpt && <ShutterCard key={`${display.serial}/${display.budget}`} width={width} maximumHeight={Math.max(0, region.height - 8)} phase={display.phase} reduced={reduced}
       style={[styles.card, { paddingHorizontal: padding, backgroundColor: sent ? '#2A1E40' : '#211D2B' }]}
       onLayout={event => {
         const view = current.current;
