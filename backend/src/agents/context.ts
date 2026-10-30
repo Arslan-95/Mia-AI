@@ -15,11 +15,18 @@ export const clientContextSchema = z.object({ route: routeSchema, revision: z.in
   reference: referenceSchema.optional(), previousRoute: routeSchema.optional() }).strict();
 export type ClientContext = z.infer<typeof clientContextSchema>;
 export const deviceResultSchema = z.object({ message: z.string().max(500).optional(), mediaId: z.uuid().optional(),
+  code: z.string().regex(/^[A-Z][A-Z0-9_]{0,79}$/).optional(),
+  stage: z.enum(['validation', 'execution', 'presentation', 'narration', 'confirmation']).optional(),
+  presentationConfirmed: z.boolean().optional(),
   reference: referenceSchema.nullable().optional(), context: clientContextSchema.optional(), voice: voiceStateSchema.optional() }).strict();
 
 export function sameContext(left: ClientContext | null, right: ClientContext | null) {
+  const a = left?.reference, b = right?.reference;
+  // Match values, not JSON key order after database serialization. Keep every
+  // navigation/reference revision boundary; voice controls validate separately.
   return left?.route === right?.route && left?.revision === right?.revision && left?.previousRoute === right?.previousRoute
-    && JSON.stringify(left?.reference ?? null) === JSON.stringify(right?.reference ?? null);
+    && a?.chatId === b?.chatId && a?.messageId === b?.messageId && a?.revision === b?.revision
+    && a?.focus?.start === b?.focus?.start && a?.focus?.end === b?.focus?.end;
 }
 
 export async function assertContextAccess(sql: Sql, userId: string, context: ClientContext | null) {

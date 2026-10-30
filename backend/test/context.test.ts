@@ -7,6 +7,64 @@ import { toolsFor } from '../src/agents/tools.js';
 import { MessagingService } from '../src/messaging.js';
 import { phoneSignIn, testApp } from './helpers.js';
 import type { ModelResponse } from '../src/agents/model.js';
+import { clientContextSchema, sameContext } from '../src/agents/context.js';
+
+test('a visible-card request survives JSONB serialization, duplicate retry and phone action validation', async t => {
+  // Load the real phone guard at runtime without joining the two independent
+  // TypeScript projects or bundling frontend modules into the backend build.
+  const { sameContext: phoneSameContext } = await import(new URL('../../frontend/src/navigationContext.ts', import.meta.url).href) as { sameContext: typeof sameContext };
+  const c = await testApp(); t.after(() => c.close());
+  const owner = await phoneSignIn(c.app, '+15550000811', 'context_card_owner');
+  const friend = await phoneSignIn(c.app, '+15550000812', 'context_card_friend');
+  const messaging = new MessagingService(c.db), state = new AssistantState(c.db);
+  const chat = await messaging.createDirectChat(owner.user.id, friend.user.id);
+  const source = await messaging.send(friend.user.id, chat.id, { kind: 'text', text: 'The notebook is on the desk.' }, randomUUID());
+  const other = await messaging.send(friend.user.id, chat.id, { kind: 'text', text: 'Another notebook is on the desk.' }, randomUUID());
+  const session = await state.session(owner.user.id), clientId = randomUUID(), signal = new AbortController().signal;
+  const context = clientContextSchema.parse({ route: `/chat/${chat.id}`, revision: 2, previousRoute: '/mia',
+    reference: { chatId: chat.id, messageId: source.id, revision: 22, focus: { start: 0, end: 12 } } });
+  const accepted = await state.accept(owner.user.id, session.id, clientId, 'Open another chat.', undefined, context);
+  const turn = await state.claim(randomUUID()); assert.ok(turn);
+  const action = await state.action(turn, signal, 'open_chat', { chatId: chat.id });
+  const [event] = await c.db.query<{ context: typeof context }>("SELECT payload->'context' AS context FROM events WHERE type='device.action_requested' AND payload->>'actionId'=$1", [action.id]);
+  assert.ok(event); assert.deepEqual(event.context, accepted.turn.context);
+  assert.equal(sameContext(event.context, context), true);
+  assert.equal(phoneSameContext(event.context, context), true, 'the actual phone guard must accept the stored event');
+  const retry = await state.accept(owner.user.id, session.id, clientId, 'Open another chat.', undefined, context);
+  assert.equal(retry.duplicate, true); assert.equal(retry.turn.id, turn.id);
+  for (const change of [{ revision: 23 }, { messageId: other.id }, { focus: { start: 0, end: 13 } }]) {
+    const changed = { ...context, reference: { ...context.reference!, ...change } };
+    assert.equal(phoneSameContext(event.context, changed), false);
+    await assert.rejects(state.accept(owner.user.id, session.id, clientId, 'Open another chat.', undefined, changed), { status: 409 });
+  }
+  await state.interrupt(owner.user.id, session.id);
+  assert.equal((await state.acknowledgeAction(owner.user.id, action.id, true, { context })).state, 'cancelled');
+});
+
+test('device failures persist their stage and confirmed visible source through the authenticated feedback API', async t => {
+  const c = await testApp(); t.after(() => c.close());
+  const owner = await phoneSignIn(c.app, '+15550000813', 'feedback_owner');
+  const friend = await phoneSignIn(c.app, '+15550000814', 'feedback_friend');
+  const messaging = new MessagingService(c.db), state = new AssistantState(c.db);
+  const chat = await messaging.createDirectChat(owner.user.id, friend.user.id);
+  const source = await messaging.send(friend.user.id, chat.id, { kind: 'text', text: 'The notebook.' }, randomUUID());
+  const session = await state.session(owner.user.id), signal = new AbortController().signal;
+  await state.accept(owner.user.id, session.id, randomUUID(), 'Read her message.');
+  const turn = await state.claim(randomUUID()); assert.ok(turn);
+  const action = await state.action(turn, signal, 'show_message', { chatId: chat.id, messageId: source.id, narration: 'The notebook.' });
+  const reference = { chatId: chat.id, messageId: source.id, revision: 1 };
+  const feedback = { code: 'TTS_UNAVAILABLE', stage: 'narration', presentationConfirmed: true,
+    message: 'We could not play the response.', reference, context: { route: `/chat/${chat.id}`, revision: 1, reference } };
+  const url = `/v1/device-actions/${action.id}/result`, headers = { authorization: `Bearer ${owner.token}` };
+  assert.equal((await c.app.inject({ method: 'POST', url, headers: { authorization: `Bearer ${friend.token}` }, payload: { success: false, result: feedback } })).statusCode, 404);
+  assert.equal((await c.app.inject({ method: 'POST', url, headers, payload: { success: false, result: { ...feedback, stage: 'invented' } } })).statusCode, 400);
+  const response = await c.app.inject({ method: 'POST', url, headers, payload: { success: false, result: feedback } });
+  assert.equal(response.statusCode, 200, response.body);
+  const [stored] = await c.db.query<{ state: string; result: unknown }>('SELECT state,result FROM device_actions WHERE id=$1', [action.id]);
+  assert.equal(stored!.state, 'failed'); assert.deepEqual(stored!.result, feedback);
+  const [event] = await c.db.query<{ result: unknown }>("SELECT payload->'result' AS result FROM events WHERE type='device.action_completed' AND payload->>'actionId'=$1", [action.id]);
+  assert.deepEqual(event!.result, feedback);
+});
 
 function call(name: string, args: unknown): ModelResponse {
   const callId = randomUUID(); const argumentsText = JSON.stringify(args);

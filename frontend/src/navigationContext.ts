@@ -13,7 +13,12 @@ export function routeView(route: string): { view: View; chatId: string | null } 
   return { view: pageView(route) ?? 'chats', chatId: null };
 }
 export function sameContext(left: ClientContext | null, right: ClientContext | null) {
-  return left?.route === right?.route && left?.revision === right?.revision && left?.previousRoute === right?.previousRoute && JSON.stringify(left?.reference ?? null) === JSON.stringify(right?.reference ?? null);
+  const a = left?.reference, b = right?.reference;
+  // JSONB can reorder object keys. Identity is the values, including the exact
+  // source revision/excerpt; voice state has its own control-revision guard.
+  return left?.route === right?.route && left?.revision === right?.revision && left?.previousRoute === right?.previousRoute
+    && a?.chatId === b?.chatId && a?.messageId === b?.messageId && a?.revision === b?.revision
+    && a?.focus?.start === b?.focus?.start && a?.focus?.end === b?.focus?.end;
 }
 export class NavigationContext {
   private current: ClientContext = { route: '/chats', revision: 0 };

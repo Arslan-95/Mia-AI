@@ -135,6 +135,89 @@ const bundle = build({
 const realFetch = globalThis.fetch;
 const realFormData = globalThis.FormData;
 
+test('retained cards allow subsequent reordered-context actions, same-source reuse, replacement and another chat', async () => {
+  const h = await mount(true, true, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
+    h.n.referenceSources.push(...['first', 'second'].map(id => ({ id, chatId: 'anna', senderId: 'recipient', kind: 'text' as const,
+      text: `The ${id} notebook.`, mediaId: null, createdAt: '2026-10-30T12:00:00Z' })));
+    const jsonb = (value: unknown): any => JSON.parse(JSON.stringify(value, (_key, part) => part && typeof part === 'object' && !Array.isArray(part)
+      ? Object.fromEntries(Object.keys(part).sort((a, b) => a.length - b.length || a.localeCompare(b)).map(key => [key, part[key]])) : part));
+    const accept = async (id: string) => {
+      const context = structuredClone(h.n.frames.filter(frame => frame.type === 'voice.context').at(-1)?.context ?? stream.context);
+      const turn: Turn = { id, sessionId: 'assistant', userId: 'user', generation: h.n.turns.length + 1, userText: 'A new request.',
+        assistantText: null, status: 'running', clientTurnId: `client-${id}`, context: context as any };
+      h.n.turns.push(turn);
+      await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: turn.clientTurnId }); h.n.frame({ type: 'turn.accepted', turn }); });
+      return turn;
+    };
+    const command = async (turn: Turn, id: string, kind: string, payload: Record<string, unknown>, sequence: number, context = jsonb(turn.context)) => {
+      await act(async () => { await h.n.event({ id, type: 'device.action_requested', createdAt: new Date().toISOString(), payload: {
+        actionId: id, sessionId: 'assistant', turnId: turn.id, kind, payload, sequence: String(sequence), expiresIn: 180000, context,
+      } }, 0); });
+    };
+    const result = (id: string) => h.n.requests.find(request => request.path === `/v1/device-actions/${id}/result`)?.body;
+    const layout = async () => {
+      const region = h.tree.findAll(node => node.props.testID === 'message-reference-region')[0]!;
+      await act(async () => { region.props.onLayout({ nativeEvent: { layout: { width: 390, height: 500 } } }); });
+      const card = h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'message-reference-card')[0]!;
+      await act(async () => { card.props.onLayout({ nativeEvent: { layout: { width: 358, height: 250 } } }); });
+      return card;
+    };
+    const first = await accept('first-turn');
+    await command(first, 'first-card', 'show_message', { chatId: 'anna', messageId: 'first' }, 1);
+    await h.wait(() => h.mia.messageReference?.messageId === 'first');
+    const original = await layout(); await h.wait(() => !!result('first-card'));
+    assert.equal(result('first-card').success, true);
+
+    const followUp = await accept('follow-up');
+    assert.ok(followUp.context?.reference);
+    assert.notDeepEqual(Object.keys(jsonb(followUp.context).reference), Object.keys(followUp.context!.reference!));
+    await command(followUp, 'same-card', 'show_message', { chatId: 'anna', messageId: 'first' }, 2);
+    await h.wait(() => !!result('same-card'));
+    assert.equal(result('same-card').success, true);
+    assert.equal(h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'message-reference-card')[0], original,
+      'the same source reuses the displayed card without another entrance');
+    await command(followUp, 'replacement', 'show_message', { chatId: 'anna', messageId: 'second' }, 3);
+    await h.wait(() => h.mia.messageReference?.messageId === 'second');
+    await layout(); await h.wait(() => !!result('replacement'));
+    assert.equal(result('replacement').success, true);
+
+    const next = await accept('next-turn');
+    await command(next, 'wrong-context', 'open_chat', { chatId: 'ben' }, 4,
+      { ...jsonb(next.context), reference: { ...jsonb(next.context).reference, messageId: 'another' } });
+    await h.wait(() => !!result('wrong-context'));
+    assert.equal(result('wrong-context').success, false);
+    assert.equal(result('wrong-context').result.code, 'ACTION_CONTEXT_CHANGED');
+    assert.equal(result('wrong-context').result.stage, 'validation');
+    assert.equal(h.mia.activeChatId, 'anna');
+
+    h.n.failSpeech = true;
+    await command(next, 'speech-failure', 'show_message', { chatId: 'anna', messageId: 'second', narration: 'The notebook.' }, 5);
+    await h.wait(() => !!result('speech-failure'));
+    const failedSpeech = result('speech-failure');
+    assert.equal(failedSpeech.success, false); assert.equal(failedSpeech.result.code, 'TTS_UNAVAILABLE');
+    assert.equal(failedSpeech.result.stage, 'narration'); assert.equal(failedSpeech.result.presentationConfirmed, true);
+    assert.equal(failedSpeech.result.reference.messageId, 'second'); assert.equal(h.mia.messageReference?.messageId, 'second');
+
+    const region = h.tree.findAll(node => node.props.testID === 'message-reference-region')[0]!;
+    await act(async () => { region.props.onLayout({ nativeEvent: { layout: { width: 390, height: 90 } } }); });
+    const speechRequests = h.n.frames.filter(frame => frame.type === 'speech.request').length;
+    await command(next, 'no-space', 'show_message', { chatId: 'anna', messageId: 'first', narration: 'The notebook.' }, 6);
+    await h.wait(() => !!result('no-space'));
+    assert.equal(result('no-space').success, false); assert.equal(result('no-space').result.code, 'PRESENTATION_NO_SPACE');
+    assert.equal(result('no-space').result.stage, 'presentation'); assert.equal(result('no-space').result.presentationConfirmed, false);
+    assert.equal(result('no-space').result.reference, null);
+    assert.equal(h.n.frames.filter(frame => frame.type === 'speech.request').length, speechRequests, 'failed presentation never starts narration');
+    h.n.savedChats.push({ ...chat, id: 'ben', recipient: { ...chat.recipient, id: 'ben-user', displayName: 'Ben', username: 'ben' } });
+    await command(next, 'open-ben', 'open_chat', { chatId: 'ben' }, 7);
+    await h.wait(() => !!result('open-ben'));
+    assert.equal(result('open-ben').success, true); assert.equal(h.mia.activeChatId, 'ben'); assert.equal(h.mia.messageReference, null);
+    assert.equal(result('open-ben').result.context.route, '/chat/ben');
+  } finally { await h.close(); }
+});
+
 test('exact old references stay passive and retained while source-specific narration and replacements await actual audio completion', async () => {
   const h = await mount(true, true, true);
   try {
@@ -390,6 +473,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     holdContacts: false, contactsHeld: false, releaseContacts: null as (() => void) | null,
     history: [] as Message[],
     referenceSources: [] as Message[],
+    savedChats: [chat],
     holdPeopleSearch: false,
     failPreferences: false,
     holdStartup, releaseStartupMode: null as (() => void) | null, releaseStartupSession: null as (() => void) | null,
@@ -415,7 +499,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
       }
       return response({ capabilities: { agent: true, speechRecognition: true, speechSynthesis: true } });
     }
-    if (path === '/v1/chats') return response(method === 'POST' ? { id: chat.id } : [chat]);
+    if (path === '/v1/chats') return response(method === 'POST' ? { id: chat.id } : n.savedChats);
     if (path.startsWith('/v1/users?query=')) {
       if (n.holdPeopleSearch) return new Promise((resolve, reject) => {
         n.peopleSearches.push({ query: decodeURIComponent(path.split('query=')[1]!), signal: init!.signal!, resolve, reject });
@@ -430,6 +514,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     if (path === '/v1/chats/anna') return response(chat);
     if (path.startsWith('/v1/chats/anna/messages/')) return response(n.referenceSources.find(source => path.endsWith('/' + source.id)));
     if (path.startsWith('/v1/chats/anna/messages')) return response(n.history);
+    if (path.startsWith('/v1/chats/ben/messages')) return response([]);
     if (path === '/v1/chats/anna/read') return response({});
     if (path === '/v1/drafts') return response(n.savedDrafts);
     if (path === '/v1/assistant/sessions') return response(assistantSession);

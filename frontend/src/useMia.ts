@@ -8,6 +8,7 @@ import { NavigationContext, pageView, routeView, sameContext, viewRoute, type Vi
 import { preferences, sessionStorage } from './storage';
 import { Realtime, type Frame } from './realtime';
 import { PresentationLease, isLiveAction, mergeMessages } from './coordination';
+import { DeviceActionError, deviceActionFailure, type DeviceActionStage } from './deviceActionFeedback';
 import { ChatScrollPositions } from './chatScrollPositions';
 import { Engine } from './audio/engine';
 import { DuplexAudio } from './audio/duplex';
@@ -82,7 +83,7 @@ export function useMia() {
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         if (referencePresentation.current?.revision === revision) referencePresentation.current = null;
-        reject(new UserFacingError('The message could not be displayed. Ask Mia to try again.'));
+        reject(new DeviceActionError('PRESENTATION_TIMEOUT', 'Card presentation was not confirmed; whether it appeared is unknown.'));
       }, 5000);
       referencePresentation.current = { revision, resolve() { clearTimeout(timer); resolve(); }, reject(reason) { clearTimeout(timer); reject(reason); } };
     });
@@ -105,7 +106,7 @@ export function useMia() {
     referencePresentation.current = null;
     if (success) {
       pending.resolve();
-    } else { clearReference(); pending.reject(new UserFacingError('There is not enough space to display that message. Ask Mia to read it.')); }
+    } else { clearReference(); pending.reject(new DeviceActionError('PRESENTATION_NO_SPACE', 'There is not enough space to display that message. Ask Mia to read it.')); }
   }
   const [recording, setRecording] = useState<Recording | null>(null);
   const [recordChatId, setRecordChatId] = useState<string | null>(null); const [devicePrompt, setDevicePrompt] = useState<DeviceAction | null>(null);
@@ -321,15 +322,22 @@ export function useMia() {
     await stopped.catch(fail);
     if (chatId) await loadMessages(chatId).catch(fail);
   }
-  async function acknowledge(action: DeviceAction, success: boolean, result: { message?: string; mediaId?: string; reference?: MessageReferenceIdentity | null }) {
+  async function acknowledge(action: DeviceAction, success: boolean, result: { message?: string; mediaId?: string; reference?: MessageReferenceIdentity | null; code?: string; stage?: DeviceActionStage; presentationConfirmed?: boolean }) {
     await api.request(`/v1/device-actions/${action.actionId}/result`, 'POST', { success, result: { ...result, context: clientSnapshot(),
       ...(['set_voice_mode', 'set_microphone_muted'].includes(action.kind) ? { voice: clientSnapshot().voice } : {}) } });
   }
   async function performAction(action: DeviceAction, epoch = lease.snapshot()) {
-    const valid = () => lease.current(epoch) && sameContext(action.context ?? null, requestContext.current)
-      && foreground.current && Date.now() - Date.parse(action.createdAt) < (action.expiresIn ?? 18000);
+    let stage: DeviceActionStage = 'validation';
+    let presentationConfirmed = false;
+    const assertValid = () => {
+      if (!lease.current(epoch)) throw new DeviceActionError('ACTION_SUPERSEDED', 'A newer request or manual navigation cancelled this device action.');
+      if (!sameContext(action.context ?? null, requestContext.current)) throw new DeviceActionError('ACTION_CONTEXT_CHANGED', 'This action belongs to a different request view. It was not applied.');
+      if (!foreground.current) throw new DeviceActionError('APP_NOT_ACTIVE', 'The application is not in the foreground.');
+      if (!(Date.now() - Date.parse(action.createdAt) < (action.expiresIn ?? 18000))) throw new DeviceActionError('ACTION_EXPIRED', 'This device action expired before it could finish.');
+    };
+    const valid = () => { try { assertValid(); return true; } catch { return false; } };
     try {
-      if (!valid()) throw new Error('This device request belongs to a previous view.');
+      assertValid(); stage = 'execution';
       if (action.kind === 'show_message') {
         if (!aiModeRef.current || typeof action.payload.chatId !== 'string' || typeof action.payload.messageId !== 'string') throw new CancelledError();
         const operation = referenceEpoch.current;
@@ -338,37 +346,43 @@ export function useMia() {
           api.request<Chat>(`/v1/chats/${chatId}`),
           api.request<Message>(`/v1/chats/${chatId}/messages/${messageId}`),
         ]);
-        if (!valid() || operation !== referenceEpoch.current || !chat || source.id !== messageId || source.chatId !== chatId) throw new CancelledError();
+        assertValid();
+        if (operation !== referenceEpoch.current || !chat || source.id !== messageId || source.chatId !== chatId) throw new CancelledError();
         // Keep the source out of the paginated recent timeline. Open real chat first.
         setChats(previous => [...previous.filter(item => item.id !== chat.id), chat]);
         setView('chats', chat.id);
         await loadMessages(chat.id);
-        if (!valid() || !aiModeRef.current || state.current.activeChatId !== chatId) throw new CancelledError();
+        assertValid();
+        if (!aiModeRef.current || state.current.activeChatId !== chatId) throw new CancelledError();
         const focus = action.payload.focus as { start: number; end: number } | undefined;
         if (focus && (!Number.isInteger(focus.start) || !Number.isInteger(focus.end) || focus.start < 0 || focus.end <= focus.start || focus.end > (source.text?.length ?? 0))) throw new Error('Invalid source excerpt.');
         const revision = Number(action.sequence ?? Date.now());
         const value: MessageReference = { chatId, messageId, revision, source, recipient: chat.recipient, ...(focus ? { focus } : {}) };
         const presented = awaitReferencePresentation(revision);
         reference.current = value; setMessageReference(value); publishVoiceState();
+        stage = 'presentation';
         await presented;
-        if (!valid()) throw new CancelledError();
+        presentationConfirmed = true;
+        assertValid();
         if (typeof action.payload.narration === 'string' && action.payload.narration) {
+          stage = 'narration';
           setVoicePhase('speaking'); await speak({ id: action.turnId, status: 'running' } as Turn, undefined, action.actionId);
         }
-        if (!valid()) throw new CancelledError();
-        await acknowledge(action, true, { message: 'Exact source displayed; requested narration finished.', reference: referenceIdentity() });
+        assertValid(); stage = 'confirmation';
+        await acknowledge(action, true, { message: 'Exact source displayed; requested narration finished.', reference: referenceIdentity(), presentationConfirmed });
       } else if (action.kind === 'dismiss_message') {
         const revision = Number(action.sequence ?? Date.now());
         if (reference.current) {
+          stage = 'presentation';
           const presented = awaitReferencePresentation(revision);
           reference.current = null; setMessageReference(null); publishVoiceState();
           await presented;
         }
-        if (!valid()) throw new CancelledError();
+        assertValid(); stage = 'confirmation';
         await acknowledge(action, true, { message: 'Reference dismissed.', reference: null });
       } else if (action.kind === 'set_voice_mode'  || action.kind === 'set_microphone_muted') {
         const ownPrevious = appliedVoiceControl.current?.turnId === action.turnId && appliedVoiceControl.current.revision === voiceControlRevision.current;
-        if (!action.context?.voice || action.context.voice.revision !== voiceControlRevision.current && !ownPrevious) throw new Error('Voice controls changed after that request.');
+        if (!action.context?.voice || action.context.voice.revision !== voiceControlRevision.current && !ownPrevious) throw new DeviceActionError('VOICE_STATE_CHANGED', 'Voice controls changed after that request.');
         if (action.kind === 'set_voice_mode') {
           if (typeof action.payload.enabled !== 'boolean') throw new Error('Voice mode state is missing.');
           const enabled = action.payload.enabled;
@@ -396,21 +410,21 @@ export function useMia() {
         // Load page data before presentation, then recheck ownership: manual
         // navigation during the request must not be overtaken by this action.
         if (next === 'chats' || next === 'people' || next === 'drafts') await refresh();
-        if (!valid()) throw new Error('This device request is no longer current.');
+        assertValid();
         // Keep the original request context and lease so later actions from
         // this same turn can continue after the agent changes the visible page.
         setView(next);
         await acknowledge(action, true, { message: 'Page opened.' });
       } else if (action.kind === 'open_chat' && typeof action.payload.chatId === 'string') {
         const list = await api.request<Chat[]>('/v1/chats');
-        if (!valid()) throw new Error('This device request is no longer current.');
+        assertValid();
         const chat = list.find(item => item.id === action.payload.chatId); if (!chat) throw new Error('The requested chat is unavailable.');
         if (state.current.audioState === 'playing' || state.current.audioState === 'loading') await stopAudio();
-        if (!valid()) throw new Error('This device request is no longer current.');
+        assertValid();
         setChats(list); setView('chats', chat.id);
         // Acknowledge after history is actually loaded for the visible chat.
         await loadMessages(chat.id);
-        if (!lease.current(epoch)) throw new Error('A newer conversation is active.');
+        assertValid();
         await acknowledge(action, true, { message: 'Chat opened.' });
       } else if (action.kind === 'stop_audio') {
         if (state.current.audioState === 'playing' || state.current.audioState === 'loading') await stopAudio();
@@ -422,7 +436,8 @@ export function useMia() {
         if (captureActive) { setManualAudio(true); await conversation.stop(); }
         try {
           await playMedia(mediaId, () => { if (valid()) setOriginalPlayback({ mediaId, operationId, state: 'playing' }); }, valid, operationId);
-          if (!valid() || originalOperation.current !== operationId) throw new CancelledError();
+          assertValid();
+          if (originalOperation.current !== operationId) throw new CancelledError();
           originalOperation.current = null; setOriginalPlayback({ mediaId, operationId, state: 'finished' });
           await acknowledge(action, true, { message: 'Original recording finished playing on this device.' });
         } catch (reason) {
@@ -432,7 +447,10 @@ export function useMia() {
       } else if (action.kind === 'record_voice') {
         setDevicePrompt(action);
       } else throw new Error('This device action is not supported.');
-    } catch (reason) { await acknowledge(action, false, { message: userErrorMessage(reason) ?? 'The action was cancelled.' }).catch(fail); }
+    } catch (reason) {
+      await acknowledge(action, false, { ...deviceActionFailure(reason, stage), reference: referenceIdentity() ?? null,
+        ...(action.kind === 'show_message' ? { presentationConfirmed } : {}) }).catch(fail);
+    }
   }
   handlers.current.onEvent = async (event, connectedAt, replayed) => {
     if (replayed) return;
