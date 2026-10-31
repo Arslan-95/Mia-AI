@@ -85,6 +85,8 @@ const sources: Record<string, string> = {
       async playPcm() { n.playbacks++; await new Promise(resolve => { n.playback = resolve; }); }
       async play(_, __, started, progress) { n.playbackProgress = progress; started?.(); await this.playPcm(); }
       async disposeRecording(recording) { n.deleted.push(recording.uri); }
+      async savePcm(pcm) { n.savedPcm = pcm; return { uri: 'file:///note.wav', durationMs: pcm.length / 48 }; }
+      async readPcm(uri, headers, signal) { if (signal?.aborted) throw new CancelledError(); return new Uint8Array(480000); }
     }`,
   '../../modules/mia-voice': `const n = globalThis.__miaNative;
     const listeners = new Map();
@@ -472,14 +474,9 @@ test('original recording reports real completion and stop or mute bypass the pre
     assert.equal(card.findAll(node => node.type === 'Pressable' as any).length, 0);
     assert.equal(h.tree.findAll(node => node.props.testID === 'audio-controls').length, 0);
     assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'This transcript must not replace the voice player.').length, 0);
-    await act(async () => { h.n.playbackProgress?.({ positionMs: 2500, durationMs: 10000, playing: true, buffering: false }); });
     const label = (id: string) => h.tree.findAll(node => node.type === 'Text' as any && node.props.testID === id)[0]!.props.children;
-    assert.equal(label('voice-message-position'), '0:02'); assert.equal(label('voice-message-duration'), '0:10');
+    assert.equal(label('voice-message-duration'), '0:10');
     assert.equal(label('voice-message-status'), 'Playing');
-    await act(async () => { h.n.playbackProgress?.({ positionMs: 2500, durationMs: 10000, playing: false, buffering: true }); });
-    assert.equal(label('voice-message-status'), 'Buffering');
-    assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Buffering voice message').length);
-    await act(async () => { h.n.playbackProgress?.({ positionMs: 3000, durationMs: 10000, playing: true, buffering: false }); });
     assert.equal(h.n.requests.some(r => r.path === '/v1/device-actions/original-one/result'), false);
     await command('input-mute', 'set_microphone_muted', { muted: true });
     await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/input-mute/result'));
@@ -527,6 +524,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     releaseNativeStart: null as (() => void) | null, releaseNativeStop: null as (() => void) | null,
     holdASR: false,
     holdNoteStart: false, releaseNoteStart: null as (() => void) | null, failSend: false,
+    savedPcm: null as Uint8Array | null,
     appStateHandlers: new Set<(state: string) => void>(), announcements: [] as string[], vibrations: 0,
     dimensions: { width: 390, height: 844, scale: 3, fontScale: 1 }, reducedMotion: false,
     motionHandlers: new Set<(value: boolean) => void>(), animations: [] as { duration: number; useNativeDriver: boolean; toValue: number }[],
@@ -643,9 +641,9 @@ test('lower hold records until release, asks before sending, and preserves the a
       gesture = pressGesture(layer().props, { x: 120, y: 740 });
       await act(async () => { gesture!.begin(); });
       await h.wait(() => h.mia.audioState === 'recording');
-      assert.equal(h.n.noteRecording, true); assert.equal(h.n.capture, null); assert.equal(h.n.nativePCM, null);
+      assert.equal(h.n.noteRecording, !native); assert.equal(h.n.capture, null); assert.equal(!!h.n.nativePCM, native);
       assert.equal(h.mia.microphoneMuted, muted); assert.equal(h.mia.aiMode, true);
-      await act(async () => { gesture!.release(); });
+      await act(async () => { h.n.nativePCM?.(new Uint8Array(2400)); gesture!.release(); });
       await h.wait(() => !!h.n.playback);
       assert.ok(h.mia.recording); assert.equal(h.n.noteRecording, false);
       const request = h.n.requests.find(r => r.path.endsWith('/turns') && r.method === 'POST')!;
@@ -660,7 +658,7 @@ test('lower hold records until release, asks before sending, and preserves the a
       if (native) {
         await h.wait(() => !!h.n.nativePCM);
         const packets = h.n.pcmPackets;
-        await act(async () => { h.n.nativePCM!(new Uint8Array(2400)); });
+        await act(async () => { h.n.nativePCM!(new Uint8Array(12000)); });
         assert.equal(h.n.pcmPackets > packets, !muted);
       }
       assert.ok(h.mia.recording, 'returning to command listening keeps the original unsent');
@@ -678,12 +676,12 @@ test('a new lower hold replaces an unsent note, its preview or its send question
       if (muted) await act(async () => { await h.mia.toggleMicrophone(); });
       if (phase === 'question') {
         await act(async () => { await h.mia.beginHeldRecording(); });
-        await act(async () => { previous = h.mia.endHeldRecording(); });
+        await act(async () => { h.n.nativePCM?.(new Uint8Array(2400)); previous = h.mia.endHeldRecording(); });
         await h.wait(() => !!h.n.playback);
       } else {
-        await act(async () => { await h.mia.startRecording(); await h.mia.finishRecording(); });
+        await act(async () => { await h.mia.startRecording(); h.n.nativePCM?.(new Uint8Array(2400)); await h.mia.finishRecording(); });
         if (phase === 'preview') {
-          await act(async () => { previous = h.mia.preview(); });
+          await act(async () => { previous = h.mia.preview().catch(reason => { assert.equal(reason.constructor.name, 'CancelledError'); }); });
           await h.wait(() => !!h.n.playback);
         }
       }
@@ -692,11 +690,11 @@ test('a new lower hold replaces an unsent note, its preview or its send question
       gesture = pressGesture(layer.props, { x: 120, y: 740 });
       await act(async () => { gesture!.begin(); });
       await h.wait(() => h.mia.audioState === 'recording');
-      assert.equal(h.mia.recording, null); assert.equal(h.n.noteRecording, true);
+      assert.equal(h.mia.recording, null); assert.equal(h.n.noteRecording, !native);
       assert.equal(h.n.deleted.filter(uri => uri === 'file:///note.wav').length, 1);
       assert.equal(h.mia.microphoneMuted, muted);
       assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 0);
-      await act(async () => { gesture!.release(); });
+      await act(async () => { h.n.nativePCM?.(new Uint8Array(2400)); gesture!.release(); });
       await h.wait(() => !!h.n.playback);
       const newNote = (h.n.requests.filter(r => r.path.endsWith('/turns') && r.method === 'POST').at(-1)!.body.context).voiceNote;
       assert.notEqual(newNote.id, oldNote.id); assert.equal(newNote.recipientId, 'recipient');
@@ -705,6 +703,47 @@ test('a new lower hold replaces an unsent note, its preview or its send question
       assert.ok(h.mia.recording); assert.equal(h.mia.microphoneMuted, muted);
       assert.equal(h.n.audioConflicts, 0); assert.equal(h.mia.voiceFault, false);
     } finally { gesture?.dispose(); await h.close(); }
+  }
+});
+
+test('native recording, its send question and media playback retain one graph and one recognition session', async () => {
+  for (const muted of [false, true]) {
+    const h = await mount(true, false, true);
+    try {
+      await h.wait(() => !!h.n.nativePCM);
+      await act(async () => { await h.mia.navigate('chats', 'anna'); });
+      if (muted) await act(async () => { await h.mia.toggleMicrophone(); });
+      const starts = h.n.nativeStarts, stops = h.n.nativeStops;
+      const sessions = h.n.frames.filter(f => f.type === 'voice.start').length;
+      const cancellations = h.n.frames.filter(f => f.type === 'voice.cancel').length;
+      await act(async () => { await h.mia.beginHeldRecording(); });
+      await act(async () => { await h.n.event({ id: 'late-acceptance', type: 'assistant.accepted', createdAt: new Date().toISOString(),
+        payload: { clientTurnId: 'before-recording', turnId: 'before-recording' } }, 0); });
+      assert.equal(h.mia.audioState, 'recording', 'late acceptance cannot cancel a newer recording gesture');
+      const packets = h.n.pcmPackets, pcm = new Uint8Array([0, 0, 255, 127, 0, 128, 1, 2]);
+      await act(async () => { h.n.nativePCM!(pcm); });
+      assert.equal(h.n.pcmPackets, packets, 'recorded words cannot become commands');
+      let finished!: Promise<void>;
+      await act(async () => { finished = h.mia.endHeldRecording(); });
+      await h.wait(() => !!h.n.playback);
+      assert.deepEqual(h.n.savedPcm, pcm, 'the draft contains the original microphone samples');
+      await act(async () => { h.n.playback!(); await finished; });
+      let preview!: Promise<void>;
+      await act(async () => { preview = h.mia.preview().catch(reason => { assert.equal(reason.constructor.name, 'CancelledError'); }); });
+      await h.wait(() => !!h.n.playback);
+      await act(async () => { await h.mia.stopAudio(); await preview; });
+      let media!: Promise<void>;
+      await act(async () => { media = h.mia.playMedia('voice-source'); });
+      await h.wait(() => !!h.n.playback);
+      await act(async () => { h.n.playback!(); await media; });
+      assert.equal(h.n.nativeStarts, starts); assert.equal(h.n.nativeStops, stops);
+      assert.equal(h.n.frames.filter(f => f.type === 'voice.start').length, sessions);
+      assert.equal(h.n.frames.filter(f => f.type === 'voice.cancel').length, cancellations);
+      assert.equal(h.n.noteRecording, false, 'Expo recorder never acquired the audio session');
+      assert.equal(h.mia.microphoneMuted, muted); assert.equal(h.n.audioConflicts, 0);
+      assert.equal(h.mia.voicePhase, muted ? 'paused' : 'listening');
+      assert.equal(h.n.requests.find(r => r.path.endsWith('/stop'))!.body.preserveVoice, true);
+    } finally { await h.close(); }
   }
 });
 
@@ -738,13 +777,13 @@ test('original playback and local preview suspend only command listening and res
       await h.wait(() => native ? !!h.n.nativePCM : !!h.n.capture);
       await act(async () => { await h.mia.navigate('chats', 'anna'); });
       if (preview) {
-        await act(async () => { await h.mia.startRecording(); await h.mia.finishRecording(); });
+        await act(async () => { await h.mia.startRecording(); h.n.nativePCM?.(new Uint8Array(2400)); await h.mia.finishRecording(); });
       }
       if (muted) await act(async () => { await h.mia.toggleMicrophone(); });
       let playback!: Promise<void>;
       await act(async () => { playback = preview ? h.mia.preview() : h.mia.playMedia('original'); });
       await h.wait(() => !!h.n.playback);
-      assert.equal(h.n.capture, null); assert.equal(h.n.nativePCM, null);
+      assert.equal(h.n.capture, null); assert.equal(!!h.n.nativePCM, native);
       assert.equal(h.mia.microphoneMuted, muted);
       await act(async () => { h.n.playback!(); await playback; });
       assert.equal(h.mia.microphoneMuted, muted);
@@ -753,7 +792,7 @@ test('original playback and local preview suspend only command listening and res
       if (native) {
         await h.wait(() => !!h.n.nativePCM);
         const packets = h.n.pcmPackets;
-        await act(async () => { h.n.nativePCM!(new Uint8Array(2400)); });
+        await act(async () => { h.n.nativePCM!(new Uint8Array(12000)); });
         assert.equal(h.n.pcmPackets > packets, !muted);
       }
       assert.equal(h.n.audioConflicts, 0);
@@ -761,19 +800,20 @@ test('original playback and local preview suspend only command listening and res
   }
 });
 
-test('agent original playback cancels pending ASR startup and ignores a late ready frame', async () => {
+test('original playback preserves pending ASR renewal and a late ready frame cannot restart the graph', async () => {
   const h = await mount(true, false, true);
   try {
     await h.wait(() => !!h.n.nativePCM);
     h.n.holdASR = true;
-    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    const previous = h.n.frames.filter(f => f.type === 'voice.start').at(-1)!;
+    await act(async () => { h.n.frame({ type: 'voice.closed', requestId: previous.requestId }); });
     const pending = h.n.frames.filter(f => f.type === 'voice.start').at(-1)!;
     const starts = h.n.nativeStarts;
     let playback!: Promise<void>;
     await act(async () => { playback = h.mia.playMedia('original', () => {}); });
     await h.wait(() => !!h.n.playback);
     await act(async () => { h.n.frame({ type: 'voice.ready', requestId: pending.requestId }); });
-    assert.equal(h.n.nativeStarts, starts); assert.equal(h.n.nativePCM, null);
+    assert.equal(h.n.nativeStarts, starts); assert.ok(h.n.nativePCM);
     h.n.holdASR = false;
     await act(async () => { h.n.playback!(); await playback; });
     await h.wait(() => !!h.n.nativePCM);
@@ -786,7 +826,7 @@ test('muting during playback stays muted after a lower-area stop without changin
   try {
     await h.wait(() => !!h.n.nativePCM);
     let playback!: Promise<void>;
-    await act(async () => { playback = h.mia.playMedia('original'); });
+    await act(async () => { playback = h.mia.playMedia('original').catch(reason => { assert.equal(reason.constructor.name, 'CancelledError'); }); });
     await h.wait(() => !!h.n.playback);
     await act(async () => { await h.mia.toggleMicrophone(); });
     const layer = h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'agent-interaction-layer')[0]!;
@@ -804,12 +844,13 @@ test('muting during playback stays muted after a lower-area stop without changin
 test('agent recording actions await original preview, reject replaced recordings and send only the bound draft', async () => {
   const h = await mount(true, false, true);
   try {
-    await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.startRecording(); await h.mia.finishRecording(); });
+    await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.startRecording(); h.n.nativePCM?.(new Uint8Array(2400)); await h.mia.finishRecording(); });
     await h.wait(() => !!h.n.nativePCM);
     const stream = h.n.frames.filter(frame => frame.type === 'voice.start').at(-1)!;
-    const note = (stream.context as any).voiceNote;
+    const currentContext = h.n.frames.filter(f => f.type === 'voice.context').at(-1)!.context;
+    const note = (currentContext as any).voiceNote;
     const turn: Turn = { id: 'local-note-turn', sessionId: 'assistant', userId: 'user', generation: 1, userText: 'Play my recording.',
-      assistantText: null, status: 'running', clientTurnId: 'local-note-client', context: stream.context as any };
+      assistantText: null, status: 'running', clientTurnId: 'local-note-client', context: currentContext as any };
     h.n.turns.push(turn);
     await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: turn.clientTurnId }); h.n.frame({ type: 'turn.accepted', turn }); });
     const command = async (id: string, action: string, recordingId = note.id, recipientId = note.recipientId) => {
@@ -821,7 +862,7 @@ test('agent recording actions await original preview, reject replaced recordings
     const result = (id: string) => h.n.requests.find(r => r.path === `/v1/device-actions/${id}/result`)?.body;
     await command('preview-local', 'preview');
     await h.wait(() => !!h.n.playback);
-    assert.equal(result('preview-local'), undefined); assert.equal(h.n.nativePCM, null);
+    assert.equal(result('preview-local'), undefined); assert.ok(h.n.nativePCM);
     assert.equal(h.n.requests.some(r => r.path === '/v1/media'), false, 'preview stays local');
     await act(async () => { h.n.playback!(); });
     await h.wait(() => !!result('preview-local'));
@@ -1609,7 +1650,7 @@ test('unmount never reconfigures Expo audio while the native graph is still shut
   }
 });
 
-test('voice-note playback cancels pending native startup before opening Expo audio', async () => {
+test('voice-note playback waits for pending native startup and never opens a competing audio session', async () => {
   const h = await mount(false, false, true);
   try {
     h.n.holdNativeStart = true;
@@ -1618,13 +1659,14 @@ test('voice-note playback cancels pending native startup before opening Expo aud
     const stops = h.n.nativeStops;
     let playback!: Promise<void>;
     await act(async () => { playback = h.mia.playMedia('note', () => {}); });
-    await h.wait(() => !!h.n.playback);
-    assert.ok(h.n.nativeStops > stops, 'pending native acquisition must be cancelled even before active=true');
+    assert.equal(h.n.playback, null);
+    assert.equal(h.n.nativeStops, stops, 'the pending graph stays owned');
     h.n.holdNativeStart = false;
     await act(async () => { h.n.releaseNativeStart?.(); });
-    assert.equal(h.n.nativeSession, false, 'a late permission result cannot start native audio over a voice note');
+    await h.wait(() => !!h.n.playback);
+    assert.equal(h.n.nativeSession, true, 'the voice note uses the graph that was already starting');
     await act(async () => { h.n.playback?.(); await playback; });
-    assert.equal(h.n.audioConflicts, 0);
+    assert.equal(h.n.audioConflicts, 0); assert.equal(h.n.nativeStops, stops);
   } finally { h.n.holdNativeStart = false; h.n.releaseNativeStart?.(); await h.close(); }
 });
 

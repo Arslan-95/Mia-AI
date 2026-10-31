@@ -2,7 +2,7 @@ import { AudioModule, AudioQuality, IOSOutputFormat, createAudioPlayer, setAudio
 import type { AudioPlayer, AudioRecorder } from 'expo-audio';
 import { File, Paths } from 'expo-file-system';
 import type { AudioEngine, Recording, PlaybackProgress } from './types';
-import { pcmWav } from './wav';
+import { pcmWav, playbackPcm } from './wav';
 import { AudioOwnership } from './ownership';
 import { CancelledError, UserFacingError } from '../errors';
 import { UtteranceDetector } from './utterance';
@@ -112,4 +112,21 @@ export class Engine implements AudioEngine {
     try { await this.play(file.uri); } finally { if (file.exists) file.delete(); }
   }
   async disposeRecording(recording: Recording) { const file = new File(recording.uri); if (file.exists) file.delete(); }
+  async savePcm(pcm: Uint8Array): Promise<Recording> {
+    const file = new File(Paths.cache, `mia-note-${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
+    file.write(pcmWav(pcm));
+    return { uri: file.uri, durationMs: Math.ceil(pcm.length / 48) };
+  }
+  async readPcm(uri: string, headers?: Record<string, string>, signal?: AbortSignal) {
+    let bytes: Uint8Array;
+    if (uri.startsWith('file:')) bytes = await new File(uri).bytes();
+    else {
+      const response = await fetch(uri, { headers, signal });
+      if (!response.ok || Number(response.headers.get('content-length')) > 12_000_000) throw new UserFacingError('The voice recording could not be loaded.');
+      bytes = new Uint8Array(await response.arrayBuffer());
+    }
+    if (signal) checkVoice(signal);
+    try { return playbackPcm(bytes); }
+    catch { throw new UserFacingError('The voice recording could not be played.'); }
+  }
 }

@@ -1,6 +1,7 @@
 import MiaVoice from '../../modules/mia-voice';
 import { CancelledError, UserFacingError, VoiceCaptureUnavailable } from '../errors';
 import { PlaybackEchoGate } from './echo';
+import { concatBytes } from './wav';
 
 export class DuplexAudio {
   readonly available = Boolean(MiaVoice && MiaVoice.apiVersion >= 3);
@@ -13,6 +14,7 @@ export class DuplexAudio {
   private subscriptions: { remove(): void }[] = [];
   private inputWatchdog?: ReturnType<typeof setTimeout>;
   private echo = new PlaybackEchoGate();
+  private recording?: { parts: Uint8Array[]; bytes: number };
   constructor(private prepareSession: () => Promise<void> = async () => {}) {}
   async start(onPCM: (bytes: Uint8Array) => void, onInterrupted: () => void, onFailure: (error: unknown) => void) {
     if (!MiaVoice || !this.available) throw new UserFacingError('Update Mia to use voice interruption.');
@@ -29,8 +31,13 @@ export class DuplexAudio {
           lastInput = Date.now(); this.hasInput = true;
           // The shared native graph still owns the speaker. Discard input
           // before decoding/buffering it; muted speech never reaches ASR.
-          if (this.inputMuted) return;
+          if (this.inputMuted && !this.recording) return;
           const bytes = Uint8Array.from(atob(audio), char => char.charCodeAt(0));
+          if (this.recording) {
+            const part = bytes.subarray(0, Math.max(0, 119 * 48000 - this.recording.bytes));
+            if (part.length) { this.recording.parts.push(part); this.recording.bytes += part.length; }
+          }
+          if (this.inputMuted) return;
           for (const part of this.echo.process(bytes)) onPCM(part);
         }
       }),
@@ -90,7 +97,18 @@ export class DuplexAudio {
   }
   async stopPlayback() { if (MiaVoice) await MiaVoice.stopPlayback(); }
   setInputMuted(muted: boolean) { this.inputMuted = muted; this.echo.discardInput(); }
+  startRecording() {
+    if (!this.active) throw new VoiceCaptureUnavailable('Mia’s microphone is not ready yet.');
+    this.recording = { parts: [], bytes: 0 };
+  }
+  finishRecording() {
+    const recording = this.recording; this.recording = undefined;
+    if (!recording?.bytes) throw new UserFacingError('No audio was captured. Please record your message again.');
+    return concatBytes(recording.parts);
+  }
+  cancelRecording() { this.recording = undefined; }
   async stop() {
+    this.cancelRecording();
     const revision = ++this.revision; this.active = false; this.hasInput = false; this.removeListeners(); this.echo.reset();
     const stopped = MiaVoice ? MiaVoice.stop() : Promise.resolve();
     this.stopBarrier = stopped;

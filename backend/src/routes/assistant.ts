@@ -22,8 +22,8 @@ export function registerAssistantRoutes(app: FastifyInstance, assistant: Assista
   });
   app.post('/v1/assistant/sessions/:sessionId/stop', async (request) => {
     const { sessionId } = params.parse(request.params);
-    z.object({}).strict().parse(request.body ?? {});
-    return assistant.interrupt(request.user.id, sessionId);
+    const { preserveVoice } = z.object({ preserveVoice: z.boolean().optional() }).strict().parse(request.body ?? {});
+    return assistant.interrupt(request.user.id, sessionId, undefined, preserveVoice ? 'input' : 'user');
   });
   app.get('/v1/assistant/sessions/:sessionId/turns/:turnId', async (request) => {
     const { sessionId, turnId } = params.extend({ turnId: z.uuid() }).parse(request.params);

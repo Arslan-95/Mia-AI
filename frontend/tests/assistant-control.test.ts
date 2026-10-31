@@ -69,3 +69,26 @@ test('a successful HTTP status alone does not count as a confirmed stop', async 
     }
   } finally { globalThis.fetch = original; }
 });
+
+test('a full stop queued after a recording stop still closes voice and remains a turn barrier', async () => {
+  const original = globalThis.fetch;
+  const bodies: unknown[] = [];
+  let finish!: (response: Response) => void;
+  globalThis.fetch = async (_url, init) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Promise<Response>(resolve => { finish = resolve; });
+  };
+  try {
+    const control = new AssistantControl(), api = new Api('https://mia.example.com', identity);
+    const recording = control.stop(api, 'session-id', true);
+    const full = control.stop(api, 'session-id');
+    let ready = false;
+    const barrier = control.beforeTurn(api, 'session-id').then(() => { ready = true; });
+    assert.deepEqual(bodies, [{ preserveVoice: true }]);
+    finish(Response.json({ sessionId: 'session-id', generation: 4, stopped: true })); await recording;
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    assert.deepEqual(bodies, [{ preserveVoice: true }, {}]); assert.equal(ready, false);
+    finish(Response.json({ sessionId: 'session-id', generation: 5, stopped: true }));
+    await Promise.all([full, barrier]); assert.equal(ready, true);
+  } finally { globalThis.fetch = original; }
+});

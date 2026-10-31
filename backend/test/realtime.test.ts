@@ -345,6 +345,36 @@ test('HTTP stop closes existing recognition but leaves a later voice session usa
   assert.deepEqual(turns.map(turn => turn.text), ['Follow the new voice request.']);
 });
 
+test('recording stop preserves recognition through input mute and later speech on the same session', { timeout: 12_000 }, async t => {
+  let closed = false, starts = 0, recognitionEvent: ((event: RecognitionEvent) => void) | undefined;
+  const speech: SpeechProvider = { recognitionConfigured: true, synthesisConfigured: false,
+    transcribe: async () => '', async *synthesize() { yield new Uint8Array(2); },
+    recognize: async (_keywords, onEvent) => { starts++; recognitionEvent = onEvent; return { write() {}, end() {}, close() { closed = true; } }; } };
+  const context = await testApp({ speech, provider: { configured: true, respond: async () => ({ text: 'Ready.', calls: [], output: [] }) } });
+  t.after(() => context.close());
+  const identity = await phoneSignIn(context.app, '+15550000714', 'persistent_voice');
+  const url = (await context.app.listen({ port: 0, host: '127.0.0.1' })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: identity.token, after: '0' }); const ready = await client.next('ready');
+  const id = randomUUID(); client.send({ type: 'voice.start', requestId: id, sampleRate: 24000, format: 'pcm_s16le' }); await client.next('voice.ready');
+  client.send({ type: 'voice.mute', requestId: id, muted: true, revision: 1 }); client.send({ type: 'ping' }); await client.next('pong');
+  const stopped = await context.app.inject({ method: 'POST', url: `/v1/assistant/sessions/${String(ready.sessionId)}/stop`,
+    headers: { authorization: `Bearer ${identity.token}` }, payload: { preserveVoice: true } });
+  assert.equal(stopped.statusCode, 200);
+  await client.next('event', frame => (frame.event as { type: string }).type === 'assistant.audio_cancelled');
+  assert.equal(closed, false); assert.equal(starts, 1);
+  recognitionEvent?.({ type: 'speechStart', turnId: 1 }); recognitionEvent?.({ type: 'speechComplete', turnId: 1, transcript: 'This belongs in the recording.' });
+  const pongs = client.frames.filter(frame => frame.type === 'pong').length;
+  client.send({ type: 'voice.mute', requestId: id, muted: false, revision: 2 }); client.send({ type: 'ping' });
+  await waitFor(() => client.frames.filter(frame => frame.type === 'pong').length > pongs || undefined);
+  recognitionEvent?.({ type: 'speechStart', turnId: 2 }); recognitionEvent?.({ type: 'speechComplete', turnId: 2, transcript: 'Send my recording.' });
+  await client.next('turn.accepted');
+  assert.equal(starts, 1); assert.equal(closed, false);
+  assert.deepEqual((await context.db.query<{ text: string }>('SELECT user_text AS text FROM assistant_turns')).map(turn => turn.text), ['Send my recording.']);
+  await context.app.inject({ method: 'POST', url: `/v1/assistant/sessions/${String(ready.sessionId)}/stop`, headers: { authorization: `Bearer ${identity.token}` }, payload: {} });
+  await waitFor(() => closed || undefined);
+});
+
 test('WebSocket text and recognized speech carry authorized route snapshots to the model', { timeout: 12_000 }, async (t) => {
   let recognized: ((event: RecognitionEvent) => void) | undefined;
   let recognitionCalls = 0;

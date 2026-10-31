@@ -60,7 +60,7 @@ export class AssistantRuntime {
     return accepted;
   }
 
-  async interrupt(userId: string, sessionId: string, signal?: AbortSignal, reason: 'user' | 'speech' = 'user') {
+  async interrupt(userId: string, sessionId: string, signal?: AbortSignal, reason: 'user' | 'speech' | 'input' = 'user') {
     const result = await this.state.interrupt(userId, sessionId, signal, reason);
     const active = this.active.get(sessionId);
     if (active && active.turn.generation < result.generation) active.controller.abort();

@@ -37,7 +37,8 @@ const bundle = build({
       export class File {
         constructor(...parts) { this.uri = parts.join('/'); }
         get exists() { return n.files.has(this.uri); }
-        write() { n.files.add(this.uri); }
+        write(bytes) { n.files.add(this.uri); n.fileData.set(this.uri, bytes); }
+        async bytes() { return n.fileData.get(this.uri); }
         delete() { n.files.delete(this.uri); }
       }
     ` }));
@@ -46,13 +47,24 @@ const bundle = build({
 
 async function device() {
   const n = { permission: Promise.resolve({ granted: true }), options: {} as any, modes: [] as unknown[], created: 0, released: 0,
-    samples: 0, files: new Set<string>(), level: (_sample: number) => -80, removed: 0, playersReleased: 0, status: (_status: any) => {} };
+    samples: 0, files: new Set<string>(), fileData: new Map<string, Uint8Array>(), level: (_sample: number) => -80, removed: 0, playersReleased: 0, status: (_status: any) => {} };
   (globalThis as any).__miaAudio = n;
   const module = { exports: {} as { Engine: new () => Engine } };
   new Function('require', 'module', 'exports', (await bundle).outputFiles[0]!.text)(createRequire(import.meta.url), module, module.exports);
   return { n, engine: new module.exports.Engine() };
 }
 async function flush() { for (let n = 0; n < 20; n++) await Promise.resolve(); }
+
+test('shared-graph voice-note file IO never changes the audio session or acquires an Expo recorder', async () => {
+  const { n, engine } = await device();
+  try {
+    const pcm = new Uint8Array([0, 0, 255, 127, 0, 128, 1, 2]);
+    const note = await engine.savePcm(pcm);
+    assert.deepEqual(await engine.readPcm(note.uri), pcm);
+    assert.deepEqual(n.modes, []); assert.equal(n.created, 0); assert.equal(n.playersReleased, 0);
+    await engine.disposeRecording(note); assert.equal(n.files.size, 0);
+  } finally { delete (globalThis as any).__miaAudio; }
+});
 
 test('the real audio engine automatically finishes an utterance and preserves its original WAV for recognition', async t => {
   const { n, engine } = await device(); n.level = sample => sample <= 4 ? -30 : -80;

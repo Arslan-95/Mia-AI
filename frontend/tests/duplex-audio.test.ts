@@ -77,6 +77,20 @@ test('input mute drops every microphone packet while leaving native playback and
   await audio.stopPlayback(); await rejected; await audio.stop();
 });
 
+test('voice-note capture receives original PCM while agent input is muted without restarting the graph', async () => {
+  const { audio, native, listeners } = await device(); const heard: Uint8Array[] = [];
+  await audio.start(bytes => heard.push(bytes), () => {}, () => {});
+  audio.setInputMuted(true); audio.startRecording();
+  listeners.get('pcm')!({ audio: 'AAECAw==' }); listeners.get('pcm')!({ audio: 'BAUGBw==' });
+  assert.equal(heard.length, 0);
+  assert.deepEqual([...audio.finishRecording()], [0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(audio.inputMuted, true); assert.equal(audio.active, true); assert.equal(native.starts, 1); assert.equal(native.stopped, 0);
+  audio.startRecording(); listeners.get('pcm')!({ audio: 'AAECAw==' }); audio.cancelRecording();
+  assert.throws(() => audio.finishRecording());
+  audio.setInputMuted(false); listeners.get('pcm')!({ audio: 'CAkKCw==' }); assert.deepEqual([...heard[0]!], [8, 9, 10, 11]);
+  await audio.stop(); delete (globalThis as any).__miaDuplexModule;
+});
+
 test('speaker PCM is gated on the real capture path and input resumes unchanged after playback', async t => {
   const { audio, listeners } = await device(); const heard: Uint8Array[] = [];
   await audio.start(bytes => heard.push(bytes), () => {}, () => {});

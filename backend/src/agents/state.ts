@@ -61,7 +61,7 @@ export class AssistantState {
     });
   }
 
-  async interrupt(userId: string, sessionId: string, signal?: AbortSignal, reason: 'user' | 'speech' = 'user') {
+  async interrupt(userId: string, sessionId: string, signal?: AbortSignal, reason: 'user' | 'speech' | 'input' = 'user') {
     return this.db.transaction(async (sql) => {
       await this.requireSession(userId, sessionId, sql, true);
       throwIfAborted(signal);
