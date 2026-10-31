@@ -86,7 +86,10 @@ const sources: Record<string, string> = {
       async play(_, __, started, progress) { n.playbackProgress = progress; started?.(); await this.playPcm(); }
       async disposeRecording(recording) { n.deleted.push(recording.uri); }
       async savePcm(pcm) { n.savedPcm = pcm; return { uri: 'file:///note.wav', durationMs: pcm.length / 48 }; }
-      async readPcm(uri, headers, signal) { if (signal?.aborted) throw new CancelledError(); return new Uint8Array(480000); }
+      async readPcm(uri, headers, signal) {
+        if (n.holdMediaRead) await new Promise(resolve => { n.releaseMediaRead = resolve; });
+        if (signal?.aborted) throw new CancelledError(); return new Uint8Array(480000);
+      }
     }`,
   '../../modules/mia-voice': `const n = globalThis.__miaNative;
     const listeners = new Map();
@@ -525,6 +528,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     holdASR: false,
     holdNoteStart: false, releaseNoteStart: null as (() => void) | null, failSend: false,
     savedPcm: null as Uint8Array | null,
+    holdMediaRead: false, releaseMediaRead: null as (() => void) | null,
     appStateHandlers: new Set<(state: string) => void>(), announcements: [] as string[], vibrations: 0,
     dimensions: { width: 390, height: 844, scale: 3, fontScale: 1 }, reducedMotion: false,
     motionHandlers: new Set<(value: boolean) => void>(), animations: [] as { duration: number; useNativeDriver: boolean; toValue: number }[],
@@ -703,6 +707,41 @@ test('a new lower hold replaces an unsent note, its preview or its send question
       assert.ok(h.mia.recording); assert.equal(h.mia.microphoneMuted, muted);
       assert.equal(h.n.audioConflicts, 0); assert.equal(h.mia.voiceFault, false);
     } finally { gesture?.dispose(); await h.close(); }
+  }
+});
+
+test('a cancelled delayed media read cannot reopen agent input or reset a newer recording', async () => {
+  for (const preview of [true, false]) for (const muted of [false, true]) {
+    const h = await mount(true, false, true);
+    let playback: Promise<void> | undefined;
+    try {
+      await h.wait(() => !!h.n.nativePCM);
+      await act(async () => {
+        await h.mia.navigate('chats', 'anna');
+        if (muted) await h.mia.toggleMicrophone();
+        if (preview) { await h.mia.startRecording(); h.n.nativePCM!(new Uint8Array(2400)); await h.mia.finishRecording(); }
+      });
+      const starts = h.n.nativeStarts, stops = h.n.nativeStops;
+      h.n.holdMediaRead = true;
+      await act(async () => {
+        playback = (preview ? h.mia.preview() : h.mia.playMedia('original')).catch(reason => {
+          assert.equal(reason.constructor.name, 'CancelledError');
+        });
+      });
+      await h.wait(() => !!h.n.releaseMediaRead);
+      await act(async () => { await h.mia.beginHeldRecording(); });
+      assert.equal(h.mia.audioState, 'recording');
+      await act(async () => { h.n.releaseMediaRead!(); await playback; });
+      assert.equal(h.mia.audioState, 'recording', 'old media completion cannot reset the recorder UI');
+      const packets = h.n.pcmPackets;
+      await act(async () => { h.n.nativePCM!(new Uint8Array(48000)); });
+      assert.equal(h.n.pcmPackets, packets, 'recorded words never go to the agent');
+      assert.equal(h.mia.microphoneMuted, muted);
+      await act(async () => { await h.mia.endHeldRecording(true); });
+      assert.equal(h.mia.voicePhase, muted ? 'paused' : 'listening');
+      assert.equal(h.n.nativeStarts, starts); assert.equal(h.n.nativeStops, stops);
+      assert.equal(h.n.audioConflicts, 0);
+    } finally { h.n.releaseMediaRead?.(); await h.close(); await playback; }
   }
 });
 
@@ -912,6 +951,30 @@ test('failed sends keep the original draft; retry and repeated approval use one 
     const sends = h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST');
     assert.equal(sends.length, 2); assert.equal(sends[0]!.body.clientMessageId, sends[1]!.body.clientMessageId);
     assert.equal(h.n.requests.filter(r => r.path === '/v1/media').length, 1, 'retry keeps the same original media');
+  } finally { await h.close(); }
+});
+
+test('discarding a failed voice note removes its pending retry and preserves unrelated failed messages', async () => {
+  const h = await mount(true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.startRecording(); await h.mia.finishRecording(); });
+    h.n.failSend = true;
+    await act(async () => {
+      await h.mia.sendPending({ chatId: 'anna', clientMessageId: 'unrelated-text', content: { kind: 'text', text: 'Keep this text.' }, status: 'sending' });
+      await assert.rejects(h.mia.useRecording());
+    });
+    assert.equal(h.mia.pending.length, 2); assert.ok(h.mia.recording);
+    const sends = h.n.requests.filter(r => r.path.endsWith('/messages') && r.method === 'POST').length;
+    await act(async () => { await h.mia.discardRecording(); });
+    assert.equal(h.mia.recording, null);
+    assert.deepEqual(h.mia.pending.map(item => item.clientMessageId), ['unrelated-text']);
+    assert.equal((h.n.frames.filter(f => f.type === 'voice.context').at(-1)!.context as any).voiceNote, undefined);
+    assert.equal(h.n.requests.filter(r => r.path.endsWith('/messages') && r.method === 'POST').length, sends, 'discard never sends the voice note');
+    h.n.failSend = false;
+    await act(async () => { await h.mia.sendPending(h.mia.pending[0]!); });
+    const resent = h.n.requests.filter(r => r.path.endsWith('/messages') && r.method === 'POST').at(-1)!;
+    assert.equal(resent.body.clientMessageId, 'unrelated-text'); assert.equal(resent.body.content.kind, 'text');
+    assert.equal(h.mia.pending.length, 0);
   } finally { await h.close(); }
 });
 

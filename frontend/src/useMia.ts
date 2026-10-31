@@ -877,6 +877,10 @@ export function useMia() {
     if (signal) checkVoice(signal);
     const chatId = state.current.activeChatId;
     const recipient = state.current.chats.find(chat => chat.id === chatId)?.recipient ?? null;
+    // The recorder now owns manual audio. A cancelled file/network read may
+    // finish later, but its finally must not reset this recording or unmute ASR.
+    const operation = ++originalAudioEpoch.current;
+    originalMediaActive.current = false;
     setManualAudio(true);
     if (!duplex.available || !aiModeRef.current) await Promise.all([conversation.stop(), stopNativeVoice()]);
     const epoch = lease.snapshot();
@@ -893,7 +897,7 @@ export function useMia() {
       if (signal) checkVoice(signal);
       recordDestination.current = recipient;
       setRecording(null); setAudioState('recording');
-    } catch (error) { if (!signal || !heldRecording.current || heldRecording.current.controller.signal === signal) setManualAudio(false); throw error; }
+    } catch (error) { if (originalAudioEpoch.current === operation && (!signal || !heldRecording.current || heldRecording.current.controller.signal === signal)) setManualAudio(false); throw error; }
   }
   async function beginHeldRecording() {
     if (heldRecording.current || sendingRecording.current || !aiModeRef.current || !foreground.current || state.current.tab !== 'chats' || !state.current.activeChatId) return;
@@ -998,8 +1002,10 @@ export function useMia() {
   }
   async function discardRecording() {
     if (sendingRecording.current) throw new UserFacingError('Wait for your voice note to finish sending.');
+    const pendingId = localVoiceNote.current?.id;
     await stopAudio(); if (recordingRef.current) await audio.current!.disposeRecording(recordingRef.current);
-    setRecording(null); localVoiceNote.current = null; uploadedVoiceNote.current = null; publishVoiceState(); setManualAudio(false);
+    if (pendingId) setPending(items => items.filter(item => item.clientMessageId !== pendingId));
+    setRecording(null); localVoiceNote.current = null; recordDestination.current = null; uploadedVoiceNote.current = null; publishVoiceState(); setManualAudio(false);
   }
   async function preview(fromAgent = false) {
     const value = recordingRef.current; if (!value) return;
