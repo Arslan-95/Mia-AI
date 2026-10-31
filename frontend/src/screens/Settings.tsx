@@ -42,12 +42,12 @@ export function Settings({ mia }: { mia: Mia }) {
           {!stacked && <Icon name="chevron-forward" size={18} color={agent ? colors.accentLight : colors.muted} />}</View>
         {agent && <Text style={s.body}>{mia.aiMode ? 'Mia is with you. Return to your assistant.' : 'Open chats, hear messages and reply hands-free.'}</Text>}
       </Pressable>
-      {agent && <Text style={p.helper}>Tap anywhere to mute. Hold anywhere for 5 seconds to exit.</Text>}</View>
+      {agent && <Text style={p.helper}>Upper 60%: tap to mute Mia, hold 5 seconds to exit. Lower 40%: hold to record in a chat, release to finish.</Text>}</View>
     </ScrollView></Reveal></View>
     <ConfirmationDialog visible={confirmation !== null} busy={busy} onCancel={cancel} onConfirm={() => void confirm()}
       title={confirmation === 'voice' ? 'Enable hands-free voice mode?' : 'Sign out?'}
       description={confirmation === 'voice'
-        ? 'Mia will listen while voice mode is active. Tap anywhere to mute or unmute your microphone. To leave, hold for 5 seconds until it vibrates, or ask Mia and confirm when she checks.'
+        ? 'Mia will listen while voice mode is active. Tap the upper 60% to mute or unmute Mia. Hold the upper area for 5 seconds to exit. In a chat, hold the lower 40% to record a voice note and release to finish. Recording and playback temporarily pause Mia’s listening and preserve your mute choice.'
         : 'Saved messages stay in your account. Unsent messages and recordings on this iPhone will be removed.'}
       confirmLabel={confirmation === 'voice' ? 'Enable voice mode now' : 'Sign out now'}
       destructive={confirmation === 'logout'}

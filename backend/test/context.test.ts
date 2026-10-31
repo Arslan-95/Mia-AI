@@ -73,7 +73,7 @@ function call(name: string, args: unknown): ModelResponse {
 }
 const answer = (text: string): ModelResponse => ({ text, calls: [], output: [] });
 
-test('raw route context is durable, reaches coordinator and specialist, and remains bound to retry content', async (t) => {
+test('raw route context stays durable while verified visible recipient reaches coordinator and specialist', async (t) => {
   const seen: { role: string; context: unknown }[] = [];
   let chatId = '';
   const context = await testApp({ provider: { configured: true, async respond(request) {
@@ -104,7 +104,9 @@ test('raw route context is durable, reaches coordinator and specialist, and rema
   }
   assert.equal(completed, true);
   assert.ok(seen.some(entry => entry.role === 'mia')); assert.ok(seen.some(entry => entry.role === 'messaging'));
-  for (const entry of seen) assert.deepEqual(entry.context, payload.context);
+  for (const entry of seen) assert.deepEqual(entry.context, { ...payload.context, visibleRecipient: {
+    id: recipient.user.id, username: recipient.user.username, displayName: recipient.user.displayName,
+  } });
   assert.deepEqual((await state.history(owner.user.id, session.id))[0]?.context, payload.context);
   assert.equal((await context.app.inject({ method: 'POST', url, headers, payload })).statusCode, 200);
   assert.equal((await context.app.inject({ method: 'POST', url, headers, payload: { ...payload,

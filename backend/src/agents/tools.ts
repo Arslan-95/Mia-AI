@@ -11,6 +11,7 @@ import type { MemoryReviewer, MemoryChange } from './memory-policy.js';
 import type { VoiceExitReviewer } from './voice-exit-policy.js';
 import { assertSourceFocus } from './context.js';
 import { speechDeliverySchema, defaultSpeechDelivery } from '../speech/delivery.js';
+import { RECIPIENT_APPROVAL_RULE } from './prompts.js';
 
 export type AgentName = 'mia' | 'messaging' | 'contacts';
 export type Tool = { definition: FunctionDefinition; execute(input: unknown): Promise<unknown> };
@@ -122,6 +123,19 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       versionedDraft, ({ draftId, version }) => mutate((service) => service.discardDraft(turn.userId, draftId, version, signal))),
   ];
   const coordinator = [
+    define('control_voice_note', `Control the original unsent recording identified by clientContext.voiceNote and its recipientId. preview plays it locally; discard deletes it only when requested; send needs a later user approval and completed device feedback. ${RECIPIENT_APPROVAL_RULE}`,
+      z.object({ recordingId: uuid, action: z.enum(['preview', 'send', 'discard']) }).strict(), async ({ recordingId, action }) => {
+        const note = turn.context?.voiceNote;
+        if (!note || note.id !== recordingId) throw conflict('This recording is no longer available on the device.');
+        if (action === 'send') {
+          const [earlier] = await db.query(`SELECT t.id FROM assistant_turns t JOIN assistant_sessions s ON s.id=t.session_id WHERE s.user_id=$1 AND t.session_id=$2
+            AND t.generation<$3 AND t.status='completed' AND t.client_context->'voiceNote'->>'id'=$4
+            AND t.client_context->'voiceNote'->>'recipientId'=$5 LIMIT 1`,
+            [turn.userId, turn.sessionId, turn.generation, recordingId, note.recipientId]);
+          if (!earlier) throw conflict('Ask whether to send this recording, then wait for a later user approval.');
+        }
+        return presentationAction('control_voice_note', { recordingId, recipientId: note.recipientId, action });
+      }),
     define('set_speech_delivery', 'Choose restrained delivery for your final spoken reply by meaning and current conversation. Default is calm/steady/reserved; no call is needed for ordinary neutral replies or greetings. Use gentle for a delicate topic, light only for supported casual humor, unhurried when useful, and friendly only with evidence it suits this user. Use saved voice preferences as context, but current instructions take priority. Changes apply only to this turn; use memory tools for an actual enduring preference. No freeform voice prompts or exaggerated emotion. For individual show_message narration use that tool\'s delivery field instead.',
       speechDeliverySchema, delivery => state.setSpeechDelivery(turn, signal, delivery)),
     define('show_message', 'First check current clientContext.reference: if it already shows this exact chat/message and relevant excerpt, DO NOT call this tool again; keep that card and answer directly. Otherwise required before discussing a specific stored chat message unless the user explicitly requests no display. Use for last/first-message questions, reading, quoting, summarizing, interpreting and help replying; fetching data or opening a chat alone does not show its card. Opens the real chat and shows/replaces the exact source. Put THIS source\'s substantive answer or commentary in narration: the card appears before speech and the tool waits for speech completion. For multiple sources, show and narrate each sequentially before replacing it. Counts/navigation and proposed draft revisions need no arbitrary card. Wait for completed feedback; failure is not a confirmed display. focus uses exact UTF-16 source offsets, never replacement display text. Optional delivery controls only this narration; it is not a reason to replay a visible card.',
@@ -133,6 +147,19 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       }),
     define('dismiss_message', 'Dismiss the current visual reference when it no longer helps or the user wants it put away. No fixed end-of-speech dismissal. Wait for device feedback.', empty,
       () => presentationAction('dismiss_message', {})),
+    define('announce_message_skip', 'After a source narration failed, tell the user in your own short natural words which message could not be read and that you will continue with the next requested message when there is one. This speaks ONLY your status notice, without changing the source card. Wait for confirmed playback before moving on. Never count this notice as reading the source. The speech service already made its bounded retries; do not restart reading that failed source in this turn.',
+      z.object({ failedActionId: uuid, narration: z.string().trim().min(1).max(500) }).strict(), async ({ failedActionId, narration }) => {
+        const [failed] = await db.query<{ payload: { chatId: string; messageId: string }; result: { stage?: string; code?: string } }>(
+          `SELECT payload,result FROM device_actions WHERE id=$1 AND user_id=$2 AND turn_id=$3 AND kind='show_message' AND state='failed'`,
+          [failedActionId, turn.userId, turn.id]);
+        if (!failed || failed.result?.code === 'ACTION_CANCELLED')
+          throw conflict('Only an actual failed message delivery from this request can have a skip notice.');
+        const [existing] = await db.query(`SELECT id,kind,state,result FROM device_actions
+          WHERE user_id=$1 AND turn_id=$2 AND kind='announce_message_skip' AND payload->>'failedActionId'=$3 ORDER BY sequence DESC LIMIT 1`,
+          [turn.userId, turn.id, failedActionId]);
+        if (existing) return existing;
+        return presentationAction('announce_message_skip', { ...failed.payload, failedActionId, narration, delivery: turn.speechDelivery ?? defaultSpeechDelivery });
+      }),
     define('get_voice_mode', 'Read the actual voice-mode and microphone state reported with this request. This is a device snapshot, not an inferred/default mode. If unreported, say you cannot verify it.',
       empty, async () => {
         const [confirmed] = await db.query<{ result: { voice?: unknown } }>(`SELECT result FROM device_actions
@@ -211,7 +238,7 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
           requiresLaterUserApproval: !earlier,
           approvalRule: earlier ? 'This exact version was already presented. Send only if the CURRENT user utterance approves it; do not ask them to confirm the same approval again.' : 'Present the exact recipient and content, then wait for a later user utterance to approve it.' };
       })),
-    define('send_approved_draft', 'Send a previously reviewed draft only if the CURRENT user utterance approves that exact recipient and content. A changed topic is not approval. Review must be from a completed EARLIER turn.',
+    define('send_approved_draft', `Send the exact draft version only after its review in a completed EARLIER turn and CURRENT user approval. ${RECIPIENT_APPROVAL_RULE}`,
       versionedDraft, ({ draftId, version }) => mutate(async (service, scoped) => {
         const [review] = await scoped.query(`SELECT r.turn_id FROM draft_reviews r JOIN assistant_turns t ON t.id = r.turn_id
           WHERE r.draft_id = $1 AND r.version = $2 AND t.session_id = $3 AND t.status = 'completed'
@@ -235,10 +262,11 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       }),
     define('stop_audio', 'Request that the phone stop current audio playback.', empty,
       () => state.action(turn, signal, 'stop_audio', {})),
-    define('request_voice_recording', 'Ask the phone to let the user record an original voice note for a verified recipient.',
+    define('request_voice_recording', 'Open the verified recipient chat so the user can hold the lower forty percent to record an original voice note, and release to finish. This prepares recording; it does not start it or send anything.',
       z.object({ recipientId: uuid }).strict(), async ({ recipientId }) => {
         await messaging.profile(recipientId);
-        return state.action(turn, signal, 'record_voice', { recipientId });
+        const chat = await mutate(service => service.createDirectChat(turn.userId, recipientId));
+        return state.action(turn, signal, 'record_voice', { recipientId, chatId: chat.id });
       }),
     define('get_device_action', 'Check whether a requested device action really completed, failed or is still pending.',
       z.object({ actionId: uuid }).strict(), async ({ actionId }) => {

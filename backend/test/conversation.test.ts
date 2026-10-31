@@ -22,15 +22,17 @@ test('conversation replays confirmed speech chronologically, preserves interrupt
     await db.query('UPDATE assistant_turns SET status=$2,assistant_text=$3 WHERE id=$1', [turn.id, status, reply]);
     return turn;
   }
-  async function narration(turn: Turn, text: string, status: string, userId = owner) {
+  async function narration(turn: Turn, text: string, status: string, userId = owner, kind = 'show_message') {
     await db.query(`INSERT INTO device_actions(id,user_id,session_id,turn_id,generation,kind,payload,state,expires_at)
-      VALUES ($1,$2,$3,$4,$5,'show_message',$6::jsonb,$7,now()+interval '1 minute')`,
-    [randomUUID(), userId, session.id, turn.id, turn.generation, JSON.stringify({ chatId: chat.id, messageId: source.id, narration: text }), status]);
+      VALUES ($1,$2,$3,$4,$5,$8,$6::jsonb,$7,now()+interval '1 minute')`,
+    [randomUUID(), userId, session.id, turn.id, turn.generation, JSON.stringify({ chatId: chat.id, messageId: source.id, narration: text }), status, kind]);
   }
   const read = await add('Read the first two messages.', 'Want the third one?');
   await narration(read, 'The first message asks about a blue notebook.', 'completed');
   await narration(read, 'The second message explains Sharingan.', 'completed');
   await narration(read, 'This narration never completed.', 'failed');
+  await narration(read, 'One message could not be read; I will continue.', 'completed', owner, 'announce_message_skip');
+  await narration(read, 'This skip warning never played.', 'failed', owner, 'announce_message_skip');
   await narration(read, 'This narration is pending.', 'pending');
   await narration(read, 'Another account must not appear.', 'completed', friend);
   await add('Let us ask about that notebook.', 'How about: Are you bringing the blue notebook on Friday?');
@@ -47,12 +49,12 @@ test('conversation replays confirmed speech chronologically, preserves interrupt
   const speech = input.filter(item => item.role === 'assistant').map(item =>
     (item.content as { text: string }[]).map(part => part.text));
   assert.deepEqual(speech, [
-    ['The first message asks about a blue notebook.', 'The second message explains Sharingan.', 'Want the third one?'],
+    ['The first message asks about a blue notebook.', 'The second message explains Sharingan.', 'One message could not be read; I will continue.', 'Want the third one?'],
     ['How about: Are you bringing the blue notebook on Friday?'],
     ['I can suggest a shorter question.'],
     ['Will you bring the notebook this Friday?'],
   ]);
-  for (const text of ['never completed', 'is pending', 'Another account', 'was cancelled', 'That turn was interrupted or did not complete']) assert.equal(serialized.includes(text), false);
+  for (const text of ['never completed', 'never played', 'is pending', 'Another account', 'was cancelled', 'That turn was interrupted or did not complete']) assert.equal(serialized.includes(text), false);
   assert.equal(serialized.split('screenAtRequest').length - 1, 1, 'unchanged source must not be reintroduced after every utterance');
   assert.ok(serialized.includes('Make something like that question'));
   assert.ok(serialized.includes('but another one'));

@@ -78,6 +78,19 @@ test('an idle listening window is disposed locally and never returned for upload
   } finally { t.mock.timers.reset(); delete (globalThis as any).__miaAudio; }
 });
 
+test('releasing a held voice note while permissions are pending cannot start a late recorder', async () => {
+  const { n, engine } = await device();
+  let grant!: (permission: { granted: boolean }) => void;
+  n.permission = new Promise(resolve => { grant = resolve; });
+  const controller = new AbortController();
+  const starting = engine.start(controller.signal);
+  const rejected = assert.rejects(starting);
+  await flush(); controller.abort(); grant({ granted: true });
+  await rejected;
+  assert.equal(n.created, 0); assert.equal(n.files.size, 0);
+  await engine.stop(); delete (globalThis as any).__miaAudio;
+});
+
 test('turning off while the microphone permission dialog is open cannot start a late recorder', async () => {
   const { n, engine } = await device(); let grant!: (value: { granted: boolean }) => void;
   n.permission = new Promise(resolve => { grant = resolve; });

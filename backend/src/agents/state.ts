@@ -174,7 +174,7 @@ export class AssistantState {
     return this.mutate(turn, signal, async (db) => {
       const [count] = await db.query<{ count: number }>('SELECT count(*)::integer AS count FROM device_actions WHERE turn_id=$1', [turn.id]);
       if ((count?.count ?? 0) >= 12) throw new AppError(422, 'ACTION_LIMIT', 'This turn reached its device action limit.');
-      const extended = ['show_message','dismiss_message','play_audio'].includes(kind);
+      const extended = ['show_message','dismiss_message','play_audio','announce_message_skip','control_voice_note'].includes(kind);
       const id = randomUUID();
       const [stored] = await db.query<{ sequence: string }>(`INSERT INTO device_actions(id,user_id,session_id,turn_id,generation,kind,payload,expires_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,now() + ($8::integer * interval '1 second')) RETURNING sequence`,
@@ -188,7 +188,7 @@ export class AssistantState {
     const turn = await this.turn(userId, sessionId, turnId);
     const session = await this.requireSession(userId, sessionId);
     const [action] = await this.db.query<{ payload: { narration?: string; delivery?: unknown }; state: string; current: boolean }>(`SELECT payload,state,expires_at>now() AS current FROM device_actions
-      WHERE id=$1 AND user_id=$2 AND session_id=$3 AND turn_id=$4 AND generation=$5 AND kind='show_message'`,
+      WHERE id=$1 AND user_id=$2 AND session_id=$3 AND turn_id=$4 AND generation=$5 AND kind IN ('show_message','announce_message_skip')`,
       [actionId,userId,sessionId,turnId,session.generation]);
     if (!action?.current || action.state !== 'pending' || !['running','completed'].includes(turn.status) || turn.generation !== session.generation || !action.payload.narration)
       throw new AppError(409, 'STALE_SPEECH', 'This narration is no longer current.');

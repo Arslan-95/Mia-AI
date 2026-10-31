@@ -26,14 +26,14 @@ export function AudioControls({ mia, elapsed, bottomInset = 0 }: { mia: Mia; ela
         <View style={[a.audio, a.recordingBackground]}>
           <View style={a.description}>
             <Text style={s.label}>Recording · {elapsed}s</Text>
-            <Text style={s.small}>Maximum 2 minutes · stop to preview</Text>
+            <Text style={s.small}>{mia.aiMode ? 'Release to finish · maximum 2 minutes' : 'Maximum 2 minutes · stop to preview'}</Text>
           </View>
           <Button label="Stop recording" icon="stop" onPress={() => void mia.finishRecording().catch(mia.fail)} />
         </View>
       ) : mia.recording ? (
         <View style={a.recording}>
           <Text style={s.label}>Your voice note is ready</Text>
-          <Text style={s.small}>{Math.max(1, Math.round(mia.recording.durationMs / 1000))} seconds · Preview before sending.</Text>
+          <Text style={s.small}>{Math.max(1, Math.round(mia.recording.durationMs / 1000))} seconds · {mia.aiMode ? 'Ask Mia to send, play or discard. Tap below to preview; hold below to replace with a new recording.' : 'Preview before sending.'}</Text>
           <View style={a.actions}>
             <Button secondary label="Preview" icon="play-outline" onPress={() => void mia.preview().catch(mia.fail)} />
             <Button label="Send voice note" loading={mia.busy} onPress={() => void mia.useRecording().catch(mia.fail)} />

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { Config } from '../config.js';
 import { AppError, throwIfAborted } from '../errors.js';
 import { inspectWav } from '../media.js';
-import { synthesizeGoogleSpeech } from './google-tts.js';
+import { synthesizeGoogleSpeech, type SpeechDiagnosticReporter } from './google-tts.js';
 import { googleSpeechHeaders, type GoogleSpeechHeaders } from './google-auth.js';
 import type { SpeechOptions } from './delivery.js';
 
@@ -36,7 +36,7 @@ export class CloudSpeechProvider implements SpeechProvider {
   private readonly ttsHeaders: GoogleSpeechHeaders;
   constructor(private readonly config: Config, private readonly fetcher: typeof fetch = fetch,
     private readonly socketFactory: (url: string) => WebSocket = (url) => new WebSocket(url, { maxPayload: 256_000, handshakeTimeout: 10_000 }),
-    ttsHeaders?: GoogleSpeechHeaders) {
+    ttsHeaders?: GoogleSpeechHeaders, private readonly reportSpeechAttempt?: SpeechDiagnosticReporter) {
     this.recognitionConfigured = Boolean(config.metaApiKey);
     this.synthesisConfigured = config.googleTtsAuth === 'adc' || Boolean(config.googleTtsApiKey);
     this.ttsHeaders = ttsHeaders ?? googleSpeechHeaders(config);
@@ -139,6 +139,6 @@ export class CloudSpeechProvider implements SpeechProvider {
 
   async *synthesize(text: string, signal: AbortSignal, options: SpeechOptions = {}): AsyncIterable<Uint8Array> {
     if (!this.synthesisConfigured) throw new AppError(503, 'TTS_UNAVAILABLE', 'Speech synthesis is not configured yet.');
-    yield* synthesizeGoogleSpeech(this.config, this.fetcher, text, signal, this.ttsHeaders, options);
+    yield* synthesizeGoogleSpeech(this.config, this.fetcher, text, signal, this.ttsHeaders, options, this.reportSpeechAttempt);
   }
 }

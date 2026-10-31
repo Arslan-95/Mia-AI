@@ -79,7 +79,7 @@ export function AgentHome({ mia }: { mia: Mia }) {
       <Text style={home.subtitle}>Your people. Your conversations.{ '\n' }Just say what’s on your mind.</Text>
     </View>
     <View style={home.liveCard}>
-      <View style={home.liveHeader}><View style={home.liveIcon}><Icon name={phase === 'error' ? 'refresh-outline' : mia.microphoneMuted ? 'mic-off-outline' : 'sparkles-outline'} size={19} color={colors.accentLight} /></View><View style={home.liveText}><Text style={home.liveTitle}>{status}</Text><Text style={s.small}>{mia.microphoneMuted ? 'Tap anywhere whenever you’re ready.' : phase === 'listening' ? 'Ask me to open a chat or help with a reply.' : phase === 'error' ? 'Mute, then unmute to try again.' : 'I’ll keep the right screen open as we go.'}</Text></View></View>
+      <View style={home.liveHeader}><View style={home.liveIcon}><Icon name={phase === 'error' ? 'refresh-outline' : mia.microphoneMuted ? 'mic-off-outline' : 'sparkles-outline'} size={19} color={colors.accentLight} /></View><View style={home.liveText}><Text style={home.liveTitle}>{status}</Text><Text style={s.small}>{mia.microphoneMuted ? 'Tap the upper area whenever you’re ready.' : phase === 'listening' ? 'Ask me to open a chat or help with a reply.' : phase === 'error' ? 'Mute, then unmute to try again.' : 'I’ll keep the right screen open as we go.'}</Text></View></View>
       <View style={home.cardRule} />
       <Text style={home.example}>Try saying</Text>
       <Text style={home.prompt}>“Show me my unread messages.”</Text>
@@ -95,7 +95,7 @@ export function AgentHome({ mia }: { mia: Mia }) {
       <Text selectable style={home.userText}>{latest.userText}</Text>
       {latest.assistantText ? <Text selectable style={s.body}>{latest.assistantText}</Text> : <Text style={s.small}>{latest.status === 'failed' ? 'That request couldn’t be completed.' : latest.status === 'interrupted' ? 'Conversation interrupted.' : 'Working on your request…'}</Text>}
     </View>}
-    <View style={home.privacy}><Icon name="mic-outline" size={14} color={colors.muted} /><Text style={home.privacyText}>You’re in control. Tap anywhere to mute your microphone.</Text></View>
+    <View style={home.privacy}><Icon name="mic-outline" size={14} color={colors.muted} /><Text style={home.privacyText}>Tap the upper area to mute Mia’s microphone.</Text></View>
   </ScrollView>;
 }
 function HomeLink({ icon, title, detail, onPress }: { icon: React.ComponentProps<typeof Icon>['name']; title: string; detail: string; onPress(): void }) {
@@ -117,14 +117,14 @@ export function VoiceMode({ mia, bottomInset = 0, holding = false }: { mia: Mia;
     <View style={orb.dockHeading}><View style={[home.dot, phase === 'error' && { backgroundColor: colors.red }, phase === 'paused' && { backgroundColor: colors.muted }]} /><Text style={orb.statusText}>{status}</Text><Text numberOfLines={1} style={orb.contextText}>· {context}</Text></View>
     <View style={orb.controls}>
       <View style={orb.sideControl}>
-        <View style={[orb.controlIcon, mia.microphoneMuted && orb.selectedIcon]}><Icon name={mia.microphoneMuted ? 'mic-off-outline' : 'mic-outline'} size={20} color={colors.accentLight} /></View><Text style={orb.controlLabel}>Tap anywhere</Text>
+        <View style={[orb.controlIcon, mia.microphoneMuted && orb.selectedIcon]}><Icon name={mia.microphoneMuted ? 'mic-off-outline' : 'mic-outline'} size={20} color={colors.accentLight} /></View><Text style={orb.controlLabel}>Tap upper 60%</Text>
       </View>
       <View style={orb.coreControl}><MiaCore phase={phase} diameter={small ? 62 : 74} level={phase === 'paused' ? 0 : mia.voiceLevel} /></View>
       <View style={orb.sideControl}>
         <View style={[orb.controlIcon, holding && orb.selectedIcon]}><Icon name={holding ? 'hourglass-outline' : 'power-outline'} size={20} color={holding ? colors.ink : colors.muted} /></View><Text style={orb.controlLabel}>{holding ? 'Hold…' : 'Hold 5s to exit'}</Text>
       </View>
     </View>
-    <Text style={orb.hint}>{holding ? 'Keep holding for 5 seconds to leave' : mia.devicePrompt ? 'Hold anywhere for 5 seconds to use recording controls' : phase === 'error' ? 'Mute, then unmute to reconnect' : mia.microphoneMuted ? 'Tap anywhere to unmute' : 'Tap anywhere to mute'}</Text>
+    <Text style={orb.hint}>{holding ? 'Hold upper area for 5 seconds to leave' : mia.audioState === 'recording' ? 'Recording · release to finish' : mia.audioState === 'playing' && phase !== 'speaking' ? 'Tap lower area to stop playback' : mia.recording ? 'Tap lower area to preview · hold to record again' : chat && mia.tab === 'chats' ? 'Hold lower 40% to record · release to finish' : phase === 'error' ? 'Tap upper area to mute, then unmute' : mia.microphoneMuted ? 'Tap upper area to unmute' : 'Hold upper area for 5 seconds to exit'}</Text>
   </View>;
 }
 

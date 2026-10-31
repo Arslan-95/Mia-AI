@@ -10,8 +10,10 @@ import { checkVoice, voiceDelay } from '../voiceConversation';
 export class Engine implements AudioEngine {
   private recorder?: AudioRecorder; private player?: AudioPlayer; private startedAt = 0;
   private rejectPlayback?: (error: Error) => void; private owner = new AudioOwnership();
-  async start() {
+  async start(signal?: AbortSignal) {
     await this.owner.transition(async current => {
+    const valid = current;
+    current = () => valid() && !signal?.aborted;
     await this.cleanup(); if (!current()) throw new CancelledError();
     const permission = await AudioModule.requestRecordingPermissionsAsync();
     if (!permission.granted) throw new UserFacingError('Microphone access is off. Enable it in your iPhone settings to record.');

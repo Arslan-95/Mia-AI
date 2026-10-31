@@ -389,7 +389,9 @@ test('WebSocket text and recognized speech carry authorized route snapshots to t
   const voice = await client.next('turn.accepted', frame => (frame.turn as { userText: string }).userText === 'Reply to him.');
   assert.deepEqual((voice.turn as { context: unknown }).context, voiceContext);
   await waitFor(() => snapshots.length === 2 || undefined);
-  assert.deepEqual(snapshots, [textContext, voiceContext]);
+  assert.deepEqual(snapshots, [{ ...textContext, visibleRecipient: {
+    id: bob.user.id, username: bob.user.username, displayName: bob.user.displayName,
+  } }, voiceContext]);
 });
 
 test('live websocket authenticates, replays scoped events and runs only final speech turns', { timeout: 25_000 }, async (t) => {

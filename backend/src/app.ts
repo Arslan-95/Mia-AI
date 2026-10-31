@@ -18,6 +18,8 @@ import { registerAssistantRoutes } from './routes/assistant.js';
 import { CloudSpeechProvider, type SpeechProvider } from './speech/providers.js';
 import { registerRealtime } from './realtime.js';
 import { registerSpeechRoutes } from './routes/speech.js';
+import { appendFile, mkdir } from 'node:fs/promises';
+import { resolve } from 'node:path';
 
 declare module 'fastify' {
   interface FastifyRequest { user: User }
@@ -32,7 +34,13 @@ export async function createApp(config: Config, db: Database, options: { provide
   const messaging = new MessagingService(db);
   const media = new MediaService(db, config.mediaDirectory);
   const provider = options.provider ?? new MetaResponsesProvider(config);
-  const speech = options.speech ?? new CloudSpeechProvider(config);
+  const speech = options.speech ?? new CloudSpeechProvider(config, undefined, undefined, undefined, async diagnostic => {
+    app.log.warn(diagnostic, 'Speech synthesis attempt failed');
+    try {
+      await mkdir(resolve('.data'), { recursive: true });
+      await appendFile(resolve('.data/speech-diagnostics.ndjson'), JSON.stringify({ time: new Date().toISOString(), ...diagnostic }) + '\n');
+    } catch { app.log.warn({ code: 'SPEECH_DIAGNOSTIC_WRITE_FAILED' }, 'Speech diagnostic could not be saved'); }
+  });
   const assistant = new AssistantRuntime(db, provider, (code) => app.log.error({ code }, 'Assistant runtime failed'));
   app.addHook('onReady', async () => assistant.start());
   app.addHook('onClose', async () => assistant.close());

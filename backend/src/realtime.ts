@@ -327,7 +327,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
           const code = error instanceof AppError ? error.code : 'TTS_UNAVAILABLE';
           // Keep actionable metadata, never source text, credentials or raw provider bodies.
           request.log.warn({ code, requestId, turnId, actionId,
-            ...(error instanceof SpeechSynthesisError ? { providerStatus: error.providerStatus, attempts: error.attempts } : {}) }, 'Speech synthesis failed');
+            ...(error instanceof SpeechSynthesisError ? { providerStatus: error.providerStatus, attempts: error.attempts, ...error.diagnostic } : {}) }, 'Speech synthesis failed');
           send({ type: 'speech.failed', requestId, turnId, code });
         }
       } finally {

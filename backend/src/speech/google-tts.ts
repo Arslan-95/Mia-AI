@@ -14,15 +14,48 @@ const maxResponseBytes = maxBase64Length + 1024;
 const responseSchema = z.object({ audioContent: z.string().min(1).max(maxBase64Length) });
 const invalidAudio = () => new AppError(503, 'INVALID_TTS_AUDIO', 'The speech provider returned invalid audio.');
 
+type ProviderDiagnostic = { providerErrorStatus?: string; providerReason?: string; providerMessage?: string };
+export type SpeechAttemptDiagnostic = ProviderDiagnostic & { attempt: number; providerStatus: number };
+export type SpeechDiagnosticReporter = (diagnostic: SpeechAttemptDiagnostic) => void | Promise<void>;
+
+async function providerDiagnostic(response: Response, sensitive: string[]): Promise<ProviderDiagnostic> {
+  if (!response.body) return {};
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > 4096) return {};
+      chunks.push(part.value);
+    }
+    const parsed = z.object({ error: z.object({ status: z.string().optional(), message: z.string().optional(),
+      details: z.array(z.object({ reason: z.string().optional() })).optional() }) }).safeParse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    if (!parsed.success) return {};
+    const error = parsed.data.error;
+    const identifier = (value?: string) => value && /^[A-Z][A-Z0-9_]{0,79}$/.test(value) ? value : undefined;
+    let message = error.message ?? '';
+    for (const secret of sensitive.filter(Boolean).sort((a, b) => b.length - a.length)) message = message.replaceAll(secret, '[redacted]');
+    // Provider messages can echo credentials, source text or delivery prompts.
+    message = message.replace(/https?:\/\/\S+/g, '[url]').replace(/[A-Za-z0-9_./+=-]{32,}/g, '[redacted]')
+      .replace(/"[^"\n]*"|'[^'\n]*'|`[^`\n]*`/g, '[quoted detail]').replace(/[\r\n\t]+/g, ' ').slice(0, 600);
+    return { providerErrorStatus: identifier(error.status), providerReason: identifier(error.details?.find(item => identifier(item.reason))?.reason),
+      ...(message ? { providerMessage: message } : {}) };
+  } catch { return {}; }
+  finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+}
+
 export class SpeechSynthesisError extends AppError {
-  constructor(code: string, readonly providerStatus: number | undefined, readonly attempts: number) {
+  constructor(code: string, readonly providerStatus: number | undefined, readonly attempts: number, readonly diagnostic?: ProviderDiagnostic) {
     super(503, code, 'Speech synthesis is temporarily unavailable.');
   }
 }
 
 // Retry only before a segment is yielded. The phone buffers the entire request
 // before playback, so these retries cannot repeat words the user already heard.
-async function requestAudio(fetcher: typeof fetch, body: string, authorize: GoogleSpeechHeaders, signal: AbortSignal) {
+async function requestAudio(fetcher: typeof fetch, body: string, authorize: GoogleSpeechHeaders, signal: AbortSignal, sourceText: string, report?: SpeechDiagnosticReporter) {
   for (let attempt = 1; ; attempt++) {
     throwIfAborted(signal);
     const headers = await authorize(signal);
@@ -48,13 +81,21 @@ async function requestAudio(fetcher: typeof fetch, body: string, authorize: Goog
         continue;
       }
     }
-    await response.body?.cancel();
-    const transient = response.status === 429 || response.status >= 500;
-    if (!transient || attempt === 3) {
+    const input = (JSON.parse(body) as { input: Record<string, string> }).input;
+    const sensitive = [sourceText, ...Object.values(input), ...headers.values()];
+    const diagnostic = await providerDiagnostic(response, sensitive);
+    throwIfAborted(signal);
+    // Diagnostics must never turn a recoverable provider failure into a failed request.
+    try { await report?.({ ...diagnostic, attempt, providerStatus: response.status }); } catch { /* Speech can still retry. */ }
+    throwIfAborted(signal);
+    // This provider can return 400 for a request that succeeds unchanged on
+    // the next call. Give it the same bounded retry policy as 429 and 5xx.
+    const retryable = response.status === 400 || response.status === 429 || response.status >= 500;
+    if (!retryable || attempt === 3) {
       const code = response.status === 429 ? 'TTS_RATE_LIMITED'
         : [401, 403].includes(response.status) ? 'TTS_AUTH_UNAVAILABLE'
         : response.status === 400 ? 'TTS_REQUEST_REJECTED' : 'TTS_UNAVAILABLE';
-      throw new SpeechSynthesisError(code, response.status, attempt);
+      throw new SpeechSynthesisError(code, response.status, attempt, diagnostic);
     }
     // Respect a short Retry-After without exceeding the overall request budget.
     const retryAfter = Number(response.headers.get('retry-after'));
@@ -109,7 +150,7 @@ async function readAudio(response: Response, signal: AbortSignal) {
 }
 
 export async function* synthesizeGoogleSpeech(config: Config, fetcher: typeof fetch,
-  text: string, signal: AbortSignal, authorize: GoogleSpeechHeaders = googleSpeechHeaders(config), options: SpeechOptions = {}): AsyncIterable<Uint8Array> {
+  text: string, signal: AbortSignal, authorize: GoogleSpeechHeaders = googleSpeechHeaders(config), options: SpeechOptions = {}, report?: SpeechDiagnosticReporter): AsyncIterable<Uint8Array> {
   const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(90_000)]);
   throwIfAborted(requestSignal);
   let total = 0;
@@ -125,7 +166,7 @@ export async function* synthesizeGoogleSpeech(config: Config, fetcher: typeof fe
     throwIfAborted(requestSignal);
     const pcm = await requestAudio(fetcher, JSON.stringify({ input: gemini ? { text: part, prompt } : styled ? { ssml: opening + encode(part) + closing } : { text: part },
         voice: { languageCode: 'en-US', name: config.googleTtsVoice, ...(gemini ? { modelName: config.googleTtsModel } : {}) },
-        audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: sampleRate } }), authorize, requestSignal);
+        audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: sampleRate } }), authorize, requestSignal, part, report);
     total += pcm.length;
     if (total > maxPcmBytes) throw new AppError(503, 'TTS_LIMIT', 'The spoken response exceeded its duration limit.');
     for (let offset = 0; offset < pcm.length; offset += 12_000) {

@@ -75,7 +75,11 @@ const sources: Record<string, string> = {
           n.capture = value => { signal.removeEventListener('abort', cancel); n.capture = null; resolve(value); };
         });
       }
-      async start() { n.noteRecording = true; }
+      async start(signal) {
+        if (n.holdNoteStart) await new Promise(resolve => { n.releaseNoteStart = resolve; });
+        if (signal?.aborted) throw new CancelledError();
+        n.noteRecording = true;
+      }
       async finish() { n.noteRecording = false; return { uri: 'file:///note.wav', durationMs: 1000 }; }
       async stop() { if (n.nativeSession) n.audioConflicts++; n.playback?.(); n.playback = null; n.noteRecording = false; }
       async playPcm() { n.playbacks++; await new Promise(resolve => { n.playback = resolve; }); }
@@ -204,17 +208,34 @@ test('retained cards allow subsequent reordered-context actions, same-source reu
     assert.equal(failedSpeech.result.stage, 'narration'); assert.equal(failedSpeech.result.presentationConfirmed, true);
     assert.equal(failedSpeech.result.reference.messageId, 'second'); assert.equal(h.mia.messageReference?.messageId, 'second');
 
+    h.n.failSpeech = false;
+    const retainedReference = h.mia.messageReference;
+    await command(next, 'skip-notice', 'announce_message_skip', { failedActionId: 'speech-failure', narration: 'I could not read that message. I will continue with the next.' }, 6);
+    await h.wait(() => !!h.n.playback);
+    assert.equal(result('skip-notice'), undefined, 'the next source must wait for actual warning playback');
+    assert.equal(h.mia.messageReference, retainedReference, 'the notice keeps the existing card and its presentation revision');
+    await act(async () => { h.n.playback?.(); });
+    await h.wait(() => !!result('skip-notice'));
+    assert.equal(result('skip-notice').success, true);
+
+    h.n.failSpeech = true;
+    await command(next, 'failed-notice', 'announce_message_skip', { failedActionId: 'another-failure', narration: 'I could not finish reading.' }, 7);
+    await h.wait(() => !!result('failed-notice'));
+    assert.equal(result('failed-notice').success, false);
+    assert.equal(result('failed-notice').result.stage, 'narration');
+    assert.equal(h.mia.messageReference, retainedReference);
+
     const region = h.tree.findAll(node => node.props.testID === 'message-reference-region')[0]!;
     await act(async () => { region.props.onLayout({ nativeEvent: { layout: { width: 390, height: 90 } } }); });
     const speechRequests = h.n.frames.filter(frame => frame.type === 'speech.request').length;
-    await command(next, 'no-space', 'show_message', { chatId: 'anna', messageId: 'first', narration: 'The notebook.' }, 6);
+    await command(next, 'no-space', 'show_message', { chatId: 'anna', messageId: 'first', narration: 'The notebook.' }, 8);
     await h.wait(() => !!result('no-space'));
     assert.equal(result('no-space').success, false); assert.equal(result('no-space').result.code, 'PRESENTATION_NO_SPACE');
     assert.equal(result('no-space').result.stage, 'presentation'); assert.equal(result('no-space').result.presentationConfirmed, false);
     assert.equal(result('no-space').result.reference, null);
     assert.equal(h.n.frames.filter(frame => frame.type === 'speech.request').length, speechRequests, 'failed presentation never starts narration');
     h.n.savedChats.push({ ...chat, id: 'ben', recipient: { ...chat.recipient, id: 'ben-user', displayName: 'Ben', username: 'ben' } });
-    await command(next, 'open-ben', 'open_chat', { chatId: 'ben' }, 7);
+    await command(next, 'open-ben', 'open_chat', { chatId: 'ben' }, 9);
     await h.wait(() => !!result('open-ben'));
     assert.equal(result('open-ben').success, true); assert.equal(h.mia.activeChatId, 'ben'); assert.equal(h.mia.messageReference, null);
     assert.equal(result('open-ben').result.context.route, '/chat/ben');
@@ -505,6 +526,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     nativeRevision: 0, nativeSession: false, audioConflicts: 0, holdNativeStart: false, holdNativeStop: false,
     releaseNativeStart: null as (() => void) | null, releaseNativeStop: null as (() => void) | null,
     holdASR: false,
+    holdNoteStart: false, releaseNoteStart: null as (() => void) | null, failSend: false,
     appStateHandlers: new Set<(state: string) => void>(), announcements: [] as string[], vibrations: 0,
     dimensions: { width: 390, height: 844, scale: 3, fontScale: 1 }, reducedMotion: false,
     motionHandlers: new Set<(value: boolean) => void>(), animations: [] as { duration: number; useNativeDriver: boolean; toValue: number }[],
@@ -543,7 +565,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
       }
       return response({ capabilities: { agent: true, speechRecognition: true, speechSynthesis: true } });
     }
-    if (path === '/v1/chats') return response(method === 'POST' ? { id: chat.id } : n.savedChats);
+    if (path === '/v1/chats') return response(method === 'POST' ? { id: n.savedChats.find(item => item.recipient.id === body.recipientId)?.id ?? chat.id } : n.savedChats);
     if (path.startsWith('/v1/users?query=')) {
       if (n.holdPeopleSearch) return new Promise((resolve, reject) => {
         n.peopleSearches.push({ query: decodeURIComponent(path.split('query=')[1]!), signal: init!.signal!, resolve, reject });
@@ -557,6 +579,10 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     }
     if (path === '/v1/chats/anna') return response(chat);
     if (path.startsWith('/v1/chats/anna/messages/')) return response(n.referenceSources.find(source => path.endsWith('/' + source.id)));
+    if (path === '/v1/chats/anna/messages' && method === 'POST') {
+      if (n.failSend) throw new Error('Send failed');
+      return response({ id: 'sent-note', chatId: 'anna', senderId: 'user', kind: body.content.kind, mediaId: body.content.mediaId, text: null, createdAt: new Date().toISOString() });
+    }
     if (path.startsWith('/v1/chats/anna/messages')) return response(n.history);
     if (path.startsWith('/v1/chats/ben/messages')) return response([]);
     if (path === '/v1/chats/anna/read') return response({});
@@ -604,6 +630,249 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     async close() { await act(async () => { renderer.unmount(); }); globalThis.fetch = realFetch; globalThis.FormData = realFormData; delete (globalThis as any).__miaNative; },
   };
 }
+
+test('lower hold records until release, asks before sending, and preserves the agent mute choice', async () => {
+  for (const native of [false, true]) for (const muted of [false, true]) {
+    const h = await mount(true, true, native);
+    let gesture: ReturnType<typeof pressGesture> | undefined;
+    try {
+      await h.wait(() => native ? !!h.n.nativePCM : !!h.n.capture);
+      if (muted) await act(async () => { await h.mia.toggleMicrophone(); });
+      await act(async () => { await h.mia.navigate('chats', 'anna'); });
+      const layer = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'agent-interaction-layer')[0]!;
+      gesture = pressGesture(layer().props, { x: 120, y: 740 });
+      await act(async () => { gesture!.begin(); });
+      await h.wait(() => h.mia.audioState === 'recording');
+      assert.equal(h.n.noteRecording, true); assert.equal(h.n.capture, null); assert.equal(h.n.nativePCM, null);
+      assert.equal(h.mia.microphoneMuted, muted); assert.equal(h.mia.aiMode, true);
+      await act(async () => { gesture!.release(); });
+      await h.wait(() => !!h.n.playback);
+      assert.ok(h.mia.recording); assert.equal(h.n.noteRecording, false);
+      const request = h.n.requests.find(r => r.path.endsWith('/turns') && r.method === 'POST')!;
+      assert.equal(request.body.context.voiceNote.recipientId, 'recipient');
+      assert.equal(request.body.context.voice.microphoneMuted, muted);
+      assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 0);
+      await act(async () => { h.n.playback!(); });
+      await h.wait(() => h.mia.audioState === 'idle' && h.mia.voicePhase !== 'speaking');
+      assert.equal(h.mia.microphoneMuted, muted);
+      if (!native && !muted) await h.wait(() => !!h.n.capture);
+      if (!native && muted) assert.equal(h.n.capture, null);
+      if (native) {
+        await h.wait(() => !!h.n.nativePCM);
+        const packets = h.n.pcmPackets;
+        await act(async () => { h.n.nativePCM!(new Uint8Array(2400)); });
+        assert.equal(h.n.pcmPackets > packets, !muted);
+      }
+      assert.ok(h.mia.recording, 'returning to command listening keeps the original unsent');
+    } finally { gesture?.dispose(); await h.close(); }
+  }
+});
+
+test('a new lower hold replaces an unsent note, its preview or its send question without changing mute', async () => {
+  for (const native of [false, true]) for (const muted of [false, true]) for (const phase of ['draft', 'preview', 'question']) {
+    const h = await mount(true, true, native);
+    let gesture: ReturnType<typeof pressGesture> | undefined;
+    let previous: Promise<void> | undefined;
+    try {
+      await act(async () => { await h.mia.navigate('chats', 'anna'); });
+      if (muted) await act(async () => { await h.mia.toggleMicrophone(); });
+      if (phase === 'question') {
+        await act(async () => { await h.mia.beginHeldRecording(); });
+        await act(async () => { previous = h.mia.endHeldRecording(); });
+        await h.wait(() => !!h.n.playback);
+      } else {
+        await act(async () => { await h.mia.startRecording(); await h.mia.finishRecording(); });
+        if (phase === 'preview') {
+          await act(async () => { previous = h.mia.preview(); });
+          await h.wait(() => !!h.n.playback);
+        }
+      }
+      const oldNote = (h.n.frames.filter(frame => frame.type === 'voice.context' && (frame.context as any)?.voiceNote).at(-1)!.context as any).voiceNote;
+      const layer = h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'agent-interaction-layer')[0]!;
+      gesture = pressGesture(layer.props, { x: 120, y: 740 });
+      await act(async () => { gesture!.begin(); });
+      await h.wait(() => h.mia.audioState === 'recording');
+      assert.equal(h.mia.recording, null); assert.equal(h.n.noteRecording, true);
+      assert.equal(h.n.deleted.filter(uri => uri === 'file:///note.wav').length, 1);
+      assert.equal(h.mia.microphoneMuted, muted);
+      assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 0);
+      await act(async () => { gesture!.release(); });
+      await h.wait(() => !!h.n.playback);
+      const newNote = (h.n.requests.filter(r => r.path.endsWith('/turns') && r.method === 'POST').at(-1)!.body.context).voiceNote;
+      assert.notEqual(newNote.id, oldNote.id); assert.equal(newNote.recipientId, 'recipient');
+      await act(async () => { h.n.playback!(); await previous; });
+      await h.wait(() => h.mia.audioState === 'idle' && h.mia.voicePhase !== 'speaking');
+      assert.ok(h.mia.recording); assert.equal(h.mia.microphoneMuted, muted);
+      assert.equal(h.n.audioConflicts, 0); assert.equal(h.mia.voiceFault, false);
+    } finally { gesture?.dispose(); await h.close(); }
+  }
+});
+
+test('release during recording startup and cancellation cannot start a late recorder or ask to send', async () => {
+  for (const cancellation of ['release', 'background', 'cancel'] as const) {
+    const h = await mount(true, true);
+    let gesture: ReturnType<typeof pressGesture> | undefined;
+    try {
+      await act(async () => { await h.mia.navigate('chats', 'anna'); });
+      h.n.holdNoteStart = true;
+      const layer = h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'agent-interaction-layer')[0]!;
+      gesture = pressGesture(layer.props, { x: 120, y: 740 });
+      await act(async () => { gesture!.begin(); });
+      await h.wait(() => !!h.n.releaseNoteStart);
+      await act(async () => {
+        if (cancellation === 'background') h.n.appState('background');
+        else if (cancellation === 'cancel') gesture!.cancel();
+        else gesture!.release();
+        h.n.releaseNoteStart!();
+      });
+      assert.equal(h.n.noteRecording, false); assert.equal(h.mia.recording, null);
+      assert.equal(h.n.turns.length, 0); assert.equal(h.mia.aiMode, true); assert.equal(h.mia.microphoneMuted, false);
+    } finally { gesture?.dispose(); await h.close(); }
+  }
+});
+
+test('original playback and local preview suspend only command listening and restore the current mute choice', async () => {
+  for (const native of [false, true]) for (const muted of [false, true]) for (const preview of [false, true]) {
+    const h = await mount(true, false, native);
+    try {
+      await h.wait(() => native ? !!h.n.nativePCM : !!h.n.capture);
+      await act(async () => { await h.mia.navigate('chats', 'anna'); });
+      if (preview) {
+        await act(async () => { await h.mia.startRecording(); await h.mia.finishRecording(); });
+      }
+      if (muted) await act(async () => { await h.mia.toggleMicrophone(); });
+      let playback!: Promise<void>;
+      await act(async () => { playback = preview ? h.mia.preview() : h.mia.playMedia('original'); });
+      await h.wait(() => !!h.n.playback);
+      assert.equal(h.n.capture, null); assert.equal(h.n.nativePCM, null);
+      assert.equal(h.mia.microphoneMuted, muted);
+      await act(async () => { h.n.playback!(); await playback; });
+      assert.equal(h.mia.microphoneMuted, muted);
+      if (!native && !muted) await h.wait(() => !!h.n.capture);
+      if (!native && muted) assert.equal(h.n.capture, null);
+      if (native) {
+        await h.wait(() => !!h.n.nativePCM);
+        const packets = h.n.pcmPackets;
+        await act(async () => { h.n.nativePCM!(new Uint8Array(2400)); });
+        assert.equal(h.n.pcmPackets > packets, !muted);
+      }
+      assert.equal(h.n.audioConflicts, 0);
+    } finally { await h.close(); }
+  }
+});
+
+test('agent original playback cancels pending ASR startup and ignores a late ready frame', async () => {
+  const h = await mount(true, false, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    h.n.holdASR = true;
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    const pending = h.n.frames.filter(f => f.type === 'voice.start').at(-1)!;
+    const starts = h.n.nativeStarts;
+    let playback!: Promise<void>;
+    await act(async () => { playback = h.mia.playMedia('original', () => {}); });
+    await h.wait(() => !!h.n.playback);
+    await act(async () => { h.n.frame({ type: 'voice.ready', requestId: pending.requestId }); });
+    assert.equal(h.n.nativeStarts, starts); assert.equal(h.n.nativePCM, null);
+    h.n.holdASR = false;
+    await act(async () => { h.n.playback!(); await playback; });
+    await h.wait(() => !!h.n.nativePCM);
+    assert.equal(h.n.audioConflicts, 0);
+  } finally { await h.close(); }
+});
+
+test('muting during playback stays muted after a lower-area stop without changing agent mode', async () => {
+  const h = await mount(true, true, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    let playback!: Promise<void>;
+    await act(async () => { playback = h.mia.playMedia('original'); });
+    await h.wait(() => !!h.n.playback);
+    await act(async () => { await h.mia.toggleMicrophone(); });
+    const layer = h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'agent-interaction-layer')[0]!;
+    const gesture = pressGesture(layer.props, { x: 120, y: 740 });
+    await act(async () => { gesture.begin(); gesture.release(); await playback; });
+    gesture.dispose();
+    assert.equal(h.mia.microphoneMuted, true); assert.equal(h.mia.aiMode, true);
+    await h.wait(() => !!h.n.nativePCM);
+    const packets = h.n.pcmPackets;
+    await act(async () => { h.n.nativePCM!(new Uint8Array(2400)); });
+    assert.equal(h.n.pcmPackets, packets);
+  } finally { await h.close(); }
+});
+
+test('agent recording actions await original preview, reject replaced recordings and send only the bound draft', async () => {
+  const h = await mount(true, false, true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.startRecording(); await h.mia.finishRecording(); });
+    await h.wait(() => !!h.n.nativePCM);
+    const stream = h.n.frames.filter(frame => frame.type === 'voice.start').at(-1)!;
+    const note = (stream.context as any).voiceNote;
+    const turn: Turn = { id: 'local-note-turn', sessionId: 'assistant', userId: 'user', generation: 1, userText: 'Play my recording.',
+      assistantText: null, status: 'running', clientTurnId: 'local-note-client', context: stream.context as any };
+    h.n.turns.push(turn);
+    await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: turn.clientTurnId }); h.n.frame({ type: 'turn.accepted', turn }); });
+    const command = async (id: string, action: string, recordingId = note.id, recipientId = note.recipientId) => {
+      await act(async () => { await h.n.event({ id, type: 'device.action_requested', createdAt: new Date().toISOString(), payload: {
+        actionId: id, sessionId: 'assistant', turnId: turn.id, kind: 'control_voice_note',
+        payload: { recordingId, recipientId, action }, expiresIn: 180000, context: turn.context,
+      } }, 0); });
+    };
+    const result = (id: string) => h.n.requests.find(r => r.path === `/v1/device-actions/${id}/result`)?.body;
+    await command('preview-local', 'preview');
+    await h.wait(() => !!h.n.playback);
+    assert.equal(result('preview-local'), undefined); assert.equal(h.n.nativePCM, null);
+    assert.equal(h.n.requests.some(r => r.path === '/v1/media'), false, 'preview stays local');
+    await act(async () => { h.n.playback!(); });
+    await h.wait(() => !!result('preview-local'));
+    assert.equal(result('preview-local').success, true);
+    await command('wrong-local', 'send', 'replaced-recording');
+    await h.wait(() => !!result('wrong-local'));
+    assert.equal(result('wrong-local').success, false); assert.ok(h.mia.recording);
+    await command('wrong-recipient', 'send', note.id, 'ben-user');
+    await h.wait(() => !!result('wrong-recipient'));
+    assert.equal(result('wrong-recipient').success, false); assert.ok(h.mia.recording);
+    await command('send-local', 'send');
+    await h.wait(() => !!result('send-local'));
+    assert.equal(result('send-local').success, true); assert.equal(h.mia.recording, null);
+    assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 1);
+    assert.equal(h.n.audioConflicts, 0); assert.equal(h.mia.voiceFault, false);
+  } finally { await h.close(); }
+});
+
+test('recording delivery resolves its captured recipient even after the visible chat changes', async () => {
+  const h = await mount(true);
+  try {
+    h.n.savedChats.push({ ...chat, id: 'ben', recipient: { id: 'ben-user', displayName: 'Ben', username: 'ben' } });
+    await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.startRecording(); await h.mia.finishRecording(); });
+    const recorded = (h.n.frames.filter(f => f.type === 'voice.context' && (f.context as any)?.voiceNote).at(-1)!.context as any).voiceNote;
+    assert.equal(recorded.recipientId, 'recipient'); assert.equal(recorded.chatId, undefined);
+    await act(async () => { await h.mia.navigate('chats', 'ben'); });
+    assert.equal(h.mia.activeChatId, 'ben');
+    await act(async () => { await h.mia.useRecording(); });
+    const destination = h.n.requests.filter(r => r.path === '/v1/chats' && r.method === 'POST').at(-1)!;
+    assert.equal(destination.body.recipientId, 'recipient');
+    assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 1);
+    assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/ben/messages' && r.method === 'POST').length, 0);
+  } finally { await h.close(); }
+});
+
+test('failed sends keep the original draft; retry and repeated approval use one message identity', async () => {
+  const h = await mount(true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.startRecording(); await h.mia.finishRecording(); });
+    const value = h.mia.recording;
+    h.n.failSend = true;
+    await act(async () => { await assert.rejects(h.mia.useRecording()); });
+    assert.equal(h.mia.recording, value); assert.equal(h.mia.pending[0]?.status, 'failed');
+    h.n.failSend = false;
+    await act(async () => { await Promise.all([h.mia.useRecording(), h.mia.useRecording()]); });
+    assert.equal(h.mia.recording, null);
+    const sends = h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST');
+    assert.equal(sends.length, 2); assert.equal(sends[0]!.body.clientMessageId, sends[1]!.body.clientMessageId);
+    assert.equal(h.n.requests.filter(r => r.path === '/v1/media').length, 1, 'retry keeps the same original media');
+  } finally { await h.close(); }
+});
 
 test('startup waits for both saved credentials and mode, then opens assistant home only for the restored voice mode', async () => {
   for (const enabled of [false, true]) for (const sessionFirst of [true, false]) {
@@ -801,14 +1070,14 @@ test('backgrounding releases the microphone and returning resumes the enabled vo
   } finally { await h.close(); }
 });
 
-test('recording a voice note suspends command capture through preview and discard', async () => {
+test('finishing a voice note restores command capture while keeping its unsent draft', async () => {
   const h = await mount(true);
   try {
     await h.wait(() => !!h.n.capture);
     await act(async () => { await h.mia.startRecording(); });
     assert.equal(h.n.capture, null); assert.equal(h.mia.audioState, 'recording');
     await act(async () => { await h.mia.finishRecording(); });
-    assert.ok(h.mia.recording); assert.equal(h.n.capture, null);
+    assert.ok(h.mia.recording); await h.wait(() => !!h.n.capture);
     await act(async () => { await h.mia.discardRecording(); });
     await h.wait(() => !!h.n.capture); assert.equal(h.mia.aiMode, true);
   } finally { await h.close(); }
@@ -1015,7 +1284,7 @@ test('the transparent global layer owns every page and consumes taps, swipes and
       for (const [x, y] of [[12, 24], [195, 400], [375, 820]]) {
         const muted = h.mia.microphoneMuted;
         await act(async () => { layer().props.onTouchStart(event(x!, y!, 1000)); layer().props.onPressOut(); layer().props.onPress(event(x!, y!, 1100)); });
-        assert.equal(h.mia.microphoneMuted, !muted); assert.equal(h.mia.tab, tab); assert.equal(h.mia.activeChatId, chatId);
+        assert.equal(h.mia.microphoneMuted, y! < h.n.dimensions.height * .6 ? !muted : muted); assert.equal(h.mia.tab, tab); assert.equal(h.mia.activeChatId, chatId);
       }
       const muted = h.mia.microphoneMuted;
       await act(async () => { layer().props.onTouchStart(event(30, 120, 2000)); layer().props.onTouchMove(event(30, 240, 2100)); layer().props.onPressOut(); layer().props.onPress(event(30, 240, 2200)); });

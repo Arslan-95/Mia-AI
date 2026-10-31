@@ -23,10 +23,10 @@ new Function('require', 'module', 'exports', code)((id: string) => {
   throw new Error('Unexpected Pressability dependency: ' + id);
 }, module, module.exports);
 
-export function pressGesture(props: PressableProps) {
+export function pressGesture(props: PressableProps, initialPoint = { x: 10, y: 10 }) {
   const responder = new module.exports.default(props);
   const handlers = responder.getEventHandlers();
-  let point = { pageX: 10, pageY: 10, locationX: 10, locationY: 10 };
+  let point = { pageX: initialPoint.x, pageY: initialPoint.y, locationX: initialPoint.x, locationY: initialPoint.y };
   const event = () => ({ currentTarget: 1, target: 1, persist() {}, nativeEvent: {
     ...point, timestamp: Date.now(), touches: [point], changedTouches: [point],
   } });

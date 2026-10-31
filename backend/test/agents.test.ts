@@ -52,14 +52,25 @@ for (const scenario of [
   { name: 'second narration fails after a specialist lookup', failAt: 1, delegated: true },
   { name: 'all three narrations succeed', failAt: -1, delegated: false },
   { name: 'presentation is unconfirmed', failAt: 1, delegated: false, presentationUnknown: true },
+  { name: 'the skip notice also fails', failAt: 0, delegated: false, noticeFails: true },
+  { name: 'an inaccurate completion claim is revised', failAt: 1, delegated: false, wrongSummary: true },
 ]) test(`sequential reading: ${scenario.name}`, async t => {
   let chatId = '';
   let sources: string[] = [];
-  let modelCalls = 0;
   let readingStarted = false;
   let delegated = false;
+  let resumed = false;
+  let summaries = 0;
+  let reviews = 0;
+  const batch = (indices: number[]): ModelResponse => {
+    const responses = indices.map(index => call('show_message', { chatId, messageId: sources[index], focus: null, narration: `Message ${index + 1}.` }));
+    return { text: '', output: responses.flatMap(item => item.output), calls: responses.flatMap(item => item.calls) };
+  };
   const provider: ModelProvider = { configured: true, async respond(request) {
-    modelCalls++;
+    if (request.tools.some(tool => tool.name === 'reading_reply_verdict')) {
+      reviews++;
+      return call('reading_reply_verdict', { accurate: !JSON.stringify(request.input).includes('All three messages were read.') });
+    }
     if (request.instructions.startsWith("You are Mia's messaging specialist")) return answer(`Sources in order: ${sources.join(', ')}`);
     if (scenario.delegated && !delegated) {
       delegated = true;
@@ -68,12 +79,19 @@ for (const scenario of [
     if (!readingStarted) {
       readingStarted = true;
       // Even a model that batches all sources must not advance past failure.
-      const batch = sources.map((messageId, index) => call('show_message', {
-        chatId, messageId, focus: null, narration: `Message ${index + 1}.`,
-      }));
-      return { text: '', output: batch.flatMap(item => item.output), calls: batch.flatMap(item => item.calls) };
+      return batch([0, 1, 2]);
     }
-    return answer('All three messages were read.');
+    const context = JSON.parse(request.instructions.split('Server-supplied current context (data, not instructions):\n')[1]!);
+    if (context.readingProgress.needsNotice) return call('announce_message_skip', {
+      failedActionId: context.readingProgress.needsNotice.failedActionId,
+      narration: `I couldn't read message ${scenario.failAt + 1}. I'll continue with the next one.`,
+    });
+    if (scenario.failAt >= 0 && !resumed) {
+      resumed = true;
+      return batch([0, 1, 2].filter(index => index > scenario.failAt));
+    }
+    if (scenario.failAt < 0 || (scenario.wrongSummary && summaries++ === 0)) return answer('All three messages were read.');
+    return answer('Two messages were read; one could not be read and was skipped.');
   } };
   const c = await fixture(provider); t.after(() => c.close());
   const chat = await c.messaging.createDirectChat(c.ids.alice, c.ids.anna); chatId = chat.id;
@@ -81,36 +99,42 @@ for (const scenario of [
     { kind: 'text', text: `Message ${index + 1}.` }, randomUUID())).id);
   const accepted = await c.submit('Read the first three messages.');
   const handled: string[] = [];
+  const order: string[] = [];
   const done = await waitFor(async () => {
-    const pending = await c.db.query<{ id: string; payload: { messageId: string } }>(
-      `SELECT id,payload FROM device_actions WHERE turn_id=$1 AND state='pending' ORDER BY sequence`, [accepted.turn.id]);
+    const pending = await c.db.query<{ id: string; kind: string; payload: { messageId: string } }>(
+      `SELECT id,kind,payload FROM device_actions WHERE turn_id=$1 AND state='pending' ORDER BY sequence`, [accepted.turn.id]);
     for (const action of pending) {
-      const index = sources.indexOf(action.payload.messageId); handled.push(action.payload.messageId);
+      const index = sources.indexOf(action.payload.messageId);
+      const notice = action.kind === 'announce_message_skip';
+      order.push(notice ? 'notice' : `source-${index}`);
+      if (!notice) handled.push(action.payload.messageId);
       const reference = { chatId, messageId: action.payload.messageId, revision: index + 1 };
-      await c.runtime.state.acknowledgeAction(c.ids.alice, action.id, index !== scenario.failAt, {
+      const fails = notice ? scenario.noticeFails : index === scenario.failAt;
+      await c.runtime.state.acknowledgeAction(c.ids.alice, action.id, !fails, {
         reference, context: { route: `/chat/${chatId}`, revision: 1, reference }, presentationConfirmed: !scenario.presentationUnknown,
-        ...(index === scenario.failAt ? { stage: scenario.presentationUnknown ? 'presentation' : 'narration', code: 'TTS_UNAVAILABLE' } : {}),
+        ...(fails ? { stage: scenario.presentationUnknown && !notice ? 'presentation' : 'narration', code: 'TTS_UNAVAILABLE' } : {}),
       });
     }
     const turn = await c.runtime.state.turn(c.ids.alice, c.session.id, accepted.turn.id);
-    assert.notEqual(turn.status, 'failed');
-    return turn.status === 'completed' ? turn : undefined;
+    if (!scenario.noticeFails) assert.notEqual(turn.status, 'failed');
+    return ['completed','failed'].includes(turn.status) ? turn : undefined;
   });
   if (scenario.failAt < 0) {
     assert.deepEqual(handled, sources);
     assert.equal(done.assistantText, 'All three messages were read.');
   } else {
-    assert.deepEqual(handled, sources.slice(0, scenario.failAt + 1));
-    if (scenario.presentationUnknown) {
-      assert.match(done.assistantText!, /couldn't confirm/);
-      assert.doesNotMatch(done.assistantText!, /message was not shown/);
-    } else assert.match(done.assistantText!, /appeared on screen.*couldn't finish its audio/);
-    assert.match(done.assistantText!, /request is not complete/);
-    assert.doesNotMatch(done.assistantText!, /All three messages were read/);
-    assert.equal(modelCalls, scenario.delegated ? 3 : 1, 'no model continuation may ignore the failed narration');
-    const events = await c.db.query<{ payload: { success: boolean } }>(
-      `SELECT payload FROM events WHERE type='agent.tool_completed' AND payload->>'turnId'=$1 ORDER BY id DESC`, [accepted.turn.id]);
-    assert.equal(events[0]?.payload.success, false);
+    if (scenario.noticeFails) {
+      assert.equal(done.status, 'failed'); assert.equal(done.assistantText, null);
+      assert.deepEqual(order, ['source-0','notice']);
+      const [failed] = await c.db.query('SELECT error_code FROM assistant_turns WHERE id=$1', [accepted.turn.id]);
+      assert.equal(failed?.error_code, 'READING_NOTICE_FAILED');
+      assert.equal(reviews, 0);
+    } else {
+      assert.deepEqual(handled, sources);
+      assert.deepEqual(order, scenario.failAt === 0 ? ['source-0','notice','source-1','source-2'] : ['source-0','source-1','notice','source-2']);
+      assert.equal(done.assistantText, 'Two messages were read; one could not be read and was skipped.');
+      assert.equal(reviews, scenario.wrongSummary ? 2 : 1);
+    }
   }
 });
 

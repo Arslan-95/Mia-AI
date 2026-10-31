@@ -11,8 +11,9 @@ const routeSchema = z.string().max(100).refine(route => {
 
 export const voiceStateSchema = z.object({ enabled: z.boolean(), microphoneMuted: z.boolean(), revision: z.int().nonnegative() }).strict();
 export const referenceSchema = z.object({ chatId: z.uuid(), messageId: z.uuid(), revision: z.int().nonnegative(), focus: z.object({ start: z.int().nonnegative(), end: z.int().positive() }).strict().optional() }).strict();
+export const voiceNoteSchema = z.object({ id: z.uuid(), recipientId: z.uuid(), durationMs: z.int().nonnegative().max(119000) }).strict();
 export const clientContextSchema = z.object({ route: routeSchema, revision: z.int().nonnegative(), voice: voiceStateSchema.optional(),
-  reference: referenceSchema.optional(), previousRoute: routeSchema.optional() }).strict();
+  voiceNote: voiceNoteSchema.optional(), reference: referenceSchema.optional(), previousRoute: routeSchema.optional() }).strict();
 export type ClientContext = z.infer<typeof clientContextSchema>;
 export const deviceResultSchema = z.object({ message: z.string().max(500).optional(), mediaId: z.uuid().optional(),
   code: z.string().regex(/^[A-Z][A-Z0-9_]{0,79}$/).optional(),
@@ -25,12 +26,16 @@ export function sameContext(left: ClientContext | null, right: ClientContext | n
   // Match values, not JSON key order after database serialization. Keep every
   // navigation/reference revision boundary; voice controls validate separately.
   return left?.route === right?.route && left?.revision === right?.revision && left?.previousRoute === right?.previousRoute
+    && left?.voiceNote?.id === right?.voiceNote?.id && left?.voiceNote?.recipientId === right?.voiceNote?.recipientId && left?.voiceNote?.durationMs === right?.voiceNote?.durationMs
     && a?.chatId === b?.chatId && a?.messageId === b?.messageId && a?.revision === b?.revision
     && a?.focus?.start === b?.focus?.start && a?.focus?.end === b?.focus?.end;
 }
 
 export async function assertContextAccess(sql: Sql, userId: string, context: ClientContext | null) {
   if (!context) return;
+  if (context.voiceNote && (context.voiceNote.recipientId === userId || !(await sql.query(`SELECT 1 FROM chat_members own
+    JOIN chat_members recipient ON recipient.chat_id=own.chat_id WHERE own.user_id=$1 AND recipient.user_id=$2 LIMIT 1`,
+    [userId, context.voiceNote.recipientId])).length)) throw notFound();
   if (context.reference) {
     const ref = context.reference;
     const [source] = await sql.query<{ text: string | null }>(`SELECT m.text FROM messages m JOIN chat_members c ON c.chat_id=m.chat_id

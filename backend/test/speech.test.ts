@@ -153,7 +153,7 @@ test('Google TTS rejects missing credentials, provider errors and malformed audi
 });
 
 test('Google TTS retries transient HTTP and network failures without duplicating audio', async () => {
-  for (const failure of [503, 429, 'network', 'body'] as const) {
+  for (const failure of [400, 503, 429, 'network', 'body'] as const) {
     let attempts = 0;
     const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async () => {
       if (++attempts === 1) {
@@ -177,9 +177,48 @@ test('Google TTS bounds retries, preserves status and does not retry permanent r
     });
     const expected = status === 429 ? 'TTS_RATE_LIMITED' : status === 400 ? 'TTS_REQUEST_REJECTED'
       : status === 403 ? 'TTS_AUTH_UNAVAILABLE' : 'TTS_UNAVAILABLE';
-    await assert.rejects(() => spokenAudio(provider), { code: expected, providerStatus: status, attempts: status >= 429 ? 3 : 1 });
-    assert.equal(attempts, status >= 429 ? 3 : 1);
+    await assert.rejects(() => spokenAudio(provider), { code: expected, providerStatus: status, attempts: status === 403 ? 1 : 3 });
+    assert.equal(attempts, status === 403 ? 1 : 3);
   }
+});
+
+test('Google TTS recovers on the third 400 attempt and records sanitized diagnostics even when recovery succeeds', async () => {
+  const diagnostics: unknown[] = [];
+  let requests = 0;
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'private-test-key' }), async () => {
+    if (++requests < 3) return Response.json({ error: { code: 400, status: 'INVALID_ARGUMENT',
+      message: 'Generation failed for Hello. with private-test-key; echoed "private source fragment". See https://example.test/private-token',
+      details: [{ reason: 'GENERATION_FAILED', metadata: { secret: 'must never be copied' } }] } }, { status: 400 });
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
+  }, undefined, undefined, diagnostic => { diagnostics.push(diagnostic); });
+  assert.deepEqual(await spokenAudio(provider), Buffer.from([1, 2, 3, 4, 5, 6]));
+  assert.equal(requests, 3); assert.equal(diagnostics.length, 2);
+  assert.deepEqual(diagnostics.map(item => (item as { attempt: number }).attempt), [1, 2]);
+  const first = diagnostics[0] as { providerStatus: number; providerErrorStatus: string; providerReason: string; providerMessage: string };
+  assert.equal(first.providerStatus, 400); assert.equal(first.providerErrorStatus, 'INVALID_ARGUMENT');
+  assert.equal(first.providerReason, 'GENERATION_FAILED'); assert.match(first.providerMessage, /Generation failed/);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /Hello\.|private-test-key|private source fragment|private-token|must never be copied/);
+});
+
+test('Google TTS diagnostics are bounded and diagnostic write failures cannot disable retries', async () => {
+  let requests = 0;
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async () => {
+    if (++requests === 1) return new Response('x'.repeat(10_000), { status: 400 });
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
+  }, undefined, undefined, () => { throw new Error('diagnostic disk unavailable'); });
+  assert.deepEqual(await spokenAudio(provider), Buffer.from([1, 2, 3, 4, 5, 6]));
+  assert.equal(requests, 2);
+});
+
+test('Google TTS keeps the final provider reason after exhausting all three 400 attempts', async () => {
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async () =>
+    Response.json({ error: { status: 'INVALID_ARGUMENT', message: 'Generation could not complete.', details: [{ reason: 'GENERATION_FAILED' }] } }, { status: 400 }));
+  await assert.rejects(() => spokenAudio(provider), error => {
+    const failure = error as { code: string; attempts: number; diagnostic: { providerReason: string } };
+    assert.equal(failure.code, 'TTS_REQUEST_REJECTED'); assert.equal(failure.attempts, 3);
+    assert.equal(failure.diagnostic.providerReason, 'GENERATION_FAILED');
+    return true;
+  });
 });
 
 test('Google TTS cancellation during retry backoff prevents another request', async () => {
@@ -188,7 +227,7 @@ test('Google TTS cancellation during retry backoff prevents another request', as
   const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async () => {
     attempts++;
     setTimeout(() => controller.abort(), 20);
-    return new Response('', { status: 503 });
+    return new Response('', { status: 400 });
   });
   await assert.rejects(() => spokenAudio(provider, 'Hello.', controller.signal), { name: 'AbortError' });
   assert.equal(attempts, 1);

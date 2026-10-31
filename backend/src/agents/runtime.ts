@@ -14,13 +14,10 @@ import { toolsFor, type AgentName } from './tools.js';
 import type { ClientContext } from './context.js';
 import { conversationInput } from './conversation.js';
 import { defaultSpeechDelivery } from '../speech/delivery.js';
+import { readingProgress, reviewReadingReply } from './reading-recovery.js';
 
 type Budget = { calls: number; delegations: number };
 const prompts = { mia: COORDINATOR_PROMPT, messaging: MESSAGING_PROMPT, contacts: CONTACTS_PROMPT };
-
-class MessageDeliveryIncomplete extends Error {
-  constructor(readonly presentationConfirmed: boolean) { super('Message narration did not complete.'); }
-}
 
 export class AssistantRuntime {
   readonly state: AssistantState;
@@ -101,18 +98,7 @@ export class AssistantRuntime {
     }, 5000);
     try {
       const input = await conversationInput(this.db, this.state, turn);
-      let result: string;
-      try {
-        result = await this.loop('mia', turn, controller.signal, input, { calls: 0, delegations: 0 });
-      } catch (error) {
-        if (!(error instanceof MessageDeliveryIncomplete)) throw error;
-        throwIfAborted(controller.signal);
-        // End the whole task, including delegated loops and remaining calls in
-        // a batch. A model cannot turn failed narration into a success claim.
-        result = error.presentationConfirmed
-          ? "The message appeared on screen, but I couldn't finish its audio. I stopped at that message; your request is not complete."
-          : "I couldn't confirm that the message was shown and its requested audio finished. I stopped at that message; your request is not complete.";
-      }
+      const result = await this.loop('mia', turn, controller.signal, input, { calls: 0, delegations: 0 });
       await this.state.finish(turn, controller.signal, result);
     } catch (error) {
       const code = error instanceof AppError ? error.code : controller.signal.aborted ? 'RUN_INTERRUPTED' : 'MODEL_ERROR';
@@ -122,7 +108,19 @@ export class AssistantRuntime {
 
   private async loop(agent: AgentName, turn: Turn, signal: AbortSignal, input: ModelItem[], budget: Budget): Promise<string> {
     const messaging = new MessagingService(this.db);
-    const drafts = (await messaging.drafts(turn.userId)).slice(0, 8).map((draft) => ({ ...draft, text: draft.text?.slice(0, 1200) }));
+    const recipients = new Map<string, ReturnType<MessagingService['profile']>>();
+    const recipientProfile = (id: string) => {
+      if (!recipients.has(id)) recipients.set(id, messaging.profile(id));
+      return recipients.get(id)!;
+    };
+    const drafts = await Promise.all((await messaging.drafts(turn.userId)).slice(0, 8).map(async draft =>
+      ({ ...draft, recipient: await recipientProfile(draft.recipientId), text: draft.text?.slice(0, 1200) })));
+    const visibleChatId = /^\/chat\/([^/]+)$/.exec(turn.context?.route ?? '')?.[1];
+    const visibleRecipient = visibleChatId ? (await messaging.chat(turn.userId, visibleChatId)).recipient : undefined;
+    const clientContext = turn.context ? { ...turn.context,
+      ...(visibleRecipient ? { visibleRecipient } : {}),
+      ...(turn.context.voiceNote ? { voiceNote: { ...turn.context.voiceNote, recipient: await recipientProfile(turn.context.voiceNote.recipientId) } } : {}),
+    } : null;
     const completedDraftReviews = await this.db.query(`SELECT r.draft_id AS "draftId",r.version,r.turn_id AS "reviewTurnId"
       FROM draft_reviews r JOIN assistant_turns t ON t.id=r.turn_id JOIN message_drafts d ON d.id=r.draft_id
       WHERE d.owner_id=$1 AND t.session_id=$2 AND t.status='completed' AND t.generation<$3
@@ -143,18 +141,31 @@ export class AssistantRuntime {
       } });
     for (let step = 0; step < 12; step++) {
       throwIfAborted(signal);
+      const reading = await readingProgress(this.db, turn);
+      const noticeFailed = reading.needsNotice && ['failed','cancelled'].includes(reading.needsNotice.noticeState);
+      if (noticeFailed) throw new AppError(503, 'READING_NOTICE_FAILED', 'The reading failure could not be announced.');
       // A save/correction/forget earlier in this loop must be reflected in
       // the next model call, rather than an obsolete system-context snapshot.
       const recentDeviceActions = await this.db.query(`SELECT id,kind,payload,state,result FROM device_actions
         WHERE user_id=$1 AND session_id=$2 AND turn_id=$3 ORDER BY sequence DESC LIMIT 5`, [turn.userId, turn.sessionId, turn.id]);
       const instructions = prefix + JSON.stringify({ currentTurnId: turn.id, currentTime: new Date().toISOString(),
-        clientContext: turn.context, savedDrafts: drafts, completedDraftReviews, recentDeviceActions,
-        speechDelivery: turn.speechDelivery ?? defaultSpeechDelivery,
+        clientContext, savedDrafts: drafts, completedDraftReviews, recentDeviceActions,
+        speechDelivery: turn.speechDelivery ?? defaultSpeechDelivery, readingProgress: reading,
         personalMemory: await new AgentMemory(this.db).context(turn.userId) });
-      const response = await this.provider.respond({ instructions, input, tools: [...tools.values()].map((tool) => tool.definition), signal });
+      const response = await this.provider.respond({ instructions, input,
+        tools: [...tools.values()].filter(tool => !reading.needsNotice ||
+          ['announce_message_skip','get_message','get_chat','get_device_action','set_speech_delivery'].includes(tool.definition.name)).map((tool) => tool.definition), signal });
       throwIfAborted(signal);
       if (!response.calls.length) {
         if (!response.text || response.text.length > 8000) throw new AppError(503, 'INVALID_MODEL_RESPONSE', 'The assistant returned an invalid reply.');
+        if (reading.needsNotice || (agent === 'mia' && reading.failures.length &&
+          !await reviewReadingReply(this.provider, signal, response.text, reading))) {
+          input.push(...response.output, { role: 'user', content: [{ type: 'input_text', text:
+            `Server execution feedback (not new user speech): ${JSON.stringify(reading)}. ${reading.needsNotice
+              ? 'First announce the failed source with announce_message_skip. Do not finish or move on before the notice completes.'
+              : 'Revise the reply to reflect the confirmed incomplete reading. Do not claim that skipped sources were read or unconfirmed audio was heard.'}` }] });
+          continue;
+        }
         return response.text;
       }
       input.push(...response.output);
@@ -167,6 +178,22 @@ export class AssistantRuntime {
         try {
           const tool = tools.get(call.name);
           if (!tool) throw new AppError(400, 'UNKNOWN_TOOL', 'That tool is not available to this agent.');
+          // Recheck after EACH call: a batch may contain more sources after
+          // the one that just failed. They must wait for an audible notice.
+          const progress = await readingProgress(this.db, turn);
+          if (progress.needsNotice) {
+            if (['failed','cancelled'].includes(progress.needsNotice.noticeState))
+              throw new AppError(409, 'SKIP_NOTICE_FAILED', 'The skip notice did not finish. Stop reading and explain the incomplete request.');
+            if (!['announce_message_skip','get_message','get_chat','get_device_action','set_speech_delivery'].includes(call.name))
+              throw new AppError(409, 'READING_SKIP_NOTICE_REQUIRED', `Announce the failed source before continuing. Failed action: ${progress.needsNotice.failedActionId}`);
+            if (call.name === 'announce_message_skip' && (JSON.parse(call.arguments) as { failedActionId?: string }).failedActionId !== progress.needsNotice.failedActionId)
+              throw new AppError(409, 'READING_SKIP_NOTICE_REQUIRED', 'Announce the actual pending failure before another source.');
+          }
+          if (call.name === 'show_message') {
+            const requested = JSON.parse(call.arguments) as { chatId?: string; messageId?: string };
+            if (progress.failures.some(failure => failure.chatId === requested.chatId && failure.messageId === requested.messageId))
+              throw new AppError(409, 'READING_RETRY_EXHAUSTED', 'This source already exhausted its speech attempts. Continue with the next requested source; do not reset its retries.');
+          }
           result = await tool.execute(JSON.parse(call.arguments) as unknown);
         } catch (error) {
           throwIfAborted(signal);
@@ -178,9 +205,10 @@ export class AssistantRuntime {
         }
         throwIfAborted(signal);
         const action = result as { kind?: string; state?: string; result?: { stage?: string; presentationConfirmed?: boolean } } | null;
-        const deliveryIncomplete = call.name === 'show_message' && action?.kind === 'show_message' && action.state !== 'completed';
+        const deliveryIncomplete = ['show_message','announce_message_skip'].includes(call.name) && action?.kind === call.name && action.state !== 'completed';
         await this.state.emit(turn, signal, 'agent.tool_completed', { agent, tool: call.name, success: success && !deliveryIncomplete });
-        if (deliveryIncomplete) throw new MessageDeliveryIncomplete(action?.result?.presentationConfirmed === true);
+        if (action?.kind === 'announce_message_skip' && action.state !== 'completed')
+          throw new AppError(503, 'READING_NOTICE_FAILED', 'The reading failure could not be announced.');
         const serialized = JSON.stringify(result ?? null);
         input.push({ type: 'function_call_output', call_id: call.callId,
           output: serialized.length <= 32_000 ? serialized : JSON.stringify({ error: 'RESULT_TOO_LARGE', message: 'Request fewer messages or a narrower result.' }) });
