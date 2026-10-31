@@ -30,6 +30,7 @@ test('authenticated messaging, isolation, drafts and retry-safe delivery', async
   const payload = { clientMessageId: randomUUID(), content: { kind: 'text', text: 'See you at seven.' } };
   const sent = await app.inject({ method: 'POST', url: `/v1/chats/${chatId}/messages`, headers, payload });
   assert.equal(sent.statusCode, 201, sent.body);
+  assert.equal(sent.json().clientMessageId, payload.clientMessageId);
   const retry = await app.inject({ method: 'POST', url: `/v1/chats/${chatId}/messages`, headers, payload });
   assert.equal(retry.json().id, sent.json().id);
   const changed = await app.inject({ method: 'POST', url: `/v1/chats/${chatId}/messages`, headers,
@@ -70,9 +71,14 @@ test('authenticated messaging, isolation, drafts and retry-safe delivery', async
   const media = new MediaService(context.db, context.config.mediaDirectory);
   const uploaded = await media.upload(alice.user.id, wav());
   assert.equal((await app.inject({ url: `/v1/media/${uploaded.id}`, headers: annaHeaders })).statusCode, 404);
+  const voiceClientId = randomUUID();
   const voice = await app.inject({ method: 'POST', url: `/v1/chats/${chatId}/messages`, headers,
-    payload: { clientMessageId: randomUUID(), content: { kind: 'voice', mediaId: uploaded.id } } });
+    payload: { clientMessageId: voiceClientId, content: { kind: 'voice', mediaId: uploaded.id } } });
   assert.equal(voice.statusCode, 201, voice.body);
+  assert.equal(voice.json().durationMs, uploaded.durationMs);
+  assert.equal(voice.json().clientMessageId, voiceClientId);
+  const voiceHistory = (await app.inject({ url: `/v1/chats/${chatId}/messages`, headers: annaHeaders })).json();
+  assert.equal(voiceHistory.find((message: { id: string }) => message.id === voice.json().id).durationMs, uploaded.durationMs);
   const playable = await app.inject({ url: `/v1/media/${uploaded.id}`, headers: annaHeaders });
   assert.equal(playable.statusCode, 200);
   assert.deepEqual(playable.rawPayload, wav());

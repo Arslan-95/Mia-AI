@@ -14,7 +14,7 @@ export class DuplexAudio {
   private subscriptions: { remove(): void }[] = [];
   private inputWatchdog?: ReturnType<typeof setTimeout>;
   private echo = new PlaybackEchoGate();
-  private recording?: { parts: Uint8Array[]; bytes: number };
+  private recording?: { parts: Uint8Array[]; bytes: number; startedAt: number };
   constructor(private prepareSession: () => Promise<void> = async () => {}) {}
   async start(onPCM: (bytes: Uint8Array) => void, onInterrupted: () => void, onFailure: (error: unknown) => void) {
     if (!MiaVoice || !this.available) throw new UserFacingError('Update Mia to use voice interruption.');
@@ -99,11 +99,17 @@ export class DuplexAudio {
   setInputMuted(muted: boolean) { this.inputMuted = muted; this.echo.discardInput(); }
   startRecording() {
     if (!this.active) throw new VoiceCaptureUnavailable('Mia’s microphone is not ready yet.');
-    this.recording = { parts: [], bytes: 0 };
+    this.recording = { parts: [], bytes: 0, startedAt: Date.now() };
+  }
+  recordingStatus() {
+    return this.recording ? { bytes: this.recording.bytes, elapsedMs: Date.now() - this.recording.startedAt } : undefined;
   }
   finishRecording() {
     const recording = this.recording; this.recording = undefined;
     if (!recording?.bytes) throw new UserFacingError('No audio was captured. Please record your message again.');
+    const elapsed = Math.min(119000, Date.now() - recording.startedAt);
+    if (elapsed > 2000 && recording.bytes / 48 < elapsed * .8)
+      throw new VoiceCaptureUnavailable('The recording was interrupted and was not sent. Hold to record it again.');
     return concatBytes(recording.parts);
   }
   cancelRecording() { this.recording = undefined; }

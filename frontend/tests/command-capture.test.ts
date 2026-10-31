@@ -125,6 +125,21 @@ test('spoken playback resolves only at device completion and cancellation remove
   delete (globalThis as any).__miaAudio;
 });
 
+test('classic message pause keeps the player and completion alive until the resumed audio finishes', async t => {
+  const { n, engine } = await device(); let completed = false;
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'] });
+  try {
+    const task = engine.play('file:///original.wav').then(() => { completed = true; }); await flush();
+    n.status({ playing: true, currentTime: 2, duration: 10 });
+    await engine.pausePlayback(); n.status({ playing: false, isLoaded: true, currentTime: 2, duration: 10, isBuffering: false }); await flush();
+    t.mock.timers.tick(180000); await flush();
+    assert.equal(completed, false); assert.equal(n.playersReleased, 0);
+    engine.resumePlayback(); n.status({ playing: true, currentTime: 2, duration: 10 });
+    n.status({ playing: false, currentTime: 10, duration: 10, didJustFinish: true }); await task;
+    assert.equal(completed, true); assert.equal(n.playersReleased, 1);
+  } finally { await engine.stop(); t.mock.timers.reset(); delete (globalThis as any).__miaAudio; }
+});
+
 test('original playback progress comes from device status and late callbacks cannot update stopped audio', async () => {
   const { n, engine } = await device(); const positions: PlaybackProgress[] = []; let starts = 0;
   try {

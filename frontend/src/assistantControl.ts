@@ -3,7 +3,7 @@ import { UserFacingError } from './errors';
 
 type StopResult = { sessionId: string; generation: number; stopped: true };
 type RequestApi = Pick<Api, 'base' | 'session' | 'request'>;
-const stopFailure = 'Audio is stopped on this iPhone, but Mia may still be working. Check your connection and try Stop Mia again.';
+const stopFailure = 'Audio is stopped on this iPhone, but Mia may still be working. Check your connection and try again.';
 
 export class AssistantControl {
   private pending?: { base: string; token?: string; sessionId: string; preserveVoice: boolean; result: Promise<StopResult> };

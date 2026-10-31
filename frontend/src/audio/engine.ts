@@ -10,6 +10,7 @@ import { checkVoice, voiceDelay } from '../voiceConversation';
 export class Engine implements AudioEngine {
   private recorder?: AudioRecorder; private player?: AudioPlayer; private startedAt = 0;
   private rejectPlayback?: (error: Error) => void; private owner = new AudioOwnership();
+  private playbackPaused = false;
   async start(signal?: AbortSignal) {
     await this.owner.transition(async current => {
     const valid = current;
@@ -68,6 +69,7 @@ export class Engine implements AudioEngine {
   }
   async stop() { await this.owner.transition(async () => this.cleanup()); }
   private async cleanup() {
+    this.playbackPaused = false;
     this.rejectPlayback?.(new CancelledError()); this.rejectPlayback = undefined;
     if (this.player) { this.player.pause(); this.player.release(); this.player = undefined; }
     const recorder = this.recorder; this.recorder = undefined;
@@ -85,13 +87,17 @@ export class Engine implements AudioEngine {
       let settled = false;
       const finish = (error?: Error) => {
         if (settled) return;
-        settled = true; clearTimeout(timeout); listener.remove();
+        settled = true; clearInterval(timeout); listener.remove();
         this.rejectPlayback = undefined;
         if (this.player === player) { this.player = undefined; player.release(); }
         if (error) reject(error); else resolve();
       };
       this.rejectPlayback = error => finish(error);
-      const timeout = setTimeout(() => finish(new UserFacingError('Playback did not finish. Please try again.')), 125000);
+      let remaining = 125000, measuredAt = Date.now();
+      const timeout = setInterval(() => {
+        const now = Date.now(); if (!this.playbackPaused) remaining -= now - measuredAt; measuredAt = now;
+        if (remaining <= 0) finish(new UserFacingError('Playback did not finish. Please try again.'));
+      }, 1000);
       let started = false;
       const listener = player.addListener('playbackStatusUpdate', status => {
         if (settled) return;
@@ -100,13 +106,15 @@ export class Engine implements AudioEngine {
           playing: status.playing, buffering: status.isBuffering });
         if (status.playing && !started) { started = true; onStarted?.(); }
         if (status.didJustFinish) finish();
-        else if (!status.playing && status.isLoaded && status.currentTime > 0 && !status.isBuffering) finish(new UserFacingError('Playback was interrupted. Please try again.'));
+        else if (!this.playbackPaused && !status.playing && status.isLoaded && status.currentTime > 0 && !status.isBuffering) finish(new UserFacingError('Playback was interrupted. Please try again.'));
       });
       player.play();
     });
     });
     await completion;
   }
+  async pausePlayback() { if (this.player) { this.playbackPaused = true; this.player.pause(); } }
+  resumePlayback() { if (this.player) { this.playbackPaused = false; this.player.play(); } }
   async playPcm(bytes: Uint8Array) {
     const file = new File(Paths.cache, `mia-speech-${Date.now()}.wav`); file.write(pcmWav(bytes));
     try { await this.play(file.uri); } finally { if (file.exists) file.delete(); }

@@ -7,10 +7,10 @@ import { speechDeliverySchema, defaultSpeechDelivery, type SpeechDelivery } from
 
 export type Session = { id: string; userId: string; generation: number; activeChatId: string | null };
 export type Turn = { id: string; sessionId: string; userId: string; generation: number; userText: string;
-  status: 'queued' | 'running' | 'completed' | 'interrupted' | 'failed'; assistantText: string | null; clientTurnId: string; context: ClientContext | null; speechDelivery?: SpeechDelivery | null };
+  status: 'queued' | 'running' | 'completed' | 'interrupted' | 'failed'; assistantText: string | null; clientTurnId: string; createdAt?: Date | string; context: ClientContext | null; speechDelivery?: SpeechDelivery | null };
 export type DeviceAction = { id: string; kind: string; payload: unknown; state: string; result: unknown };
 const sessionColumns = 'id,user_id AS "userId",generation,active_chat_id AS "activeChatId"';
-const turnColumns = 't.id,t.session_id AS "sessionId",s.user_id AS "userId",t.generation,t.user_text AS "userText",t.status,t.assistant_text AS "assistantText",t.client_turn_id AS "clientTurnId",t.client_context AS context,t.speech_delivery AS "speechDelivery"';
+const turnColumns = 't.id,t.created_at AS "createdAt",t.session_id AS "sessionId",s.user_id AS "userId",t.generation,t.user_text AS "userText",t.status,t.assistant_text AS "assistantText",t.client_turn_id AS "clientTurnId",t.client_context AS context,t.speech_delivery AS "speechDelivery"';
 
 export class AssistantState {
   constructor(readonly db: Database) {}
@@ -171,10 +171,12 @@ export class AssistantState {
   }
 
   async action(turn: Turn, signal: AbortSignal, kind: string, payload: unknown): Promise<DeviceAction> {
+    if (kind === 'control_voice_note' || kind === 'record_voice')
+      throw new AppError(409, 'CLIENT_CONTROLLED_RECORDING', 'Voice notes are recorded and sent directly by the client. Only navigate to the recipient chat.');
     return this.mutate(turn, signal, async (db) => {
       const [count] = await db.query<{ count: number }>('SELECT count(*)::integer AS count FROM device_actions WHERE turn_id=$1', [turn.id]);
       if ((count?.count ?? 0) >= 12) throw new AppError(422, 'ACTION_LIMIT', 'This turn reached its device action limit.');
-      const extended = ['show_message','dismiss_message','play_audio','announce_message_skip','control_voice_note'].includes(kind);
+      const extended = ['show_message','dismiss_message','play_audio','announce_message_skip'].includes(kind);
       const id = randomUUID();
       const [stored] = await db.query<{ sequence: string }>(`INSERT INTO device_actions(id,user_id,session_id,turn_id,generation,kind,payload,expires_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,now() + ($8::integer * interval '1 second')) RETURNING sequence`,
@@ -225,9 +227,7 @@ export class AssistantState {
         if (feedback.context?.voice && JSON.stringify(feedback.context.voice) !== JSON.stringify(feedback.voice)) throw conflict('Voice feedback must match the device context.');
       }
       if (typeof result === 'object' && result !== null && 'mediaId' in result) {
-        if (action.kind !== 'record_voice') throw conflict('This device action does not accept a recording.');
-        const [media] = await sql.query('SELECT id FROM media WHERE id = $1 AND owner_id = $2', [result.mediaId, userId]);
-        if (!media) throw notFound();
+        throw conflict('Device actions do not accept local recordings. Upload and send voice notes directly from the client.');
       }
       const state = success ? 'completed' : 'failed';
       await sql.query('UPDATE device_actions SET state = $2,result = $3::jsonb WHERE id = $1', [actionId, state, JSON.stringify(result)]);

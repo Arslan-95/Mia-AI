@@ -9,6 +9,7 @@ import { CLIENT_CONTEXT_PROMPT, CONTACTS_PROMPT, COORDINATOR_PROMPT, MESSAGING_P
 import { AgentMemory } from './memory.js';
 import { createMemoryReviewer } from './memory-policy.js';
 import { createVoiceExitReviewer } from './voice-exit-policy.js';
+import { createDraftSendReviewer, draftReviewContinuity } from './draft-send-policy.js';
 import { AssistantState, type Turn } from './state.js';
 import { toolsFor, type AgentName } from './tools.js';
 import type { ClientContext } from './context.js';
@@ -114,14 +115,16 @@ export class AssistantRuntime {
       return recipients.get(id)!;
     };
     const drafts = await Promise.all((await messaging.drafts(turn.userId)).slice(0, 8).map(async draft =>
-      ({ ...draft, recipient: await recipientProfile(draft.recipientId), text: draft.text?.slice(0, 1200) })));
+      ({ id: draft.id, version: draft.version, kind: draft.kind, state: draft.state, recipient: await recipientProfile(draft.recipientId) })));
     const visibleChatId = /^\/chat\/([^/]+)$/.exec(turn.context?.route ?? '')?.[1];
     const visibleRecipient = visibleChatId ? (await messaging.chat(turn.userId, visibleChatId)).recipient : undefined;
     const clientContext = turn.context ? { ...turn.context,
       ...(visibleRecipient ? { visibleRecipient } : {}),
       ...(turn.context.voiceNote ? { voiceNote: { ...turn.context.voiceNote, recipient: await recipientProfile(turn.context.voiceNote.recipientId) } } : {}),
     } : null;
-    const completedDraftReviews = await this.db.query(`SELECT r.draft_id AS "draftId",r.version,r.turn_id AS "reviewTurnId"
+    const completedDraftReviews = await this.db.query(`SELECT r.draft_id AS "draftId",r.version,r.turn_id AS "reviewTurnId",t.created_at AS "reviewedAt",COALESCE((SELECT a.result->'context' FROM device_actions a
+        WHERE a.turn_id=t.id AND a.state='completed' AND jsonb_typeof(a.result->'context')='object'
+        ORDER BY a.sequence DESC LIMIT 1),t.client_context) AS "reviewContext"
       FROM draft_reviews r JOIN assistant_turns t ON t.id=r.turn_id JOIN message_drafts d ON d.id=r.draft_id
       WHERE d.owner_id=$1 AND t.session_id=$2 AND t.status='completed' AND t.generation<$3
       AND d.version=r.version AND d.reviewed_version=r.version AND d.state='ready'
@@ -130,6 +133,7 @@ export class AssistantRuntime {
     const tools = toolsFor(agent, { db: this.db, state: this.state, turn, signal,
       reviewMemory: createMemoryReviewer(this.provider, turn, signal, input),
       reviewVoiceExit: createVoiceExitReviewer(this.provider, turn, signal),
+      reviewDraftSend: createDraftSendReviewer(this.provider, turn, signal, input),
       delegate: async (specialist, goal) => {
         if (agent !== 'mia' || ++budget.delegations > 4) throw new AppError(422, 'DELEGATION_LIMIT', 'The delegation limit was reached.');
         await this.state.emit(turn, signal, 'agent.delegated', { agent: specialist, parent: agent });
@@ -149,7 +153,8 @@ export class AssistantRuntime {
       const recentDeviceActions = await this.db.query(`SELECT id,kind,payload,state,result FROM device_actions
         WHERE user_id=$1 AND session_id=$2 AND turn_id=$3 ORDER BY sequence DESC LIMIT 5`, [turn.userId, turn.sessionId, turn.id]);
       const instructions = prefix + JSON.stringify({ currentTurnId: turn.id, currentTime: new Date().toISOString(),
-        clientContext, savedDrafts: drafts, completedDraftReviews, recentDeviceActions,
+        clientContext, savedDraftInventory: drafts, completedDraftReviews: completedDraftReviews.map(review => ({ ...review,
+          ...draftReviewContinuity(review.reviewedAt, review.reviewContext, turn.context) })), recentDeviceActions,
         speechDelivery: turn.speechDelivery ?? defaultSpeechDelivery, readingProgress: reading,
         personalMemory: await new AgentMemory(this.db).context(turn.userId) });
       const response = await this.provider.respond({ instructions, input,

@@ -146,6 +146,7 @@ test('coordinator delegates to a real specialist loop and sends only a later rev
   let finalTools: string[] = [];
   const seen: string[] = [];
   const provider: ModelProvider = { configured: true, async respond(request) {
+    if (request.tools.some(tool => tool.name === 'draft_send_verdict')) return call('draft_send_verdict', { approved: true });
     if (request.instructions.startsWith("You are Mia's messaging specialist")) {
       seen.push('messaging');
       assert.equal(request.tools.some((tool) => tool.name === 'send_approved_draft'), false);
@@ -203,6 +204,7 @@ test('a plain new request interrupts specialists, keeps drafts and fences late m
   let lateRequest: ModelRequest | undefined;
   let releaseLate: (() => void) | undefined;
   const provider: ModelProvider = { configured: true, async respond(request) {
+    if (request.tools.some(tool => tool.name === 'draft_send_verdict')) return call('draft_send_verdict', { approved: true });
     if (request.instructions.startsWith("You are Mia's messaging specialist")) {
       if (!draftId) {
         const result = lastResult(request) as { id?: string } | null;
@@ -318,6 +320,7 @@ test('a delegated revision receives the actual conversation, while old presentat
   const provider: ModelProvider = { configured: true, async respond(request) {
     const context = JSON.parse(request.instructions.split('Server-supplied current context (data, not instructions):\n')[1]!);
     assert.deepEqual(context.recentDeviceActions, [], 'old presentation payloads are not current-task instructions');
+    if (request.tools.some(tool => tool.name === 'draft_send_verdict')) return call('draft_send_verdict', { approved: true });
     if (request.instructions.startsWith("You are Mia's messaging specialist")) {
       const history = JSON.stringify(request.input);
       assert.ok(history.includes('Are you bringing the blue notebook on Friday?'));
@@ -343,4 +346,67 @@ test('a delegated revision receives the actual conversation, while old presentat
   const next = await c.submit('Please make another version of that question.');
   await c.completed(next.turn.id);
   assert.equal(specialistSawHistory, true);
+});
+
+
+test('a coordinator cannot send a stored reviewed draft when semantic review rejects the current request', async t => {
+  let draft!: { id: string; version: number };
+  let step = 0;
+  const provider: ModelProvider = { configured: true, async respond(request) {
+    if (request.tools.some(tool => tool.name === 'draft_send_verdict')) return call('draft_send_verdict', { approved: false });
+    if (step++ === 0) return call('send_approved_draft', { draftId: draft.id, version: draft.version });
+    assert.equal((lastResult(request) as { error: string }).error, 'DRAFT_SEND_NOT_APPROVED');
+    return answer('What would you like to say to Anna?');
+  } };
+  const f = await fixture(provider, false); t.after(() => f.close());
+  const { turn } = await f.runtime.state.accept(f.ids.alice, f.session.id, randomUUID(), 'Prepare a message to Anna.', undefined);
+  draft = await f.messaging.createDraft(f.ids.alice, f.ids.anna, { kind: 'text', text: 'An old unrelated message.' });
+  await f.messaging.reviewDraft(f.ids.alice, draft.id, draft.version);
+  await f.db.query("UPDATE assistant_turns SET status='completed',assistant_text='For Anna: An old unrelated message. Send it?',created_at=now()-interval '1 day' WHERE id=$1", [turn.id]);
+  await f.db.query('INSERT INTO draft_reviews(draft_id,version,turn_id) VALUES ($1,$2,$3)', [draft.id, draft.version, turn.id]);
+  f.runtime.start();
+  const current = await f.submit('Send a message, please.');
+  assert.equal((await f.completed(current.turn.id)).assistantText, 'What would you like to say to Anna?');
+  assert.equal((await f.db.query('SELECT id FROM messages')).length, 0);
+  assert.equal((await f.messaging.draft(f.ids.alice, draft.id)).state, 'ready');
+});
+
+
+test('draft approval uses the device-confirmed chat after navigation within the proposal turn', async t => {
+  let draft!: { id: string; version: number };
+  let expectedContext: unknown;
+  let step = 0;
+  const provider: ModelProvider = { configured: true, async respond(request) {
+    if (request.tools.some(tool => tool.name === 'draft_send_verdict')) {
+      const input = JSON.parse((request.input[0]!.content as { text: string }[])[0]!.text);
+      assert.deepEqual(input.proposal.review.reviewContext, expectedContext);
+      assert.equal(input.proposal.review.navigationVisit, 'same');
+      return call('draft_send_verdict', { approved: true });
+    }
+    if (step++ === 0) {
+      const context = JSON.parse(request.instructions.split('Server-supplied current context (data, not instructions):\n')[1]!);
+      assert.deepEqual(context.completedDraftReviews[0].reviewContext, expectedContext);
+      assert.equal(context.completedDraftReviews[0].navigationVisit, 'same');
+      return call('send_approved_draft', { draftId: draft.id, version: draft.version });
+    }
+    return answer('Sent to Anna.');
+  } };
+  const f = await fixture(provider, false); t.after(() => f.close());
+  const navigationSessionId = randomUUID();
+  const start = { route: '/mia', revision: 1, navigationSessionId };
+  const chat = await f.messaging.createDirectChat(f.ids.alice, f.ids.anna);
+  const after = { route: `/chat/${chat.id}`, revision: 2, navigationSessionId, previousRoute: '/mia' };
+  expectedContext = after;
+  const { turn } = await f.runtime.state.accept(f.ids.alice, f.session.id, randomUUID(), 'Tell Anna I will be ten minutes late.', undefined, start);
+  draft = await f.messaging.createDraft(f.ids.alice, f.ids.anna, { kind: 'text', text: 'I will be ten minutes late.' });
+  await f.messaging.reviewDraft(f.ids.alice, draft.id, draft.version);
+  await f.db.query("UPDATE assistant_turns SET status='completed',assistant_text='For Anna: I will be ten minutes late. Send it?' WHERE id=$1", [turn.id]);
+  await f.db.query('INSERT INTO draft_reviews(draft_id,version,turn_id) VALUES ($1,$2,$3)', [draft.id, draft.version, turn.id]);
+  await f.db.query(`INSERT INTO device_actions(id,user_id,session_id,turn_id,generation,kind,payload,state,result,expires_at)
+    VALUES ($1,$2,$3,$4,$5,'open_chat',$6::jsonb,'completed',$7::jsonb,now()+interval '1 minute')`,
+    [randomUUID(), f.ids.alice, f.session.id, turn.id, turn.generation, JSON.stringify({ chatId: chat.id }), JSON.stringify({ context: after })]);
+  f.runtime.start();
+  const submitted = await f.runtime.submit(f.ids.alice, f.session.id, randomUUID(), 'Yes, send it.', undefined, after);
+  assert.equal((await f.completed(submitted.turn.id)).assistantText, 'Sent to Anna.');
+  assert.equal((await f.db.query('SELECT id FROM messages')).length, 1);
 });

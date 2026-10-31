@@ -83,8 +83,10 @@ const sources: Record<string, string> = {
       async finish() { n.noteRecording = false; return { uri: 'file:///note.wav', durationMs: 1000 }; }
       async stop() { if (n.nativeSession) n.audioConflicts++; n.playback?.(); n.playback = null; n.noteRecording = false; }
       async playPcm() { n.playbacks++; await new Promise(resolve => { n.playback = resolve; }); }
+      async pausePlayback() { n.playerPaused = true; if (n.holdPlayerPause) await new Promise(resolve => { n.releasePlayerPause = resolve; }); }
+      resumePlayback() { n.playerPaused = false; }
       async play(_, __, started, progress) { n.playbackProgress = progress; started?.(); await this.playPcm(); }
-      async disposeRecording(recording) { n.deleted.push(recording.uri); }
+      async disposeRecording(recording) { if (n.failRecordingCleanup) throw new Error('Cache cleanup failed'); n.deleted.push(recording.uri); }
       async savePcm(pcm) { n.savedPcm = pcm; return { uri: 'file:///note.wav', durationMs: pcm.length / 48 }; }
       async readPcm(uri, headers, signal) {
         if (n.holdMediaRead) await new Promise(resolve => { n.releaseMediaRead = resolve; });
@@ -136,7 +138,7 @@ const sources: Record<string, string> = {
     }`,
 };
 const bundle = build({
-  stdin: { contents: `export { useMia } from './src/useMia'; export { default as App } from './src/App'; export { UiProvider, Button } from './src/ui'; export { Reveal } from './src/motion'; export { MessageReferenceCard } from './src/screens/MessageReferenceCard';`, resolveDir: root },
+  stdin: { contents: `export { useMia } from './src/useMia'; export { default as App } from './src/App'; export { UiProvider, Button } from './src/ui'; export { Reveal } from './src/motion'; export { MessageReferenceCard } from './src/screens/MessageReferenceCard'; export { VoiceNoteBubble } from './src/screens/VoiceNoteBubble';`, resolveDir: root },
   bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react'],
   define: { 'process.env.EXPO_PUBLIC_API_URL': JSON.stringify('http://mia.test') },
   plugins: [{ name: 'native-test', setup(build) {
@@ -472,14 +474,16 @@ test('original recording reports real completion and stop or mute bypass the pre
     await act(async () => { card.props.onLayout({ nativeEvent: { layout: { width: 358, height: 250 } } }); });
     await h.wait(() => h.n.playbacks === 1);
     assert.equal(h.mia.originalPlayback?.state, 'playing');
-    assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Playing voice message').length);
-    assert.ok(h.tree.findAll(node => node.props.testID === 'voice-message-waveform').length);
+    assert.equal(h.mia.originalPlayback?.state, 'playing');
+    assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Playing voice message').length, 0);
+    assert.ok(h.tree.findAll(node => node.props.testID === 'voice-message-progress').length);
     assert.equal(card.findAll(node => node.type === 'Pressable' as any).length, 0);
     assert.equal(h.tree.findAll(node => node.props.testID === 'audio-controls').length, 0);
     assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'This transcript must not replace the voice player.').length, 0);
     const label = (id: string) => h.tree.findAll(node => node.type === 'Text' as any && node.props.testID === id)[0]!.props.children;
     assert.equal(label('voice-message-duration'), '0:10');
     assert.equal(label('voice-message-status'), 'Playing');
+    assert.ok(h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'reference-playback-icon')[0]!.findAll(node => node.type === 'Icon' as any && node.props.name === 'pause').length);
     assert.equal(h.n.requests.some(r => r.path === '/v1/device-actions/original-one/result'), false);
     await command('input-mute', 'set_microphone_muted', { muted: true });
     await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/input-mute/result'));
@@ -526,8 +530,9 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     nativeRevision: 0, nativeSession: false, audioConflicts: 0, holdNativeStart: false, holdNativeStop: false,
     releaseNativeStart: null as (() => void) | null, releaseNativeStop: null as (() => void) | null,
     holdASR: false,
-    holdNoteStart: false, releaseNoteStart: null as (() => void) | null, failSend: false,
-    savedPcm: null as Uint8Array | null,
+    holdNoteStart: false, releaseNoteStart: null as (() => void) | null, failSend: false, failContacts: false, failRecordingCleanup: false,
+    savedPcm: null as Uint8Array | null, playerPaused: false, holdPlayerPause: false, releasePlayerPause: null as (() => void) | null, scrollOffsets: [] as { offset: number; animated: boolean }[],
+    holdSend: false, releaseSend: null as (() => void) | null,
     holdMediaRead: false, releaseMediaRead: null as (() => void) | null,
     appStateHandlers: new Set<(state: string) => void>(), announcements: [] as string[], vibrations: 0,
     dimensions: { width: 390, height: 844, scale: 3, fontScale: 1 }, reducedMotion: false,
@@ -576,6 +581,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     }
     if (path === '/v1/contacts' && method === 'POST') { const contact = { ...chat.recipient, name: 'Anna', contactId: 'contact-anna' }; if (!n.savedContacts.length) n.savedContacts.push(contact); return response(contact); }
     if (path === '/v1/contacts') {
+      if (n.failContacts) throw new Error('Contacts refresh failed');
       if (n.holdContacts) { n.contactsHeld = true; await new Promise<void>(resolve => { n.releaseContacts = resolve; }); }
       return response(n.savedContacts);
     }
@@ -583,7 +589,8 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     if (path.startsWith('/v1/chats/anna/messages/')) return response(n.referenceSources.find(source => path.endsWith('/' + source.id)));
     if (path === '/v1/chats/anna/messages' && method === 'POST') {
       if (n.failSend) throw new Error('Send failed');
-      return response({ id: 'sent-note', chatId: 'anna', senderId: 'user', kind: body.content.kind, mediaId: body.content.mediaId, text: null, createdAt: new Date().toISOString() });
+      if (n.holdSend) await new Promise<void>(resolve => { n.releaseSend = resolve; });
+      return response({ clientMessageId: body.clientMessageId, durationMs: body.content.kind === 'voice' ? 1000 : null, id: 'sent-note', chatId: 'anna', senderId: 'user', kind: body.content.kind, mediaId: body.content.mediaId ?? null, text: body.content.text ?? null, createdAt: new Date().toISOString() });
     }
     if (path.startsWith('/v1/chats/anna/messages')) return response(n.history);
     if (path.startsWith('/v1/chats/ben/messages')) return response([]);
@@ -614,12 +621,12 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     if (path.startsWith('/v1/device-actions/')) return response({});
     throw new Error(`Unexpected API call: ${method} ${path}`);
   };
-  const module = { exports: {} as { useMia: () => Mia; App: React.ComponentType; UiProvider: React.ComponentType<any>; Button: React.ComponentType<any>; Reveal: React.ComponentType<any>; MessageReferenceCard: React.ComponentType<React.ComponentProps<typeof import('../src/screens/MessageReferenceCard').MessageReferenceCard>> } };
+  const module = { exports: {} as { useMia: () => Mia; App: React.ComponentType; UiProvider: React.ComponentType<any>; Button: React.ComponentType<any>; Reveal: React.ComponentType<any>; VoiceNoteBubble: typeof import('../src/screens/VoiceNoteBubble').VoiceNoteBubble; MessageReferenceCard: React.ComponentType<React.ComponentProps<typeof import('../src/screens/MessageReferenceCard').MessageReferenceCard>> } };
   new Function('require', 'module', 'exports', code)(createRequire(import.meta.url), module, module.exports);
   let mia!: Mia; let renderer!: ReactTestRenderer;
   function Host() { mia = module.exports.useMia(); return null; }
   function AppHost() { return React.createElement(module.exports.App); }
-  await act(async () => { renderer = create(React.createElement(renderApp ? AppHost : Host)); });
+  await act(async () => { renderer = create(React.createElement(renderApp ? AppHost : Host), { createNodeMock: element => element.type === 'FlatList' ? { scrollToOffset: (value: any) => n.scrollOffsets.push(value) } : null }); });
   const wait = async (predicate: () => boolean) => {
     const end = Date.now() + 3000;
     while (!predicate() && Date.now() < end) await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
@@ -633,7 +640,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
   };
 }
 
-test('lower hold records until release, asks before sending, and preserves the agent mute choice', async () => {
+test('lower hold sends the original note on release without a question and preserves the agent mute choice', async () => {
   for (const native of [false, true]) for (const muted of [false, true]) {
     const h = await mount(true, true, native);
     let gesture: ReturnType<typeof pressGesture> | undefined;
@@ -648,13 +655,13 @@ test('lower hold records until release, asks before sending, and preserves the a
       assert.equal(h.n.noteRecording, !native); assert.equal(h.n.capture, null); assert.equal(!!h.n.nativePCM, native);
       assert.equal(h.mia.microphoneMuted, muted); assert.equal(h.mia.aiMode, true);
       await act(async () => { h.n.nativePCM?.(new Uint8Array(2400)); gesture!.release(); });
-      await h.wait(() => !!h.n.playback);
-      assert.ok(h.mia.recording); assert.equal(h.n.noteRecording, false);
-      const request = h.n.requests.find(r => r.path.endsWith('/turns') && r.method === 'POST')!;
-      assert.equal(request.body.context.voiceNote.recipientId, 'recipient');
-      assert.equal(request.body.context.voice.microphoneMuted, muted);
-      assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 0);
-      await act(async () => { h.n.playback!(); });
+      await h.wait(() => h.mia.voiceNoteStage === 'sent');
+      assert.equal(h.mia.recording, null); assert.equal(h.n.noteRecording, false);
+      assert.equal(h.n.requests.filter(r => r.path.endsWith('/turns') && r.method === 'POST').length, 0);
+      const sends = h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST');
+      assert.equal(sends.length, 1); assert.deepEqual(sends[0]!.body.content, { kind: 'voice', mediaId: 'media' });
+      assert.equal(h.n.requests.find(r => r.path === '/v1/chats' && r.method === 'POST')!.body.recipientId, 'recipient');
+      assert.equal(h.tree.findAll(node => node.props.testID === 'audio-controls').length, 0);
       await h.wait(() => h.mia.audioState === 'idle' && h.mia.voicePhase !== 'speaking');
       assert.equal(h.mia.microphoneMuted, muted);
       if (!native && !muted) await h.wait(() => !!h.n.capture);
@@ -665,29 +672,23 @@ test('lower hold records until release, asks before sending, and preserves the a
         await act(async () => { h.n.nativePCM!(new Uint8Array(12000)); });
         assert.equal(h.n.pcmPackets > packets, !muted);
       }
-      assert.ok(h.mia.recording, 'returning to command listening keeps the original unsent');
+      assert.equal(h.mia.recording, null, 'successful delivery clears the recording');
     } finally { gesture?.dispose(); await h.close(); }
   }
 });
 
-test('a new lower hold replaces an unsent note, its preview or its send question without changing mute', async () => {
-  for (const native of [false, true]) for (const muted of [false, true]) for (const phase of ['draft', 'preview', 'question']) {
+test('a new lower hold replaces an unsent note or its preview and sends on release', async () => {
+  for (const native of [false, true]) for (const muted of [false, true]) for (const phase of ['draft', 'preview']) {
     const h = await mount(true, true, native);
     let gesture: ReturnType<typeof pressGesture> | undefined;
     let previous: Promise<void> | undefined;
     try {
       await act(async () => { await h.mia.navigate('chats', 'anna'); });
       if (muted) await act(async () => { await h.mia.toggleMicrophone(); });
-      if (phase === 'question') {
-        await act(async () => { await h.mia.beginHeldRecording(); });
-        await act(async () => { h.n.nativePCM?.(new Uint8Array(2400)); previous = h.mia.endHeldRecording(); });
+      await act(async () => { await h.mia.startRecording(); h.n.nativePCM?.(new Uint8Array(2400)); await h.mia.finishRecording(); });
+      if (phase === 'preview') {
+        await act(async () => { previous = h.mia.preview().catch(reason => { assert.equal(reason.constructor.name, 'CancelledError'); }); });
         await h.wait(() => !!h.n.playback);
-      } else {
-        await act(async () => { await h.mia.startRecording(); h.n.nativePCM?.(new Uint8Array(2400)); await h.mia.finishRecording(); });
-        if (phase === 'preview') {
-          await act(async () => { previous = h.mia.preview().catch(reason => { assert.equal(reason.constructor.name, 'CancelledError'); }); });
-          await h.wait(() => !!h.n.playback);
-        }
       }
       const oldNote = (h.n.frames.filter(frame => frame.type === 'voice.context' && (frame.context as any)?.voiceNote).at(-1)!.context as any).voiceNote;
       const layer = h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'agent-interaction-layer')[0]!;
@@ -699,15 +700,74 @@ test('a new lower hold replaces an unsent note, its preview or its send question
       assert.equal(h.mia.microphoneMuted, muted);
       assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 0);
       await act(async () => { h.n.nativePCM?.(new Uint8Array(2400)); gesture!.release(); });
-      await h.wait(() => !!h.n.playback);
-      const newNote = (h.n.requests.filter(r => r.path.endsWith('/turns') && r.method === 'POST').at(-1)!.body.context).voiceNote;
+      await h.wait(() => h.mia.voiceNoteStage === 'sent');
+      const newNote = (h.n.frames.filter(frame => frame.type === 'voice.context' && (frame.context as any)?.voiceNote).at(-1)!.context as any).voiceNote;
       assert.notEqual(newNote.id, oldNote.id); assert.equal(newNote.recipientId, 'recipient');
-      await act(async () => { h.n.playback!(); await previous; });
+      await act(async () => { await previous; });
       await h.wait(() => h.mia.audioState === 'idle' && h.mia.voicePhase !== 'speaking');
-      assert.ok(h.mia.recording); assert.equal(h.mia.microphoneMuted, muted);
+      assert.equal(h.mia.recording, null); assert.equal(h.mia.microphoneMuted, muted);
       assert.equal(h.n.audioConflicts, 0); assert.equal(h.mia.voiceFault, false);
     } finally { gesture?.dispose(); await h.close(); }
   }
+});
+
+test('drag cancellation fills around the stationary core; returning inside sends exactly once', async () => {
+  for (const native of [false, true]) for (const returnInside of [false, true]) {
+    const h = await mount(true, true, native);
+    let gesture: ReturnType<typeof pressGesture> | undefined;
+    try {
+      await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.toggleMicrophone(); });
+      const layer = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'agent-interaction-layer')[0]!;
+      gesture = pressGesture(layer().props, { x: 195, y: 740 });
+      await act(async () => { gesture!.begin(); });
+      await h.wait(() => h.mia.audioState === 'recording');
+      await act(async () => { h.n.nativePCM?.(new Uint8Array(2400)); gesture!.move(230, 740); });
+      const aura = () => h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'AgentRecordingAura')[0]!;
+      assert.ok(aura().props.progress.value > 0 && aura().props.progress.value < 1);
+      assert.equal(aura().props.cancelReady, false);
+      await act(async () => { gesture!.move(290, 740); });
+      assert.equal(aura().props.progress.value, 1); assert.equal(aura().props.cancelReady, true);
+      assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Release to delete').length, 0);
+      if (returnInside) {
+        await act(async () => { gesture!.move(195, 740); });
+        assert.equal(aura().props.progress.value, 0); assert.equal(aura().props.cancelReady, false);
+      }
+      await act(async () => { gesture!.release(); });
+      await h.wait(() => h.mia.audioState === 'idle' && h.mia.voiceNoteStage !== 'sending');
+      const sends = h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST');
+      assert.equal(sends.length, returnInside ? 1 : 0);
+      assert.equal(h.n.requests.filter(r => r.path === '/v1/media').length, returnInside ? 1 : 0);
+      assert.equal(h.n.requests.filter(r => r.path.endsWith('/turns') && r.method === 'POST').length, 0);
+      assert.equal(h.mia.recording, null); assert.equal(h.mia.microphoneMuted, true); assert.equal(h.mia.aiMode, true);
+      assert.equal(h.n.audioConflicts, 0);
+    } finally { gesture?.dispose(); await h.close(); }
+  }
+});
+
+test('failed release-to-send stays on Mia and a lower tap retries the same media and message identity', async () => {
+  const h = await mount(true, true, true);
+  const gestures: ReturnType<typeof pressGesture>[] = [];
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    const layer = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'agent-interaction-layer')[0]!;
+    const held = pressGesture(layer().props, { x: 195, y: 740 }); gestures.push(held);
+    await act(async () => { held.begin(); });
+    await h.wait(() => h.mia.audioState === 'recording');
+    h.n.failSend = true;
+    await act(async () => { h.n.nativePCM?.(new Uint8Array(2400)); held.release(); });
+    await h.wait(() => h.mia.voiceNoteStage === 'failed');
+    assert.ok(h.mia.recording); assert.equal(h.mia.pending[0]?.status, 'failed');
+    assert.equal(h.tree.findAll(node => node.props.testID === 'audio-controls').length, 0);
+    assert.ok(h.tree.findAll(node => node.props.testID === 'conversation-status-message').length);
+    h.n.failSend = false;
+    const tap = pressGesture(layer().props, { x: 195, y: 740 }); gestures.push(tap);
+    await act(async () => { tap.begin(); tap.release(); });
+    await h.wait(() => h.mia.voiceNoteStage === 'sent');
+    const sends = h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST');
+    assert.equal(sends.length, 2); assert.equal(sends[0]!.body.clientMessageId, sends[1]!.body.clientMessageId);
+    assert.equal(h.n.requests.filter(r => r.path === '/v1/media').length, 1);
+    assert.equal(h.mia.recording, null); assert.equal(h.mia.pending.length, 0);
+  } finally { for (const gesture of gestures) gesture.dispose(); await h.close(); }
 });
 
 test('a cancelled delayed media read cannot reopen agent input or reset a newer recording', async () => {
@@ -745,7 +805,7 @@ test('a cancelled delayed media read cannot reopen agent input or reset a newer 
   }
 });
 
-test('native recording, its send question and media playback retain one graph and one recognition session', async () => {
+test('native release-to-send and media playback retain one graph and one recognition session', async () => {
   for (const muted of [false, true]) {
     const h = await mount(true, false, true);
     try {
@@ -762,11 +822,12 @@ test('native recording, its send question and media playback retain one graph an
       const packets = h.n.pcmPackets, pcm = new Uint8Array([0, 0, 255, 127, 0, 128, 1, 2]);
       await act(async () => { h.n.nativePCM!(pcm); });
       assert.equal(h.n.pcmPackets, packets, 'recorded words cannot become commands');
-      let finished!: Promise<void>;
-      await act(async () => { finished = h.mia.endHeldRecording(); });
-      await h.wait(() => !!h.n.playback);
-      assert.deepEqual(h.n.savedPcm, pcm, 'the draft contains the original microphone samples');
-      await act(async () => { h.n.playback!(); await finished; });
+      await act(async () => { await h.mia.endHeldRecording(); });
+      assert.deepEqual(h.n.savedPcm, pcm, 'the delivered note contains the original microphone samples');
+      assert.equal(h.n.requests.filter(r => r.path.endsWith('/turns') && r.method === 'POST').length, 0);
+      assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 1);
+      assert.equal(h.mia.recording, null);
+      await act(async () => { await h.mia.startRecording(); h.n.nativePCM!(pcm); await h.mia.finishRecording(); });
       let preview!: Promise<void>;
       await act(async () => { preview = h.mia.preview().catch(reason => { assert.equal(reason.constructor.name, 'CancelledError'); }); });
       await h.wait(() => !!h.n.playback);
@@ -860,7 +921,91 @@ test('original playback preserves pending ASR renewal and a late ready frame can
   } finally { await h.close(); }
 });
 
-test('muting during playback stays muted after a lower-area stop without changing agent mode', async () => {
+test('pausing original media restores command listening unless the user muted it, and resuming gates it again', async () => {
+  for (const native of [true, false]) for (const muted of [false, true]) {
+    const h = await mount(true, false, native);
+    const speech = new Uint8Array(24000), samples = new DataView(speech.buffer);
+    for (let i = 0; i < speech.length / 2; i++) samples.setInt16(i * 2, Math.round(6000 * Math.sin(i * .1)), true);
+    try {
+      await h.wait(() => native ? !!h.n.nativePCM : !!h.n.capture);
+      if (muted) await act(async () => { await h.mia.toggleMicrophone(); });
+      let playback!: Promise<void>;
+      await act(async () => { playback = h.mia.playMedia('original').catch(() => {}); });
+      await h.wait(() => !!h.n.playback);
+      await act(async () => { await h.mia.toggleMediaPlayback('original'); });
+      assert.equal(h.mia.originalPlayback?.state, 'paused'); assert.equal(h.mia.microphoneMuted, muted);
+      if (native) {
+        const packets = h.n.pcmPackets;
+        await act(async () => { h.n.nativePCM!(speech); });
+        assert.equal(h.n.pcmPackets > packets, !muted, 'paused playback must release temporary input suppression');
+        assert.equal(h.mia.voicePhase, muted ? 'paused' : 'listening');
+      } else if (!muted) await h.wait(() => !!h.n.capture);
+      else assert.equal(h.n.capture, null);
+      await act(async () => { await h.mia.toggleMediaPlayback('original'); });
+      await h.wait(() => !!h.n.playback);
+      if (native) {
+        const packets = h.n.pcmPackets;
+        await act(async () => { h.n.nativePCM!(speech); });
+        assert.equal(h.n.pcmPackets, packets, 'resumed original audio cannot leak into recognition');
+      } else assert.equal(h.n.capture, null);
+      await act(async () => { h.n.playback!(); await playback; });
+      assert.equal(h.mia.microphoneMuted, muted); assert.equal(h.mia.originalPlayback?.state, 'finished');
+    } finally { await h.close(); }
+  }
+});
+
+test('a recognized command after pausing media is accepted and receives Mia speech', async () => {
+  const h = await mount(true, false, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    let original!: Promise<void>;
+    await act(async () => { original = h.mia.playMedia('original').catch(() => {}); });
+    await h.wait(() => !!h.n.playback);
+    await act(async () => { await h.mia.toggleMediaPlayback('original'); });
+    const stream = h.n.frames.filter(frame => frame.type === 'voice.start').at(-1)!;
+    const revision = h.n.frames.filter(frame => frame.type === 'voice.mute').at(-1)!.revision;
+    const turn: Turn = { id: 'after-media-pause', sessionId: 'assistant', userId: 'user', generation: 1,
+      userText: 'Hello Mia.', assistantText: 'Hello.', status: 'completed', clientTurnId: 'after-media-pause-client', context: stream.context as any };
+    h.n.turns.push(turn);
+    await act(async () => {
+      h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, inputRevision: revision, clientTurnId: turn.clientTurnId });
+      h.n.frame({ type: 'turn.accepted', requestId: stream.requestId, inputRevision: revision, turn });
+    });
+    await h.wait(() => h.n.frames.some(frame => frame.type === 'speech.request' && frame.turnId === turn.id));
+    await h.wait(() => !!h.n.playback);
+    await act(async () => { h.n.playback!(); await original; });
+    assert.equal(h.mia.microphoneMuted, false); assert.equal(h.mia.aiMode, true);
+  } finally { await h.close(); }
+});
+
+test('pausing agent-requested media also releases the fallback voice loop to accept a new spoken command', async () => {
+  const h = await mount(true, false, false);
+  try {
+    await h.wait(() => !!h.n.capture); h.n.complete = false;
+    await h.say(); await h.wait(() => h.n.turns.length === 1);
+    const turn = h.n.turns[0]!;
+    h.n.referenceSources.push({ id: 'voice-source', chatId: 'anna', senderId: 'recipient', kind: 'voice', text: null, mediaId: 'original', createdAt: new Date().toISOString() });
+    await act(async () => { await h.n.event({ id: 'requested-original-event', type: 'device.action_requested', createdAt: new Date().toISOString(), payload: {
+      actionId: 'requested-original', sessionId: 'assistant', turnId: turn.id, kind: 'play_audio', sequence: '1', expiresIn: 180000,
+      payload: { chatId: 'anna', messageId: 'voice-source', mediaId: 'original' }, context: turn.context,
+    } }, 0); });
+    await h.wait(() => !!h.mia.messageReference);
+    await act(async () => { h.mia.referencePresented(1, true); });
+    await h.wait(() => !!h.n.playback);
+    await act(async () => { await h.mia.toggleMediaPlayback('original'); });
+    assert.equal(h.mia.originalPlayback?.state, 'paused');
+    await h.wait(() => !!h.n.capture);
+    h.n.complete = true; h.n.text = 'Hello after pausing.';
+    await h.say();
+    await h.wait(() => h.n.turns.length === 2);
+    await h.wait(() => h.n.frames.some(frame => frame.type === 'speech.request' && frame.turnId === h.n.turns[1]!.id));
+    await h.wait(() => !!h.n.playback);
+    await act(async () => { h.n.playback!(); });
+    assert.equal(h.mia.microphoneMuted, false); assert.equal(h.mia.voiceFault, false);
+  } finally { await h.close(); }
+});
+
+test('lower-area pause and resume preserve mute, the original media and agent mode', async () => {
   const h = await mount(true, true, true);
   try {
     await h.wait(() => !!h.n.nativePCM);
@@ -870,8 +1015,15 @@ test('muting during playback stays muted after a lower-area stop without changin
     await act(async () => { await h.mia.toggleMicrophone(); });
     const layer = h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'agent-interaction-layer')[0]!;
     const gesture = pressGesture(layer.props, { x: 120, y: 740 });
-    await act(async () => { gesture.begin(); gesture.release(); await playback; });
+    await act(async () => { gesture.begin(); gesture.release(); });
+    assert.equal(h.mia.originalPlayback?.state, 'paused');
+    assert.equal(h.mia.microphoneMuted, true);
+    await act(async () => { gesture.begin(); gesture.release(); });
+    await h.wait(() => !!h.n.playback);
+    assert.equal(h.mia.originalPlayback?.state, 'playing');
+    await act(async () => { h.n.playback!(); await playback; });
     gesture.dispose();
+    assert.equal(h.mia.originalPlayback?.state, 'finished');
     assert.equal(h.mia.microphoneMuted, true); assert.equal(h.mia.aiMode, true);
     await h.wait(() => !!h.n.nativePCM);
     const packets = h.n.pcmPackets;
@@ -880,43 +1032,178 @@ test('muting during playback stays muted after a lower-area stop without changin
   } finally { await h.close(); }
 });
 
-test('agent recording actions await original preview, reject replaced recordings and send only the bound draft', async () => {
+test('outgoing text scrolls the inverted chat to its newest message and socket acknowledgement removes its pending copy', async () => {
+  const h = await mount(false, true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    const list = () => h.tree.findAll(node => node.type === 'FlatList' as any)[0]!;
+    await act(async () => { list().props.onScroll({ nativeEvent: { contentOffset: { y: 480 } } }); h.mia.setComposer('A single message.'); });
+    h.n.holdSend = true; let task!: Promise<void>;
+    await act(async () => { task = h.mia.sendText(); await h.mia.sendText(); });
+    assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 1);
+    assert.ok(h.n.scrollOffsets.some(value => value.offset === 0));
+    const sent = h.n.requests.find(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST')!;
+    const message: Message = { id: 'sent-note', chatId: 'anna', senderId: 'user', kind: 'text', text: 'A single message.', mediaId: null, createdAt: new Date().toISOString(), clientMessageId: sent.body.clientMessageId };
+    await act(async () => { await h.n.event({ id: 'echo', type: 'message.created', createdAt: message.createdAt, payload: message }, 0); });
+    assert.equal(h.mia.pending.length, 0); assert.equal(h.mia.messages.anna!.filter(item => item.id === 'sent-note').length, 1);
+    await act(async () => { h.n.releaseSend!(); await task; });
+    assert.equal(h.mia.messages.anna!.filter(item => item.id === 'sent-note').length, 1);
+    assert.equal(h.mia.chatScrollPositions.read('user', 'anna').offset, 0);
+    const before = h.n.scrollOffsets.length;
+    await act(async () => { list().props.onContentSizeChange(390, 2000); });
+    assert.ok(h.n.scrollOffsets.length > before, 'layout after delivery stays at the newest outgoing item');
+    await act(async () => { list().props.onScrollBeginDrag(); list().props.onScroll({ nativeEvent: { contentOffset: { y: 340 } } }); });
+    await act(async () => { await h.mia.navigate('chats'); });
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    assert.equal(list().props.contentOffset.y, 340, 'a consumed send request cannot override a later deliberate scroll on re-entry');
+  } finally { await h.close(); }
+});
+
+test('voice-note sends also request the latest chat position, without a duplicate pending row', async () => {
+  const h = await mount(false, true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.startRecording(); await h.mia.finishRecording(); });
+    const list = () => h.tree.findAll(node => node.type === 'FlatList' as any)[0]!;
+    await act(async () => { list().props.onScroll({ nativeEvent: { contentOffset: { y: 800 } } }); await h.mia.useRecording(); });
+    assert.equal(h.mia.chatScrollPositions.read('user', 'anna').offset, 0);
+    assert.ok(h.n.scrollOffsets.some(value => value.offset === 0)); assert.equal(h.mia.pending.length, 0);
+  } finally { await h.close(); }
+});
+
+test('a delayed pause cannot change a stopped message back to paused', async () => {
+  const h = await mount(false);
+  try {
+    let playback!: Promise<void>;
+    await act(async () => { playback = h.mia.playMedia('original'); });
+    await h.wait(() => !!h.n.playback);
+    await act(async () => { h.n.playbackProgress?.({ positionMs: 1000, durationMs: 10000, playing: true, buffering: false }); });
+    h.n.holdPlayerPause = true;
+    let pause!: Promise<void>;
+    await act(async () => { pause = h.mia.toggleMediaPlayback('original'); });
+    await h.wait(() => !!h.n.releasePlayerPause);
+    await act(async () => { await h.mia.stopAudio(); await playback; });
+    assert.equal(h.mia.originalPlayback?.state, 'stopped');
+    await act(async () => { h.n.releasePlayerPause!(); await pause; });
+    assert.equal(h.mia.originalPlayback?.state, 'stopped');
+    assert.equal(h.mia.audioState, 'idle');
+  } finally { h.n.releasePlayerPause?.(); await h.close(); }
+});
+
+test('classic voice messages show inline play and pause with real duration and never open a bottom player', async () => {
+  const h = await mount(false, true); let row!: ReactTestRenderer;
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    const message: Message = { id: 'voice-one', chatId: 'anna', senderId: 'user', kind: 'voice', text: null, mediaId: 'original', durationMs: 21300, createdAt: new Date().toISOString() };
+    const sample = () => React.createElement(h.components.VoiceNoteBubble, { message, playback: h.mia.originalPlayback, onToggle: () => void h.mia.toggleMediaPlayback('original') });
+    await act(async () => { row = create(sample()); });
+    const button = () => row.root.findAll(node => node.type === 'Pressable' as any)[0]!;
+    assert.equal(button().props.accessibilityLabel, 'Play voice message');
+    assert.ok(row.root.findAll(node => node.type === 'Text' as any && node.props.children === '0:21').length);
+    let task!: Promise<void>;
+    await act(async () => { task = h.mia.playMedia('original'); });
+    await h.wait(() => !!h.n.playback);
+    await act(async () => { h.n.playbackProgress?.({ positionMs: 2500, durationMs: 21300, playing: true, buffering: false }); });
+    await act(async () => { row.update(sample()); });
+    assert.equal(button().props.accessibilityLabel, 'Pause voice message');
+    assert.equal(h.tree.findAll(node => node.props.testID === 'audio-controls').length, 0);
+    await act(async () => { await h.mia.toggleMediaPlayback('original'); row.update(sample()); });
+    await act(async () => { row.update(sample()); });
+    assert.equal(h.n.playerPaused, true); assert.equal(button().props.accessibilityLabel, 'Resume voice message');
+    assert.equal(h.mia.originalPlayback?.positionMs, 2500);
+    await act(async () => { await h.mia.toggleMediaPlayback('original'); h.n.playback!(); await task; row.update(sample()); });
+    await act(async () => { row.update(sample()); });
+    assert.equal(button().props.accessibilityLabel, 'Play voice message');
+  } finally { if (row) await act(async () => row.unmount()); await h.close(); }
+});
+
+test('Mia shows compact chat-scoped feedback above the footer and restores its draft indicator after transient errors', async t => {
+  const h = await mount(true, true);
+  try {
+    h.n.savedDrafts.push({ id: 'draft-one', recipientId: 'recipient', kind: 'text', text: 'Keep this actual draft.', mediaId: null, version: 1, reviewedVersion: null, state: 'editing', updatedAt: new Date().toISOString() });
+    await act(async () => { await h.mia.refresh(); await h.mia.navigate('chats', 'anna'); });
+    const read = (id: string) => h.tree.findAll(node => node.type === 'Text' as any && node.props.testID === id)[0]?.props.children;
+    assert.equal(read('conversation-status-title'), 'Draft available');
+    assert.equal(read('conversation-status-message'), undefined);
+    const dock = () => h.tree.findAll(node => node.props.testID === 'agent-dock' && node.type === 'View' as any)[0]!;
+    assert.equal(dock().findAll(node => node.props.testID === 'conversation-status').length, 0);
+    assert.equal(dock().findAll(node => node.type === 'Text' as any).length, 0, 'idle footer contains only Mia');
+    assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Keep this actual draft.').length, 0);
+    for (const [tab, chatId] of [['chats', null], ['people', null], ['drafts', null], ['chats', null]] as const) {
+      await act(async () => { await h.mia.navigate(tab, chatId); });
+      assert.equal(h.tree.findAll(node => node.props.testID === 'conversation-status').length, 0, 'draft stays in its own chat');
+    }
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+
+    assert.equal(h.tree.findAll(node => node.props.accessibilityLabel === 'Review 1 saved message').length, 0);
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+    await act(async () => { h.mia.fail(new Error('failure')); });
+    assert.equal(read('conversation-status-message'), 'Something went wrong. Please try again.');
+    assert.equal(h.tree.findAll(node => node.props.accessibilityLabel === 'Dismiss message').length, 0);
+    assert.ok(h.n.animations.some(animation => animation.toValue === .48));
+    await act(async () => { t.mock.timers.tick(3100); });
+    assert.equal(read('conversation-status-title'), 'Draft available');
+    assert.equal(read('conversation-status-message'), undefined);
+    assert.equal(h.mia.error, '');
+  } finally { t.mock.timers.reset(); await h.close(); }
+});
+
+test('an unsent voice note keeps its error visible beyond the tint pulse and a confirmed retry clears it', async t => {
+  const h = await mount(true, true, true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.startRecording(); h.n.nativePCM!(new Uint8Array(48000)); await h.mia.finishRecording(); });
+    h.n.failSend = true;
+    await act(async () => { await assert.rejects(h.mia.useRecording()); });
+    const originalError = h.mia.error; assert.ok(originalError); assert.ok(h.mia.recording);
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+    await act(async () => { t.mock.timers.tick(3100); });
+    assert.equal(h.mia.error, originalError);
+    assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.testID === 'conversation-status-message')[0]!.props.children, originalError);
+    h.n.failSend = false;
+    await act(async () => { await h.mia.useRecording(); });
+    assert.equal(h.mia.error, ''); assert.equal(h.mia.voiceNoteStage, 'sent');
+  } finally { t.mock.timers.reset(); await h.close(); }
+});
+
+test('the microphone appears inside Mia only during local recording and startup never vibrates into the capture', async () => {
+  const h = await mount(true, true, true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    const microphone = () => h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'mia-recording-microphone');
+    assert.equal(microphone().length, 0);
+    await act(async () => { await h.mia.beginHeldRecording(); h.n.nativePCM!(new Uint8Array(48000)); });
+    assert.equal(microphone().length, 1); assert.equal(h.n.vibrations, 0);
+    await act(async () => { await h.mia.endHeldRecording(); });
+    assert.equal(microphone().length, 0); assert.equal(h.mia.voiceNoteStage, 'sent');
+  } finally { await h.close(); }
+});
+
+test('agent actions cannot preview, discard or send a local voice note, even with its exact identity', async () => {
   const h = await mount(true, false, true);
   try {
     await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.startRecording(); h.n.nativePCM?.(new Uint8Array(2400)); await h.mia.finishRecording(); });
     await h.wait(() => !!h.n.nativePCM);
     const stream = h.n.frames.filter(frame => frame.type === 'voice.start').at(-1)!;
-    const currentContext = h.n.frames.filter(f => f.type === 'voice.context').at(-1)!.context;
-    const note = (currentContext as any).voiceNote;
-    const turn: Turn = { id: 'local-note-turn', sessionId: 'assistant', userId: 'user', generation: 1, userText: 'Play my recording.',
-      assistantText: null, status: 'running', clientTurnId: 'local-note-client', context: currentContext as any };
+    const context = h.n.frames.filter(f => f.type === 'voice.context').at(-1)!.context as any;
+    const recording = h.mia.recording;
+    const turn: Turn = { id: 'local-note-turn', sessionId: 'assistant', userId: 'user', generation: 1,
+      userText: 'Send my voice note.', assistantText: null, status: 'running', clientTurnId: 'local-note-client', context };
     h.n.turns.push(turn);
     await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: turn.clientTurnId }); h.n.frame({ type: 'turn.accepted', turn }); });
-    const command = async (id: string, action: string, recordingId = note.id, recipientId = note.recipientId) => {
+    for (const action of ['preview', 'discard', 'send']) {
+      const id = `forbidden-${action}`;
       await act(async () => { await h.n.event({ id, type: 'device.action_requested', createdAt: new Date().toISOString(), payload: {
-        actionId: id, sessionId: 'assistant', turnId: turn.id, kind: 'control_voice_note',
-        payload: { recordingId, recipientId, action }, expiresIn: 180000, context: turn.context,
+        actionId: id, sessionId: 'assistant', turnId: turn.id, kind: 'control_voice_note', context,
+        payload: { recordingId: context.voiceNote.id, recipientId: context.voiceNote.recipientId, action },
       } }, 0); });
-    };
-    const result = (id: string) => h.n.requests.find(r => r.path === `/v1/device-actions/${id}/result`)?.body;
-    await command('preview-local', 'preview');
-    await h.wait(() => !!h.n.playback);
-    assert.equal(result('preview-local'), undefined); assert.ok(h.n.nativePCM);
-    assert.equal(h.n.requests.some(r => r.path === '/v1/media'), false, 'preview stays local');
-    await act(async () => { h.n.playback!(); });
-    await h.wait(() => !!result('preview-local'));
-    assert.equal(result('preview-local').success, true);
-    await command('wrong-local', 'send', 'replaced-recording');
-    await h.wait(() => !!result('wrong-local'));
-    assert.equal(result('wrong-local').success, false); assert.ok(h.mia.recording);
-    await command('wrong-recipient', 'send', note.id, 'ben-user');
-    await h.wait(() => !!result('wrong-recipient'));
-    assert.equal(result('wrong-recipient').success, false); assert.ok(h.mia.recording);
-    await command('send-local', 'send');
-    await h.wait(() => !!result('send-local'));
-    assert.equal(result('send-local').success, true); assert.equal(h.mia.recording, null);
+      await h.wait(() => h.n.requests.some(r => r.path === `/v1/device-actions/${id}/result`));
+      const feedback = h.n.requests.find(r => r.path === `/v1/device-actions/${id}/result`)!.body;
+      assert.equal(feedback.success, false); assert.equal(feedback.result.code, 'CLIENT_CONTROLLED_RECORDING');
+      assert.equal(h.mia.recording, recording);
+    }
+    assert.equal(h.n.playbacks, 0); assert.equal(h.n.deleted.length, 0);
+    assert.equal(h.n.requests.filter(r => r.path === '/v1/media' || r.path.endsWith('/messages') && r.method === 'POST').length, 0);
+    await act(async () => { await h.mia.useRecording(); });
     assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 1);
-    assert.equal(h.n.audioConflicts, 0); assert.equal(h.mia.voiceFault, false);
   } finally { await h.close(); }
 });
 
@@ -954,6 +1241,22 @@ test('failed sends keep the original draft; retry and repeated approval use one 
   } finally { await h.close(); }
 });
 
+test('confirmed voice-note delivery stays sent when list refresh or cache cleanup fails', async () => {
+  for (const failure of ['refresh', 'cleanup']) {
+    const h = await mount(true, false, true);
+    try {
+      await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.startRecording(); h.n.nativePCM!(new Uint8Array(2400)); await h.mia.finishRecording(); });
+      h.n.failContacts = failure === 'refresh'; h.n.failRecordingCleanup = failure === 'cleanup';
+      await act(async () => { await h.mia.useRecording(); });
+      assert.equal(h.mia.voiceNoteStage, 'sent'); assert.equal(h.mia.recording, null);
+      assert.equal(h.mia.pending.length, 0);
+      assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 1);
+      await act(async () => { await h.mia.useRecording(); });
+      assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 1);
+    } finally { await h.close(); }
+  }
+});
+
 test('discarding a failed voice note removes its pending retry and preserves unrelated failed messages', async () => {
   const h = await mount(true);
   try {
@@ -978,7 +1281,7 @@ test('discarding a failed voice note removes its pending retry and preserves unr
   } finally { await h.close(); }
 });
 
-test('startup waits for both saved credentials and mode, then opens assistant home only for the restored voice mode', async () => {
+test('startup waits for both saved credentials and mode, then opens chats in both modes', async () => {
   for (const enabled of [false, true]) for (const sessionFirst of [true, false]) {
     const h = await mount(enabled, true, false, true);
     const loading = () => h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'app-startup').length > 0;
@@ -997,8 +1300,8 @@ test('startup waits for both saved credentials and mode, then opens assistant ho
       const root = h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.edges)[0]!;
       assert.equal(root.props.pointerEvents, enabled ? 'none' : 'auto');
       assert.equal(root.props.accessibilityElementsHidden, enabled);
-      assert.equal(h.mia.tab, enabled ? 'assistant' : 'chats');
-      assert.equal(h.tree.findAll(node => node.type === 'ScrollView' as any && node.props.testID === 'agent-home').length, enabled ? 1 : 0);
+      assert.equal(h.mia.tab, 'chats');
+      assert.equal(h.tree.findAll(node => node.type === 'ScrollView' as any && node.props.testID === 'agent-home').length, 0);
       assert.equal(h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'agent-dock').length, enabled ? 1 : 0);
       if (enabled) await h.wait(() => h.n.captures === 1);
       else { assert.equal(h.n.captures, 0); assert.equal(h.n.preferences.get('mia.ai_mode'), 'false'); }
@@ -1012,10 +1315,10 @@ test('ai_mode starts one global conversation, speaks automatically and keeps lis
     assert.equal(h.n.captures, 0);
     await act(async () => { await h.mia.saveAiMode(true); });
     await h.wait(() => !!h.n.capture);
-    assert.equal(h.mia.tab, 'assistant');
+    assert.equal(h.mia.tab, 'chats');
     await h.say(); await h.wait(() => h.n.playbacks === 1);
     assert.equal(h.mia.voicePhase, 'speaking'); assert.equal(h.n.captures, 1);
-    assert.deepEqual(h.n.turns[0]?.context, { route: '/mia', revision: 1, previousRoute: '/chats', voice: { enabled: true, microphoneMuted: false, revision: 1 } });
+    assert.deepEqual(h.n.turns[0]?.context, { route: '/chats', revision: 0, navigationSessionId: h.n.turns[0]!.context!.navigationSessionId, voice: { enabled: true, microphoneMuted: false, revision: 1 } });
     await act(async () => { h.n.playback!(); });
     await h.wait(() => h.n.captures === 2);
     await act(async () => { await h.mia.navigate('people'); });
@@ -1084,15 +1387,16 @@ test('agent page actions switch visible views and retain the native voice sessio
       assert.equal(feedback.success, true);
       return feedback.result.context;
     };
-    for (const [route, tab] of [['/contacts', 'people'], ['/drafts', 'drafts'], ['/settings', 'settings'], ['/chats', 'chats'], ['/mia', 'assistant']]) {
+    for (const [route, tab] of [['/contacts', 'people'], ['/drafts', 'drafts'], ['/settings', 'settings'], ['/chats', 'chats'], ['/mia', 'chats']]) {
       const reported = await open(`page-${tab}`, 'open_page', { route });
-      assert.equal(h.mia.tab, tab); assert.equal(h.mia.activeChatId, null); assert.equal(reported.route, route);
+      assert.equal(h.mia.tab, tab); assert.equal(h.mia.activeChatId, null); assert.equal(reported.route, route === '/mia' ? '/chats' : route);
       assert.ok(h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'agent-dock').length);
       assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.accessibilityElementsHidden === true).length, 1);
       if (tab === 'drafts') {
         assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Saved messages').length);
-        assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Keep this message for Anna.').length);
-        assert.ok(h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Review message').length);
+        assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Keep this message for Anna.').length, 0);
+        assert.equal(h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Review message').length, 0);
+        assert.equal(h.tree.findAll(node => node.props.testID === 'conversation-status').length, 0);
       }
     }
     assert.equal((await open('page-chat', 'open_chat', { chatId: 'anna' })).route, '/chat/anna');
@@ -1102,16 +1406,16 @@ test('agent page actions switch visible views and retain the native voice sessio
     assert.equal(h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Message Anna').length, 0);
     await open('page-return', 'open_page', { route: '/mia' });
     await open('page-followup', 'stop_audio', {});
-    assert.equal(h.mia.tab, 'assistant'); assert.equal(h.mia.aiMode, true);
+    assert.equal(h.mia.tab, 'chats'); assert.equal(h.mia.aiMode, true);
     assert.equal(h.n.nativeStops, stops); assert.equal(h.n.nativeStarts, starts);
     assert.equal(h.n.requests.filter(request => request.path.endsWith('/stop')).length, stopRequests);
     assert.equal(turn.status, 'running');
-    await act(async () => { await h.mia.navigate('assistant'); });
+    await act(async () => { await h.mia.navigate('chats'); });
     const acknowledged = h.n.requests.filter(request => request.path.startsWith('/v1/device-actions/')).length;
     await act(async () => { await h.n.event({ id: 'after-manual-home', type: 'device.action_requested', createdAt: new Date().toISOString(), payload: {
       actionId: 'after-manual-home', turnId: turn.id, kind: 'open_page', payload: { route: '/contacts' }, context: turn.context,
     } }, 0); });
-    assert.equal(h.mia.tab, 'assistant'); assert.equal(h.mia.aiMode, true);
+    assert.equal(h.mia.tab, 'chats'); assert.equal(h.mia.aiMode, true);
     assert.equal(h.n.requests.filter(request => request.path.startsWith('/v1/device-actions/')).length, acknowledged, 'manual home navigation revokes even a same-route lease');
   } finally { await h.close(); }
 });
@@ -1129,7 +1433,7 @@ test('unauthorized, expired, replayed and unallowlisted page actions cannot chan
       await act(async () => { await h.n.event({ id, type: 'device.action_requested', createdAt: options.createdAt ?? new Date().toISOString(), payload: {
         actionId: id, turnId: options.turnId ?? turn.id, kind: 'open_page', payload: { route: options.route ?? '/contacts' }, context: options.context ?? turn.context,
       } }, 0, options.replayed); });
-      assert.equal(h.mia.tab, 'assistant');
+      assert.equal(h.mia.tab, 'chats');
       return h.n.requests.find(request => request.path === `/v1/device-actions/${id}/result`)?.body;
     };
     assert.equal(await send('foreign-page', { turnId: 'another-device-turn' }), undefined);
@@ -1209,7 +1513,7 @@ test('a failed spoken response stops and can resume on the assistant home', asyn
     await act(async () => { await h.mia.resumeAssistant(); });
     await h.wait(() => !!h.n.capture);
     assert.equal(h.mia.voiceFault, false); assert.equal(h.mia.error, '');
-    assert.equal(h.mia.tab, 'assistant');
+    assert.equal(h.mia.tab, 'chats');
   } finally { await h.close(); }
 });
 
@@ -1225,6 +1529,44 @@ test('a temporary network failure automatically returns to listening without rep
     assert.equal(h.n.turns.length, 0, 'reconnection must not repeat a possibly accepted command');
     h.n.text = 'Read my conversation'; await h.say(); await h.wait(() => h.n.playbacks === 1);
     assert.equal(h.n.turns.length, 1); assert.equal(h.n.turns[0]?.userText, 'Read my conversation');
+  } finally { await h.close(); }
+});
+
+test('connection loss after opening a voice-note chat keeps the connection error when automatic stop also fails', async () => {
+  const h = await mount(true, false, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
+    const turn: Turn = { id: 'record-request', sessionId: 'assistant', userId: 'user', generation: 1,
+      userText: 'Record a voice note for Anna.', assistantText: null, status: 'running',
+      clientTurnId: 'record-client', context: stream.context as any };
+    h.n.turns.push(turn);
+    await act(async () => {
+      h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: turn.clientTurnId });
+      h.n.frame({ type: 'turn.accepted', turn });
+      await h.n.event({ id: 'record-action', type: 'device.action_requested', createdAt: new Date().toISOString(), payload: {
+        actionId: 'record-action', sessionId: 'assistant', turnId: turn.id, kind: 'record_voice',
+        payload: { chatId: 'anna' }, context: turn.context,
+      } }, 0);
+    });
+    await h.wait(() => h.n.requests.some(request => request.path === '/v1/device-actions/record-action/result'));
+    assert.equal(h.n.requests.find(request => request.path === '/v1/device-actions/record-action/result')!.body.success, true);
+    assert.equal(h.mia.activeChatId, 'anna');
+    assert.equal(h.mia.audioState, 'idle');
+    assert.equal(h.n.noteRecording, false);
+    assert.equal(h.n.savedPcm, null);
+    const stops = h.n.requests.filter(request => request.path.endsWith('/stop')).length;
+    h.n.offline = true;
+    await act(async () => { h.n.frame({ type: 'error', error: { code: 'OFFLINE' } }); });
+    await h.wait(() => h.n.requests.filter(request => request.path.endsWith('/stop')).length > stops);
+    assert.equal(h.mia.error, 'Unable to connect to Mia. Check your internet connection and try again.');
+    assert.equal(h.mia.voiceFault, true);
+    h.n.offline = false;
+    await h.wait(() => !!h.n.nativePCM && !h.mia.voiceFault);
+    assert.equal(h.mia.error, '');
+    assert.equal(h.mia.activeChatId, 'anna');
+    assert.equal(h.n.requests.filter(request => request.path === '/v1/device-actions/record-action/result').length, 1);
+    assert.equal(h.n.turns.length, 1, 'recovery must not repeat the recording request');
   } finally { await h.close(); }
 });
 
@@ -1293,7 +1635,7 @@ test('voice activation requires Settings confirmation; exit requires a five-seco
       await act(async () => { pressable('Mia voice mode').props.onPress(); });
       await act(async () => { pressable('Enable voice mode now').props.onPress(); });
       await h.wait(() => !!h.n.capture);
-      assert.equal(h.mia.tab, 'assistant');
+      assert.equal(h.mia.tab, 'chats');
       assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.pointerEvents === 'none').length, 1);
       assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.accessibilityElementsHidden === true && node.props.importantForAccessibility === 'no-hide-descendants').length, 1);
       assert.equal(h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityViewIsModal === true).length, 1);
@@ -1378,7 +1720,7 @@ test('the transparent global layer owns every page and consumes taps, swipes and
     for (const edge of ['top', 'left', 'right', 'bottom']) assert.equal(bounds[edge], 0);
     assert.equal(bounds.backgroundColor, 'transparent');
     assert.ok(layer().parent?.parent === h.tree.findAll(node => node.type === 'View' as any)[0], 'the layer is a sibling of the blocked content');
-    for (const [tab, chatId] of [['assistant', null], ['chats', 'anna'], ['people', null], ['settings', null]] as const) {
+    for (const [tab, chatId] of [['chats', null], ['chats', 'anna'], ['people', null], ['settings', null]] as const) {
       await act(async () => { await h.mia.navigate(tab, chatId); });
       const content = h.tree.findAll(node => node.type === 'SafeAreaView' as any)[0]!;
       assert.equal(content.props.pointerEvents, 'none'); assert.equal(content.props.accessibilityElementsHidden, true);
@@ -1398,7 +1740,7 @@ test('the transparent global layer owns every page and consumes taps, swipes and
     }
     assert.equal(h.n.vibrations, 0); assert.equal(h.mia.aiMode, true);
     await act(async () => { layer().props.onTouchStart(event(80, 240, 4000)); layer().props.onLongPress(); });
-    assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Hold…').length);
+    assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Hold…').length, 0);
     await act(async () => { await h.mia.saveAiMode(false); });
     assert.equal(layer(), undefined);
     const content = h.tree.findAll(node => node.type === 'SafeAreaView' as any)[0]!;
@@ -1830,7 +2172,7 @@ test('Contacts and Chats share header geometry and row height; chat back swipe r
   } finally { await h.close(); }
 });
 
-test('agent home shows the newest conversation and active Settings returns home without re-enabling or unmuting Mia', async () => {
+test('chats replaces agent home while conversation state, mode and mute survive Settings navigation', async () => {
   const h = await mount(true, true);
   const button = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
   const texts = () => h.tree.findAll(node => node.type === 'Text' as any).map(node => node.props.children);
@@ -1839,14 +2181,16 @@ test('agent home shows the newest conversation and active Settings returns home 
       assistantText: 'An older reply.', status: 'completed', clientTurnId: 'older-home-client' };
     h.n.turns.push(turn, { ...turn, id: 'newer-home-turn', generation: 2, userText: 'My newest request.', assistantText: 'My newest reply.', clientTurnId: 'newer-home-client' });
     await act(async () => { await h.mia.retryAssistant(); await h.mia.toggleMicrophone(); });
-    assert.ok(texts().includes('My newest request.')); assert.ok(texts().includes('My newest reply.'));
+    assert.equal(h.mia.turns[0]?.id, 'newer-home-turn');
+    assert.equal(texts().includes('My newest request.'), false); assert.equal(texts().includes('My newest reply.'), false);
+    assert.ok(texts().includes('Chats'));
     assert.equal(texts().includes('An older request.'), false);
     const modeWrites = h.n.preferences.get('mia.ai_mode');
     await act(async () => { await h.mia.navigate('settings'); });
     assert.equal(h.mia.tab, 'settings'); assert.equal(h.mia.microphoneMuted, true);
     assert.equal(h.tree.findAll(node => node.type === 'SafeAreaView' as any && node.props.pointerEvents === 'none').length, 1);
-    await act(async () => { await h.mia.navigate('assistant'); });
-    assert.equal(h.mia.tab, 'assistant'); assert.equal(h.mia.aiMode, true); assert.equal(h.mia.microphoneMuted, true);
+    await act(async () => { await h.mia.navigate('chats'); });
+    assert.equal(h.mia.tab, 'chats'); assert.equal(h.mia.aiMode, true); assert.equal(h.mia.microphoneMuted, true);
     assert.equal(h.tree.findAll(node => node.type === 'Modal' as any).length, 0);
     assert.equal(h.n.preferences.get('mia.ai_mode'), modeWrites);
   } finally { await h.close(); }
@@ -2000,31 +2344,30 @@ test('a finishing back animation cannot navigate after voice mode takes over', a
     await act(async () => { back.onPanResponderGrant!(); back.onPanResponderRelease!(null, { dx: 130, vx: .2 }); });
     assert.ok(h.n.finishAnimation);
     await act(async () => { await h.mia.saveAiMode(true); });
-    assert.equal(h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'chat-screen').length, 0, 'the assistant home unmounts the chat gesture');
+    assert.equal(h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'chat-screen').length, 1, 'voice mode keeps the chat and disables its manual gesture');
     await act(async () => { h.n.finishAnimation!(); });
-    assert.equal(h.mia.activeChatId, null); assert.equal(h.mia.tab, 'assistant'); assert.equal(h.mia.aiMode, true);
+    assert.equal(h.mia.activeChatId, 'anna'); assert.equal(h.mia.tab, 'chats'); assert.equal(h.mia.aiMode, true);
   } finally { await h.close(); }
 });
 
-test('the lowest visible footer owns the home-indicator inset during recording, preview and keyboard changes', async () => {
+test('the inline composer owns the home-indicator inset during recording, retained notes and keyboard changes', async () => {
   const h = await mount(false, true);
-  const style = (value: any): Record<string, any> => Array.isArray(value) ? Object.assign({}, ...value.filter(Boolean).map(style)) : value ?? {};
+  const style = (value: unknown): Record<string, unknown> => Object.assign({}, ...(Array.isArray(value) ? value.flat(Infinity) : [value]));
   const composer = () => h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'message-composer-area')[0]!;
-  const audio = () => h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'audio-controls')[0];
   try {
     await act(async () => { await h.mia.navigate('chats', 'anna'); });
     assert.equal(style(composer().props.style).paddingBottom, 34);
     await act(async () => { await h.mia.startRecording(); });
-    assert.equal(style(composer().props.style).paddingBottom, 8);
-    assert.equal(style(audio()!.props.style).paddingBottom, 34);
+    assert.equal(style(composer().props.style).paddingBottom, 34);
+    assert.equal(h.tree.findAll(node => node.props.testID === 'audio-controls').length, 0);
     await act(async () => { h.n.keyboardHandlers.get('keyboardWillShow')!(); });
-    assert.equal(style(audio()!.props.style).paddingBottom, 0);
+    assert.equal(style(composer().props.style).paddingBottom, 8);
     await act(async () => { h.n.keyboardHandlers.get('keyboardWillHide')!(); await h.mia.finishRecording(); });
-    assert.ok(h.mia.recording); assert.equal(style(audio()!.props.style).paddingBottom, 34);
+    assert.ok(h.mia.recording); assert.equal(style(composer().props.style).paddingBottom, 34);
     await act(async () => { await h.mia.navigate('chats'); });
-    assert.equal(style(audio()!.props.style).paddingBottom, 0, 'the main dock owns the bottom inset now');
+    assert.equal(composer(), undefined);
     await act(async () => { await h.mia.discardRecording(); await h.mia.navigate('chats', 'anna'); });
-    assert.equal(audio(), undefined); assert.equal(style(composer().props.style).paddingBottom, 34);
+    assert.equal(style(composer().props.style).paddingBottom, 34);
   } finally { await h.close(); }
 });
 
@@ -2198,5 +2541,156 @@ test('compact screens retain readable large-text identity, expanded conversation
     assert.equal(flatten(bubble.props.style).maxWidth, '94%');
     assert.equal(bubble.props.children[1].props.numberOfLines, undefined);
     assert.deepEqual(timeline.props.contentOffset, { x: 0, y: 0 }); assert.equal(timeline.props.inverted, true);
+  } finally { await h.close(); }
+});
+
+
+test('connection is shown on Mia alone; its dedicated orbit stops under Reduce Motion and disappears when ready', async () => {
+  const h = await mount(false, true, true);
+  try {
+    h.n.holdASR = true;
+    await act(async () => { await h.mia.saveAiMode(true); });
+    await h.wait(() => h.n.frames.some(frame => frame.type === 'voice.start'));
+    const orbit = () => h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'mia-connecting-orbit');
+    assert.equal(orbit().length, 1);
+    assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Connecting').length, 0);
+    const connectionLoop = h.n.loops.find(loop => loop.child.config?.duration === 1800 && loop.started && !loop.stopped);
+    assert.ok(connectionLoop);
+    await act(async () => { h.n.reducedMotion = true; for (const handler of h.n.motionHandlers) handler(true); });
+    assert.equal(connectionLoop.stopped, true); assert.equal(orbit().length, 1, 'static connection arc remains');
+    const start = h.n.frames.find(frame => frame.type === 'voice.start')!;
+    await act(async () => { h.n.frame({ type: 'voice.ready', requestId: start.requestId }); });
+    await h.wait(() => !!h.n.nativePCM);
+    await act(async () => { h.n.nativePCM!(new Uint8Array(2400)); });
+    await h.wait(() => orbit().length === 0);
+    assert.equal(orbit().length, 0);
+  } finally { await h.close(); }
+});
+
+
+test('classic composer has one right action that changes between text send and hold-to-record', async () => {
+  const h = await mount(false, true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    const action = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'composer-action')[0]!;
+    assert.equal(action().props.accessibilityLabel, 'Record voice note');
+    assert.equal(h.tree.findAll(node => node.props.accessibilityLabel === 'Voice note').length, 0);
+    await act(async () => { h.mia.setComposer('Hello Anna'); });
+    assert.equal(action().props.accessibilityLabel, 'Send');
+    const tap = pressGesture(action().props, { x: 340, y: 740 });
+    await act(async () => { tap.begin(); tap.release(); }); tap.dispose();
+    await h.wait(() => h.mia.composers.anna === '');
+    assert.equal(action().props.accessibilityLabel, 'Record voice note');
+    const sent = h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST');
+    assert.equal(sent.length, 1); assert.deepEqual(sent[0]!.body.content, { kind: 'text', text: 'Hello Anna' });
+    assert.equal(h.n.noteRecording, false);
+  } finally { await h.close(); }
+});
+
+test('classic hold sends on release, cancels beyond the shared circle and can return inside before release', async () => {
+  for (const ending of ['send', 'cancel', 'return'] as const) {
+    const h = await mount(false, true);
+    let gesture: ReturnType<typeof pressGesture> | undefined;
+    try {
+      await act(async () => { await h.mia.navigate('chats', 'anna'); });
+      const action = h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'composer-action')[0]!;
+      gesture = pressGesture(action.props, { x: 340, y: 740 });
+      await act(async () => { gesture!.begin(); });
+      await h.wait(() => h.mia.audioState === 'recording');
+      assert.equal(h.n.vibrations, 0, 'startup must not vibrate into the voice note');
+      const aura = () => h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'AgentRecordingAura')[0]!;
+      assert.equal(aura().props.active, true);
+      if (ending !== 'send') {
+        await act(async () => { gesture!.move(280, 740); });
+        assert.equal(aura().props.progress.value, 1); assert.equal(aura().props.cancelReady, true);
+        if (ending === 'return') { await act(async () => { gesture!.move(340, 740); }); assert.equal(aura().props.cancelReady, false); }
+      }
+      await act(async () => { gesture!.release(); });
+      await h.wait(() => h.mia.audioState === 'idle' && ['sent', 'discarded'].includes(h.mia.voiceNoteStage));
+      const sent = h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST');
+      assert.equal(sent.length, ending === 'cancel' ? 0 : 1);
+      if (sent.length) assert.deepEqual(sent[0]!.body.content, { kind: 'voice', mediaId: 'media' });
+      assert.equal(h.mia.recording, null);
+      assert.equal(h.n.requests.filter(r => r.path.endsWith('/turns') && r.method === 'POST').length, 0);
+      assert.equal(h.tree.findAll(node => node.props.testID === 'audio-controls').length, 0);
+      assert.equal(h.n.noteRecording, false);
+    } finally { gesture?.dispose(); await h.close(); }
+  }
+});
+
+test('classic short taps and release during microphone startup never send audio', async () => {
+  const h = await mount(false, true);
+  let gesture: ReturnType<typeof pressGesture> | undefined;
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    const action = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'composer-action')[0]!;
+    gesture = pressGesture(action().props, { x: 340, y: 740 });
+    await act(async () => { gesture!.begin(); gesture!.release(); }); gesture.dispose();
+    assert.equal(h.n.noteRecording, false);
+    h.n.holdNoteStart = true;
+    gesture = pressGesture(action().props, { x: 340, y: 740 });
+    await act(async () => { gesture!.begin(); });
+    await h.wait(() => !!h.n.releaseNoteStart);
+    await act(async () => { gesture!.release(); h.n.releaseNoteStart!(); });
+    await h.wait(() => h.mia.audioState === 'idle' && h.mia.voiceNoteStage === 'idle');
+    assert.equal(h.n.requests.filter(r => r.method === 'POST' && (r.path === '/v1/media' || r.path === '/v1/chats/anna/messages')).length, 0);
+    assert.equal(h.n.noteRecording, false);
+  } finally { gesture?.dispose(); await h.close(); }
+});
+
+test('classic held recording cancels on background, navigation or enabling the agent', async () => {
+  for (const exit of ['background', 'navigate', 'mode'] as const) {
+    const h = await mount(false, true);
+    let gesture: ReturnType<typeof pressGesture> | undefined;
+    try {
+      await act(async () => { await h.mia.navigate('chats', 'anna'); });
+      gesture = pressGesture(h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'composer-action')[0]!.props, { x: 340, y: 740 });
+      await act(async () => { gesture!.begin(); }); await h.wait(() => h.mia.audioState === 'recording');
+      await act(async () => { if (exit === 'background') h.n.appState('background'); else if (exit === 'navigate') await h.mia.navigate('chats'); else await h.mia.saveAiMode(true); });
+      await h.wait(() => h.mia.audioState === 'idle');
+      await act(async () => { gesture!.release(); });
+      assert.equal(h.n.requests.filter(r => r.method === 'POST' && (r.path === '/v1/media' || r.path === '/v1/chats/anna/messages')).length, 0);
+      assert.equal(h.mia.recording, null);
+      if (exit === 'mode') assert.equal(h.mia.activeChatId, 'anna', 'enabling the agent keeps the current chat');
+    } finally { gesture?.dispose(); await h.close(); }
+  }
+});
+
+test('classic failed delivery retains the original note for inline retry without another upload', async () => {
+  const h = await mount(false, true);
+  let gesture: ReturnType<typeof pressGesture> | undefined;
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    const action = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'composer-action')[0]!;
+    gesture = pressGesture(action().props, { x: 340, y: 740 });
+    await act(async () => { gesture!.begin(); }); await h.wait(() => h.mia.audioState === 'recording');
+    h.n.failSend = true;
+    await act(async () => { gesture!.release(); }); gesture.dispose();
+    await h.wait(() => h.mia.voiceNoteStage === 'failed');
+    assert.ok(h.mia.recording); assert.equal(action().props.accessibilityLabel, 'Retry voice note');
+    h.n.failSend = false; gesture = pressGesture(action().props, { x: 340, y: 740 });
+    await act(async () => { gesture!.begin(); gesture!.release(); });
+    await h.wait(() => h.mia.voiceNoteStage === 'sent');
+    assert.equal(h.n.requests.filter(r => r.path === '/v1/media').length, 1);
+    const attempts = h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST');
+    assert.equal(attempts.length, 2); assert.equal(attempts[0]!.body.clientMessageId, attempts[1]!.body.clientMessageId);
+    assert.equal(h.mia.recording, null);
+  } finally { gesture?.dispose(); await h.close(); }
+});
+
+test('classic recording remains accessible through activate-to-start, activate-to-send and cancellation actions', async () => {
+  const h = await mount(false, true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    const action = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'composer-action')[0]!;
+    await act(async () => { action().props.onPress({ nativeEvent: {} }); });
+    await h.wait(() => h.mia.audioState === 'recording');
+    await act(async () => { action().props.onPress({ nativeEvent: {} }); });
+    await h.wait(() => h.mia.voiceNoteStage === 'sent');
+    await act(async () => { action().props.onAccessibilityAction({ nativeEvent: { actionName: 'record' } }); });
+    await h.wait(() => h.mia.audioState === 'recording');
+    await act(async () => { action().props.onAccessibilityAction({ nativeEvent: { actionName: 'discard' } }); });
+    await h.wait(() => h.mia.voiceNoteStage === 'discarded');
+    assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 1);
   } finally { await h.close(); }
 });

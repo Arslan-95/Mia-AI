@@ -9,6 +9,8 @@ import type { FunctionDefinition } from './model.js';
 import { AgentMemory, memoryInput } from './memory.js';
 import type { MemoryReviewer, MemoryChange } from './memory-policy.js';
 import type { VoiceExitReviewer } from './voice-exit-policy.js';
+import type { DraftSendReviewer } from './draft-send-policy.js';
+import { draftReviewContinuity } from './draft-send-policy.js';
 import { assertSourceFocus } from './context.js';
 import { speechDeliverySchema, defaultSpeechDelivery } from '../speech/delivery.js';
 import { RECIPIENT_APPROVAL_RULE } from './prompts.js';
@@ -18,6 +20,7 @@ export type Tool = { definition: FunctionDefinition; execute(input: unknown): Pr
 export type ToolContext = { db: Database; state: AssistantState; turn: Turn; signal: AbortSignal;
   reviewMemory?: MemoryReviewer;
   reviewVoiceExit?: VoiceExitReviewer;
+  reviewDraftSend?: DraftSendReviewer;
   delegate(name: Exclude<AgentName, 'mia'>, goal: string): Promise<string> };
 
 function define<T extends z.ZodType>(name: string, description: string, schema: T,
@@ -30,7 +33,7 @@ function define<T extends z.ZodType>(name: string, description: string, schema: 
 const uuid = z.uuid();
 const empty = z.object({}).strict();
 const versionedDraft = z.object({ draftId: uuid, version: z.int().positive() }).strict();
-const pageRoutes = { assistant: '/mia', chats: '/chats', contacts: '/contacts', drafts: '/drafts', settings: '/settings' } as const;
+const pageRoutes = { chats: '/chats', contacts: '/contacts', drafts: '/drafts', settings: '/settings' } as const;
 
 export function toolsFor(agent: AgentName, context: ToolContext): Map<string, Tool> {
   const { db, state, turn, signal } = context;
@@ -123,19 +126,6 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       versionedDraft, ({ draftId, version }) => mutate((service) => service.discardDraft(turn.userId, draftId, version, signal))),
   ];
   const coordinator = [
-    define('control_voice_note', `Control the original unsent recording identified by clientContext.voiceNote and its recipientId. preview plays it locally; discard deletes it only when requested; send needs a later user approval and completed device feedback. ${RECIPIENT_APPROVAL_RULE}`,
-      z.object({ recordingId: uuid, action: z.enum(['preview', 'send', 'discard']) }).strict(), async ({ recordingId, action }) => {
-        const note = turn.context?.voiceNote;
-        if (!note || note.id !== recordingId) throw conflict('This recording is no longer available on the device.');
-        if (action === 'send') {
-          const [earlier] = await db.query(`SELECT t.id FROM assistant_turns t JOIN assistant_sessions s ON s.id=t.session_id WHERE s.user_id=$1 AND t.session_id=$2
-            AND t.generation<$3 AND t.status='completed' AND t.client_context->'voiceNote'->>'id'=$4
-            AND t.client_context->'voiceNote'->>'recipientId'=$5 LIMIT 1`,
-            [turn.userId, turn.sessionId, turn.generation, recordingId, note.recipientId]);
-          if (!earlier) throw conflict('Ask whether to send this recording, then wait for a later user approval.');
-        }
-        return presentationAction('control_voice_note', { recordingId, recipientId: note.recipientId, action });
-      }),
     define('set_speech_delivery', 'Choose restrained delivery for your final spoken reply by meaning and current conversation. Default is calm/steady/reserved; no call is needed for ordinary neutral replies or greetings. Use gentle for a delicate topic, light only for supported casual humor, unhurried when useful, and friendly only with evidence it suits this user. Use saved voice preferences as context, but current instructions take priority. Changes apply only to this turn; use memory tools for an actual enduring preference. No freeform voice prompts or exaggerated emotion. For individual show_message narration use that tool\'s delivery field instead.',
       speechDeliverySchema, delivery => state.setSpeechDelivery(turn, signal, delivery)),
     define('show_message', 'First check current clientContext.reference: if it already shows this exact chat/message and relevant excerpt, DO NOT call this tool again; keep that card and answer directly. Otherwise required before discussing a specific stored chat message unless the user explicitly requests no display. Use for last/first-message questions, reading, quoting, summarizing, interpreting and help replying; fetching data or opening a chat alone does not show its card. Opens the real chat and shows/replaces the exact source. Put THIS source\'s substantive answer or commentary in narration: the card appears before speech and the tool waits for speech completion. For multiple sources, show and narrate each sequentially before replacing it. Counts/navigation and proposed draft revisions need no arbitrary card. Wait for completed feedback; failure is not a confirmed display. focus uses exact UTF-16 source offsets, never replacement display text. Optional delivery controls only this narration; it is not a reason to replay a visible card.',
@@ -239,17 +229,24 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
           approvalRule: earlier ? 'This exact version was already presented. Send only if the CURRENT user utterance approves it; do not ask them to confirm the same approval again.' : 'Present the exact recipient and content, then wait for a later user utterance to approve it.' };
       })),
     define('send_approved_draft', `Send the exact draft version only after its review in a completed EARLIER turn and CURRENT user approval. ${RECIPIENT_APPROVAL_RULE}`,
-      versionedDraft, ({ draftId, version }) => mutate(async (service, scoped) => {
-        const [review] = await scoped.query(`SELECT r.turn_id FROM draft_reviews r JOIN assistant_turns t ON t.id = r.turn_id
+      versionedDraft, async ({ draftId, version }) => {
+        const [review] = await db.query(`SELECT r.turn_id,t.created_at AS "reviewedAt",COALESCE((SELECT a.result->'context' FROM device_actions a
+        WHERE a.turn_id=t.id AND a.state='completed' AND jsonb_typeof(a.result->'context')='object'
+        ORDER BY a.sequence DESC LIMIT 1),t.client_context) AS "reviewContext",t.assistant_text AS "presentation" FROM draft_reviews r JOIN assistant_turns t ON t.id = r.turn_id
           WHERE r.draft_id = $1 AND r.version = $2 AND t.session_id = $3 AND t.status = 'completed'
           AND t.generation < $4`, [draftId, version, turn.sessionId, turn.generation]);
         if (!review) throw conflict('Review the current draft and wait for a later user turn to approve it.');
-        return service.confirmDraft(turn.userId, draftId, version, signal);
-      })),
-    define('open_page', 'Show the assistant home, chat list, contacts, saved drafts or settings on the phone. Navigation preserves voice mode and the current task. Pending means requested; check get_device_action before claiming the page opened.',
-      z.object({ page: z.enum(['assistant', 'chats', 'contacts', 'drafts', 'settings']) }).strict(),
+        const draft = await messaging.draft(turn.userId, draftId);
+        if (draft.version !== version) throw conflict('The draft changed. Review its current version.');
+        if (!context.reviewDraftSend) throw new AppError(503, 'DRAFT_SEND_REVIEW_UNAVAILABLE', 'Current send approval could not be verified.');
+        await context.reviewDraftSend({ draft, recipient: await messaging.profile(draft.recipientId), review: { ...review,
+          ...draftReviewContinuity(review.reviewedAt, review.reviewContext, turn.context) } });
+        return mutate(service => service.confirmDraft(turn.userId, draftId, version, signal));
+      }),
+    define('open_page', 'Show the main chat list, contacts, saved drafts or settings on the phone. Navigation preserves voice mode and the current task. Pending means requested; check get_device_action before claiming the page opened.',
+      z.object({ page: z.enum(['chats', 'contacts', 'drafts', 'settings']) }).strict(),
       ({ page }) => state.action(turn, signal, 'open_page', { route: pageRoutes[page] })),
-    define('open_chat', 'Request that the app open the direct chat with a verified recipient. This does not send or discard drafts.',
+    define('open_chat', 'Open the verified recipient conversation, reusing its direct chat or creating one if absent. Use when the user wants to tell/write/ask/reply/send something to that person, even without an explicit navigation request, before asking for content or reviewing the proposal. Keep an already confirmed matching chat. This does not save a contact, send anything, select an old draft or discard drafts. Check device feedback before claiming it opened.',
       z.object({ recipientId: uuid }).strict(), async ({ recipientId }) => {
         const chat = await mutate(service => service.createDirectChat(turn.userId, recipientId));
         return state.action(turn, signal, 'open_chat', { chatId: chat.id });
@@ -262,11 +259,11 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       }),
     define('stop_audio', 'Request that the phone stop current audio playback.', empty,
       () => state.action(turn, signal, 'stop_audio', {})),
-    define('request_voice_recording', 'Open the verified recipient chat so the user can hold the lower forty percent to record an original voice note, and release to finish. This prepares recording; it does not start it or send anything.',
+    define('request_voice_recording', 'Only open the verified recipient chat. The user starts an original voice note by holding the lower forty percent; releasing sends it directly from the client. Sliding away and releasing cancels it. This tool never starts, finishes, uploads or sends a recording and needs no later agent send approval.',
       z.object({ recipientId: uuid }).strict(), async ({ recipientId }) => {
         await messaging.profile(recipientId);
         const chat = await mutate(service => service.createDirectChat(turn.userId, recipientId));
-        return state.action(turn, signal, 'record_voice', { recipientId, chatId: chat.id });
+        return state.action(turn, signal, 'open_chat', { chatId: chat.id });
       }),
     define('get_device_action', 'Check whether a requested device action really completed, failed or is still pending.',
       z.object({ actionId: uuid }).strict(), async ({ actionId }) => {

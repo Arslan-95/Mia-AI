@@ -91,6 +91,21 @@ test('voice-note capture receives original PCM while agent input is muted withou
   await audio.stop(); delete (globalThis as any).__miaDuplexModule;
 });
 
+test('a five-second held capture preserves every original PCM frame and rejects a truncated stream', async t => {
+  const { audio, listeners } = await device();
+  await audio.start(() => {}, () => {}, () => {});
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  try {
+    audio.setInputMuted(true); audio.startRecording();
+    const expected = Uint8Array.from({ length: 240000 }, (_, i) => i % 251);
+    for (let i = 0; i < 100; i++) { listeners.get('pcm')!({ audio: Buffer.from(expected.subarray(i * 2400, (i + 1) * 2400)).toString('base64') }); t.mock.timers.tick(50); }
+    assert.deepEqual(audio.finishRecording(), expected);
+    audio.startRecording(); listeners.get('pcm')!({ audio: Buffer.from(expected.subarray(0, 2400)).toString('base64') });
+    t.mock.timers.tick(5000);
+    assert.throws(() => audio.finishRecording(), /recording was interrupted and was not sent/);
+  } finally { t.mock.timers.reset(); await audio.stop(); delete (globalThis as any).__miaDuplexModule; }
+});
+
 test('speaker PCM is gated on the real capture path and input resumes unchanged after playback', async t => {
   const { audio, listeners } = await device(); const heard: Uint8Array[] = [];
   await audio.start(bytes => heard.push(bytes), () => {}, () => {});

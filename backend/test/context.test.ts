@@ -187,7 +187,7 @@ test('page navigation tools choose allowlisted routes and retain action ownershi
   const tools = toolsFor('mia', toolContext);
   assert.equal(toolsFor('contacts', toolContext).has('open_page'), false);
   assert.equal(toolsFor('messaging', toolContext).has('open_page'), false);
-  for (const [page, route] of Object.entries({ assistant: '/mia', chats: '/chats', contacts: '/contacts', drafts: '/drafts', settings: '/settings' })) {
+  for (const [page, route] of Object.entries({ chats: '/chats', contacts: '/contacts', drafts: '/drafts', settings: '/settings' })) {
     const action = await tools.get('open_page')!.execute({ page }) as { id: string; kind: string; payload: unknown; state: string };
     assert.equal(action.kind, 'open_page'); assert.deepEqual(action.payload, { route }); assert.equal(action.state, 'pending');
     await assert.rejects(state.acknowledgeAction(stranger.user.id, action.id, true, { context: { route, revision: 2 } }), { status: 404 });
@@ -196,7 +196,7 @@ test('page navigation tools choose allowlisted routes and retain action ownershi
     assert.deepEqual((await state.turn(owner.user.id, session.id, turn.id)).context, snapshot);
   }
   const before = (await context.db.query('SELECT id FROM device_actions')).length;
-  for (const input of [{ page: 'https://example.com' }, { page: '/settings' }, { page: 'contacts', route: 'https://example.com' }]) {
+  for (const input of [{ page: 'assistant' }, { page: 'https://example.com' }, { page: '/settings' }, { page: 'contacts', route: 'https://example.com' }]) {
     await assert.rejects(tools.get('open_page')!.execute(input));
   }
   assert.equal((await context.db.query('SELECT id FROM device_actions')).length, before);

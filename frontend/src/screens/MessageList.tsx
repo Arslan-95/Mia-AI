@@ -1,16 +1,18 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FlatList, StyleSheet, Text, View, type FlatListProps } from 'react-native';
 import type { ChatScrollPositions } from '../chatScrollPositions';
 import type { Message } from '../types';
 import { agentColors, classicColors, useUi } from '../ui';
 
 type Props = Omit<FlatListProps<Message>, 'data' | 'inverted' | 'contentOffset' | 'onScroll' | 'maintainVisibleContentPosition'> & {
-  userId: string; chatId: string; positions: ChatScrollPositions; data: readonly Message[];
+  userId: string; chatId: string; positions: ChatScrollPositions; data: readonly Message[]; scrollRequest?: string;
 };
 
 // Keyed by account/chat at the call site: this is a native initial offset,
 // not a scrollToEnd after the history has appeared on screen.
-export function MessageList({ userId, chatId, positions, data, ...props }: Props) {
+export function MessageList({ userId, chatId, positions, data, scrollRequest, ...props }: Props) {
+  const list = useRef<FlatList<Message>>(null);
+  const followOutgoing = useRef(false);
   const { agent } = useUi();
   const p = agent ? agentStyles : classicStyles;
   const [initial] = useState(() => positions.read(userId, chatId));
@@ -18,16 +20,22 @@ export function MessageList({ userId, chatId, positions, data, ...props }: Props
   const offset = useRef({ x: 0, y: initial.offset ?? 0 }).current;
   const restored = useRef(offset.y === 0);
   const visibleData = initialData ?? data;
+  useEffect(() => {
+    if (!scrollRequest || !positions.consumeScrollRequest(userId, chatId, scrollRequest)) return;
+    followOutgoing.current = true; restored.current = true; setInitialData(undefined);
+    positions.save(userId, chatId, initial.generation, 0, data);
+    list.current?.scrollToOffset({ offset: 0, animated: true });
+  }, [scrollRequest]);
   const dayStarts = useMemo(() => new Set(visibleData.filter((message, index) =>
     new Date(message.createdAt).toDateString() !== (visibleData[index + 1] ? new Date(visibleData[index + 1]!.createdAt).toDateString() : null)
   ).map(message => message.id)), [visibleData]);
-  return <FlatList {...props} data={visibleData} inverted contentOffset={offset}
+  return <FlatList {...props} ref={list} data={visibleData} inverted contentOffset={offset}
     renderItem={info => <View>
       {dayStarts.has(info.item.id) && <View style={p.day}><Text style={p.dayLabel}>{new Date(info.item.createdAt).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}</Text></View>}
       {props.renderItem?.(info)}
     </View>}
     maintainVisibleContentPosition={{ minIndexForVisible: 0, autoscrollToTopThreshold: 70 }}
-    onScrollBeginDrag={() => { restored.current = true; }}
+    onScrollBeginDrag={() => { restored.current = true; followOutgoing.current = false; }}
     onScroll={event => {
       const y = Math.max(0, event.nativeEvent.contentOffset.y);
       // Ignore mount/layout events until the requested offset is installed;
@@ -40,6 +48,7 @@ export function MessageList({ userId, chatId, positions, data, ...props }: Props
       // Restore against the same message snapshot, then let native anchoring
       // insert messages that arrived while this chat was closed.
       if (initialData && height > 0) setInitialData(undefined);
+      if (followOutgoing.current) list.current?.scrollToOffset({ offset: 0, animated: true });
       props.onContentSizeChange?.(width, height);
     }} />;
 }

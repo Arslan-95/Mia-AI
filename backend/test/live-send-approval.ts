@@ -22,16 +22,16 @@ let busy = false, polling = Promise.resolve();
 const signal = new AbortController().signal;
 
 try {
-  for (const kind of ['text', 'voice'] as const) for (const scenario of ['changed-recipient', 'manual-navigation', 'explicit-recipient', 'clarified-other-screen', 'unrelated-yes', 'direct-yes']) {
+  for (const kind of (process.argv.includes('--voice-only') ? ['voice'] as const : process.argv.includes('--text-only') ? ['text'] as const : ['text', 'voice'] as const)) for (const scenario of [...['changed-recipient', 'manual-navigation', 'explicit-recipient', 'clarified-other-screen', 'unrelated-yes', 'direct-yes'], ...(kind === 'voice' ? ['prepare-recording'] : [])]) {
     const index = fixtures.length, owner = randomUUID(), anna = randomUUID(), ben = randomUUID();
     for (const [id, name] of [[owner, 'Owner'], [anna, 'Anna'], [ben, 'Ben']]) await db.query(
       "INSERT INTO users(id,email,username,display_name,password_hash) VALUES ($1,$2,$3,$4,'unused')",
       [id, `${id}@example.test`, `approval_${index}_${name}`, name]);
     await messaging.addContact(owner, anna, 'Anna'); await messaging.addContact(owner, ben, 'Ben');
     const annaChat = await messaging.createDirectChat(owner, anna), benChat = await messaging.createDirectChat(owner, ben);
-    const context: ClientContext = { route: `/chat/${annaChat.id}`, revision: 1,
+    const context: ClientContext = { route: `/chat/${annaChat.id}`, revision: 1, navigationSessionId: randomUUID(),
       voice: { enabled: true, microphoneMuted: false, revision: 1 },
-      ...(kind === 'voice' ? { voiceNote: { id: randomUUID(), recipientId: anna, durationMs: 3000 } } : {}) };
+      ...(kind === 'voice' && scenario !== 'prepare-recording' ? { voiceNote: { id: randomUUID(), recipientId: anna, durationMs: 3000 } } : {}) };
     const session = await runtime.state.session(owner);
     const seed = async (text: string, reply: string) => {
       const { turn } = await runtime.state.accept(owner, session.id, randomUUID(), text, undefined, structuredClone(context));
@@ -39,23 +39,24 @@ try {
       await runtime.state.finish(turn, signal, reply);
       return turn;
     };
-    const first = await seed(kind === 'voice' ? 'I finished recording a voice note for Anna.' : 'Prepare a message to Anna: I will call after lunch.',
+    const first = scenario === 'prepare-recording' ? undefined : await seed(kind === 'voice' ? 'I finished recording a voice note for Anna.' : 'Prepare a message to Anna: I will call after lunch.',
       kind === 'voice' ? 'Your voice note is ready for Anna. Should I send it to her?' : 'For Anna: I will call after lunch. Should I send it to her?');
     if (kind === 'text') {
       const draft = await messaging.createDraft(owner, anna, { kind: 'text', text: 'I will call after lunch.' });
       await messaging.reviewDraft(owner, draft.id, draft.version);
-      await db.query('INSERT INTO draft_reviews(draft_id,version,turn_id) VALUES ($1,$2,$3)', [draft.id, draft.version, first.id]);
+      await db.query('INSERT INTO draft_reviews(draft_id,version,turn_id) VALUES ($1,$2,$3)', [draft.id, draft.version, first!.id]);
     }
-    if (scenario !== 'direct-yes') {
+    if (scenario === 'prepare-recording') { context.route = '/mia'; context.revision++; }
+    else if (scenario !== 'direct-yes') {
       context.previousRoute = context.route; context.route = `/chat/${benChat.id}`; context.revision++;
       if (scenario !== 'manual-navigation') await seed('Open Ben\'s chat.', 'Ben\'s chat is open.');
     }
     if (scenario === 'unrelated-yes') await seed('Where can I change the app settings?', 'Settings has the app controls. Would you like me to open Settings?');
     if (scenario === 'clarified-other-screen') await seed('Send it.', `Do you want me to send that ${kind === 'voice' ? 'voice note' : 'message'} to Anna, while Ben's chat is open?`);
-    const text = ['changed-recipient', 'manual-navigation'].includes(scenario) ? 'Send it.' : scenario === 'explicit-recipient'
+    const text = scenario === 'prepare-recording' ? 'I would like to record a voice message for Anna.' : ['changed-recipient', 'manual-navigation'].includes(scenario) ? 'Send it.' : scenario === 'explicit-recipient'
       ? `Send that ${kind === 'voice' ? 'voice note' : 'message'} to Anna.` : 'Yes.';
     fixtures.push({ kind, scenario, owner, anna, annaChat, benChat, session, context: structuredClone(context), text,
-      shouldSend: ['explicit-recipient', 'clarified-other-screen', 'direct-yes'].includes(scenario) });
+      shouldSend: kind === 'text' && ['explicit-recipient', 'clarified-other-screen', 'direct-yes'].includes(scenario) });
     screens.set(owner, structuredClone(context));
   }
   const timer = setInterval(() => {
@@ -68,8 +69,7 @@ try {
         const screen = screens.get(action.userId)!;
         if (action.kind === 'open_page' || action.kind === 'open_chat') {
           screen.previousRoute = screen.route; screen.route = action.payload.route ?? `/chat/${action.payload.chatId}`; screen.revision++;
-        } else if (action.kind === 'control_voice_note' && action.payload.action === 'send') delete screen.voiceNote;
-        else throw new Error(`Unexpected action ${action.kind}`);
+        } else throw new Error(`Unexpected action ${action.kind}`);
         await runtime.state.acknowledgeAction(action.userId, action.id, true, { context: structuredClone(screen), message: 'Synthetic phone completed the action.' });
       }
     })().catch(error => { failures.push(String(error)); }).finally(() => { busy = false; });
@@ -89,7 +89,8 @@ try {
       const sends = await db.query<{ recipientId: string }>(`SELECT payload->>'recipientId' AS "recipientId" FROM device_actions
         WHERE user_id=$1 AND kind='control_voice_note' AND payload->>'action'='send'`, [f.owner]);
       const sent = f.kind === 'text' ? messages.length : sends.length;
-      const passed = current.status === 'completed' && sent === (f.shouldSend ? 1 : 0)
+      const opened = await db.query<{ chatId: string; state: string }>(`SELECT payload->>'chatId' AS "chatId",state FROM device_actions WHERE user_id=$1 AND kind='open_chat'`, [f.owner]);
+      const passed = (f.scenario !== 'prepare-recording' || opened.some(action => action.chatId === f.annaChat.id && action.state === 'completed')) && current.status === 'completed' && sent === (f.shouldSend ? 1 : 0)
         && messages.every(message => message.chatId === f.annaChat.id) && sends.every(send => send.recipientId === f.anna);
       console.info(JSON.stringify({ kind: f.kind, scenario: f.scenario, passed, sent, reply: current.assistantText }));
       if (!passed) failures.push(`${f.kind}/${f.scenario}: ${current.status}, sends=${sent}`);

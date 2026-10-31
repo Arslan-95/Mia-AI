@@ -1,19 +1,20 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Animated, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useMia, type Tab } from './useMia';
 import { Auth, CompleteProfile } from './screens/Auth';
 import { Chats } from './screens/Chats';
-import { AgentHome, VoiceMode } from './screens/AssistantOrb';
+import { VoiceMode } from './screens/AssistantOrb';
 import { AgentInteraction } from './screens/AgentInteraction';
 import { MessageReferenceCard } from './screens/MessageReferenceCard';
 import { MessageDrafts } from './screens/MessageDrafts';
+import { ConversationStatus } from './screens/ConversationStatus';
 import { People } from './screens/People';
 import { Settings } from './screens/Settings';
-import { AudioControls, hasAudioControls } from './screens/AudioControls';
 import { useKeyboardVisible } from './useKeyboardVisible';
-import { Button, Empty, Icon, Notice, ScreenHeader, UiProvider, useUi, agentColors, agentStyles, colors, s } from './ui';
+import { Button, Empty, Icon, ScreenHeader, UiProvider, useUi, agentColors, agentStyles, colors, s } from './ui';
 import { usePressOpacity } from './motion';
+import type { RecordingGesture } from './voiceNoteGesture';
 
 const tabs: { id: Tab; label: string; icon: React.ComponentProps<typeof Icon>['name']; activeIcon: React.ComponentProps<typeof Icon>['name'] }[] = [
   { id: 'people', label: 'Contacts', icon: 'people-outline', activeIcon: 'people' },
@@ -28,6 +29,8 @@ function Application() {
   const bottomInset = keyboardVisible ? 0 : insets.bottom;
   const [elapsed, setElapsed] = useState(0);
   const [agentHolding, setAgentHolding] = useState(false);
+  const [recordingGesture, setRecordingGesture] = useState<RecordingGesture>({ active: false, cancelReady: false });
+  const recordingProgress = useRef(new Animated.Value(0)).current;
   const voiceMode = !!(mia.aiMode && mia.session?.user.profileComplete && !mia.booting);
   const ui = { colors: voiceMode ? agentColors : colors, s: voiceMode ? agentStyles : s };
   const chatOpen = mia.tab === 'chats' && mia.chats.some(chat => chat.id === mia.activeChatId);
@@ -37,8 +40,10 @@ function Application() {
     const start = Date.now();
     const timer = setInterval(() => {
       const seconds = Math.floor((Date.now() - start) / 1000);
-      setElapsed(seconds);
-      if (seconds >= 118) void mia.finishRecording().catch(mia.fail);
+      setElapsed(Math.min(119, seconds));
+      // The recorder caps audio at 119 seconds. A held note still needs the
+      // user's release/cancel gesture; reaching the cap never sends it.
+      if (seconds >= 119) clearInterval(timer);
     }, 1000);
     return () => clearInterval(timer);
   }, [mia.audioState]);
@@ -52,12 +57,11 @@ function Application() {
           : !mia.session ? <Auth mia={mia} />
           : !mia.session.user.profileComplete ? <CompleteProfile mia={mia} />
           : <View style={app.fill}>
-            {!!mia.error && <View style={app.error}><Notice error>{mia.error}</Notice><Button quiet label="Dismiss message" onPress={() => mia.setError('')} /></View>}
-            <View style={app.fill}>{mia.tab === 'assistant' ? <AgentHome mia={mia} /> : mia.tab === 'people' ? <People mia={mia} /> : mia.tab === 'settings' ? <Settings mia={mia} /> : mia.tab === 'drafts' ? <ScrollView contentContainerStyle={ui.s.content} keyboardShouldPersistTaps="handled"><ScreenHeader title="Saved messages" />{mia.drafts.length ? <MessageDrafts mia={mia} drafts={mia.drafts} /> : <Empty icon="bookmark-outline" title="All clear" text="Messages you prepare with Mia appear here for review." />}</ScrollView> : <Chats mia={mia} bottomInset={hasAudioControls(mia) || voiceMode ? 0 : bottomInset} />}{voiceMode && chatOpen && <MessageReferenceCard key={mia.activeChatId} source={mia.messageReference?.chatId === mia.activeChatId ? mia.messageReference : null} userId={mia.session!.user.id} playback={mia.originalPlayback} dismissalRevision={mia.referenceDismissalRevision} onPresented={mia.referencePresented} />}</View>
-            {voiceMode ? <>
-              {hasAudioControls(mia) && <ScrollView style={app.voiceAudio} keyboardShouldPersistTaps="handled"><AudioControls mia={mia} elapsed={elapsed} /></ScrollView>}
-              <VoiceMode mia={mia} bottomInset={bottomInset} holding={agentHolding} />
-            </> : <AudioControls mia={mia} elapsed={elapsed} bottomInset={chatOpen ? bottomInset : 0} />}
+            <View style={app.fill}>{mia.tab === 'people' ? <People mia={mia} /> : mia.tab === 'settings' ? <Settings mia={mia} /> : mia.tab === 'drafts' ? <ScrollView contentContainerStyle={ui.s.content} keyboardShouldPersistTaps="handled"><ScreenHeader title="Saved messages" />{mia.drafts.length ? voiceMode ? <Text style={ui.s.small}>{mia.drafts.length} saved {mia.drafts.length === 1 ? 'message' : 'messages'}. Ask Mia to review or open a saved message.</Text> : <MessageDrafts mia={mia} drafts={mia.drafts} /> : <Empty icon="bookmark-outline" title="All clear" text="Messages you prepare with Mia appear here for review." />}</ScrollView> : <Chats mia={mia} bottomInset={voiceMode ? 0 : bottomInset} />}{voiceMode && chatOpen && <MessageReferenceCard key={mia.activeChatId} source={mia.messageReference?.chatId === mia.activeChatId ? mia.messageReference : null} userId={mia.session!.user.id} playback={mia.originalPlayback} dismissalRevision={mia.referenceDismissalRevision} onPresented={mia.referencePresented} />}</View>
+            {voiceMode && <>
+              <VoiceMode mia={mia} bottomInset={bottomInset} holding={agentHolding} elapsed={elapsed} recordingGesture={recordingGesture} recordingProgress={recordingProgress} />
+            </>}
+            {!voiceMode && !chatOpen && !!mia.error && <View style={{ paddingHorizontal: 16 }}><ConversationStatus error={mia.error} onDismiss={() => mia.setError('')} /></View>}
             {!voiceMode && !chatOpen && <View style={[app.dock, { paddingBottom: Math.max(bottomInset, 12) }]}>
               <Nav item={tabs[0]!} selected={mia.tab === 'people'} onPress={() => void mia.navigate('people')} count={0} />
               <Nav item={tabs[1]!} selected={mia.tab === 'chats' || mia.tab === 'drafts'} onPress={() => void mia.navigate('chats')} count={mia.chats.reduce((sum, chat) => sum + chat.unreadCount, 0)} />
@@ -66,7 +70,7 @@ function Application() {
           </View>}
       </KeyboardAvoidingView>
     </SafeAreaView>
-    {voiceMode && <AgentInteraction mia={mia} onHoldingChange={setAgentHolding} />}
+    {voiceMode && <AgentInteraction mia={mia} onHoldingChange={setAgentHolding} onRecordingGestureChange={setRecordingGesture} recordingProgress={recordingProgress} />}
   </View></UiProvider>;
 }
 
@@ -85,7 +89,6 @@ export default function App() { return <SafeAreaProvider><Application /></SafeAr
 const app = StyleSheet.create({
   fill: { flex: 1, minWidth: 0 }, loading: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   error: { paddingHorizontal: 24, paddingTop: 10 },
-  voiceAudio: { flexGrow: 0, maxHeight: '42%' },
   dock: { flexDirection: 'row', alignItems: 'center', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line, paddingHorizontal: 20, paddingTop: 8, backgroundColor: colors.paper },
   nav: { flex: 1, minWidth: 0, alignItems: 'center', justifyContent: 'center', gap: 4, minHeight: 54, paddingVertical: 4, borderRadius: 16 },
   navIcon: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },

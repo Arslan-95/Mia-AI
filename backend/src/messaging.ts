@@ -7,12 +7,12 @@ import { isPhoneSearch, normalizePhoneSearch } from './phone.js';
 export type Profile = { id: string; username: string; displayName: string };
 export type Contact = Profile & { contactId: string; name: string };
 export type Message = { id: string; chatId: string; senderId: string; kind: 'text' | 'voice';
-  text: string | null; mediaId: string | null; createdAt: Date };
+  text: string | null; mediaId: string | null; createdAt: Date; clientMessageId?: string; durationMs?: number | null };
 export type Draft = { id: string; recipientId: string; kind: 'text' | 'voice'; text: string | null;
   mediaId: string | null; version: number; state: 'editing' | 'ready' | 'sent' | 'discarded';
   reviewedVersion: number | null; messageId: string | null; updatedAt: Date; recipient: Profile };
 type Content = { kind: 'text' | 'voice'; text?: string; mediaId?: string };
-const messageColumns = 'id, chat_id AS "chatId", sender_id AS "senderId", kind, text, media_id AS "mediaId", created_at AS "createdAt"';
+const messageColumns = 'id, chat_id AS "chatId", sender_id AS "senderId", kind, text, media_id AS "mediaId", created_at AS "createdAt", client_id AS "clientMessageId", (SELECT duration_ms FROM media WHERE media.id=media_id) AS "durationMs"';
 const draftColumns = `id, recipient_id AS "recipientId", kind, text, media_id AS "mediaId", version, state,
   reviewed_version AS "reviewedVersion", message_id AS "messageId", updated_at AS "updatedAt",
   (SELECT json_build_object('id',u.id,'username',u.username,'displayName',COALESCE(c.name,u.display_name))

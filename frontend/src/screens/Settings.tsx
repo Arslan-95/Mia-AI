@@ -34,20 +34,20 @@ export function Settings({ mia }: { mia: Mia }) {
       <ScreenHeader title="Settings" action={<HeaderAction label="Sign out" icon="log-out-outline" onPress={() => setConfirmation('logout')} />} />
       <View style={[s.card, p.profile, stacked && p.stacked]}><Avatar name={mia.session!.user.displayName} size={agent ? 60 : 48} /><View style={[p.identity, stacked && p.stackedText]}><Text style={s.sectionTitle}>{mia.session!.user.displayName}</Text><Text style={agent ? s.body : s.small}>@{mia.session!.user.username}</Text><Text style={[agent ? s.body : s.small, agent && { marginTop: 3 }]}>{mia.session!.user.phoneNumber}</Text></View></View>
       <View style={p.assistantSection}>{agent ? <SectionCaption>Your assistant</SectionCaption> : <Text style={p.groupTitle}>YOUR ASSISTANT</Text>}
-      <Pressable accessibilityRole="button" accessibilityLabel="Mia voice mode" accessibilityHint={mia.aiMode ? 'Hands-free assistance is on. Opens Mia home.' : 'Opens a confirmation before enabling hands-free assistance.'}
-        onPress={() => { if (mia.aiMode) void mia.navigate('assistant'); else setConfirmation('voice'); }} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+      <Pressable accessibilityRole="button" accessibilityLabel="Mia voice mode" accessibilityHint={mia.aiMode ? 'Hands-free assistance is on. Returns to chats.' : 'Opens a confirmation before enabling hands-free assistance.'}
+        onPress={() => { if (mia.aiMode) void mia.navigate('chats'); else setConfirmation('voice'); }} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
         style={({ pressed }) => [s.card, p.assistantCard, pressed && { backgroundColor: colors.surfacePressed }, focused && s.focus]}>
         <View style={[p.assistantTop, stacked && p.stacked]}><View accessible={false} accessibilityElementsHidden style={p.symbol}>{agent && <View style={p.reflection} />}<View style={p.icon}><Icon name="sparkles-outline" color={colors.accentLight} size={agent ? 25 : 22} /></View></View>
-          <View style={[p.description, stacked && p.stackedText]}><Text style={agent ? p.assistantTitle : s.label}>Mia voice mode{!agent && mia.aiMode ? ' \u00b7 On' : ''}</Text>{agent ? <View style={p.stateBadge}><Text style={p.stateText}>{mia.aiMode ? 'On' : 'Off'}</Text></View> : <Text style={s.small}>{mia.aiMode ? 'Mia is with you. Return to your assistant.' : 'Open chats, hear messages and reply hands-free.'}</Text>}</View>
+          <View style={[p.description, stacked && p.stackedText]}><Text style={agent ? p.assistantTitle : s.label}>Mia voice mode{!agent && mia.aiMode ? ' \u00b7 On' : ''}</Text>{agent ? <View style={p.stateBadge}><Text style={p.stateText}>{mia.aiMode ? 'On' : 'Off'}</Text></View> : <Text style={s.small}>{mia.aiMode ? 'Mia is with you. Return to your chats.' : 'Open chats, hear messages and reply hands-free.'}</Text>}</View>
           {!stacked && <Icon name="chevron-forward" size={18} color={agent ? colors.accentLight : colors.muted} />}</View>
-        {agent && <Text style={s.body}>{mia.aiMode ? 'Mia is with you. Return to your assistant.' : 'Open chats, hear messages and reply hands-free.'}</Text>}
+        {agent && <Text style={s.body}>{mia.aiMode ? 'Mia is with you. Return to your chats.' : 'Open chats, hear messages and reply hands-free.'}</Text>}
       </Pressable>
-      {agent && <Text style={p.helper}>Upper 60%: tap to mute Mia, hold 5 seconds to exit. Lower 40%: hold to record in a chat, release to finish.</Text>}</View>
+      {agent && <Text style={p.helper}>Upper 60%: tap to mute Mia, hold 5 seconds to exit. Lower 40%: hold to record in a chat, release to send. Move away until the red circle is full, then release to delete.</Text>}</View>
     </ScrollView></Reveal></View>
     <ConfirmationDialog visible={confirmation !== null} busy={busy} onCancel={cancel} onConfirm={() => void confirm()}
       title={confirmation === 'voice' ? 'Enable hands-free voice mode?' : 'Sign out?'}
       description={confirmation === 'voice'
-        ? 'Mia will listen while voice mode is active. Tap the upper 60% to mute or unmute Mia. Hold the upper area for 5 seconds to exit. In a chat, hold the lower 40% to record a voice note and release to finish. Recording and playback temporarily pause Mia’s listening and preserve your mute choice.'
+        ? 'Mia will listen while voice mode is active. Tap the upper 60% to mute or unmute Mia. Hold the upper area for 5 seconds to exit. In a chat, hold the lower 40% to record and release to send. Move away until the red background reaches the outer circle, then release to delete; move back to keep recording. Recording and playback temporarily pause Mia’s listening and preserve your mute choice.'
         : 'Saved messages stay in your account. Unsent messages and recordings on this iPhone will be removed.'}
       confirmLabel={confirmation === 'voice' ? 'Enable voice mode now' : 'Sign out now'}
       destructive={confirmation === 'logout'}

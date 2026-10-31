@@ -5,7 +5,7 @@
   "license": "UNLICENSED",
   "type": "module",
   "scripts": {
-    "dev": "node --env-file-if-exists=.env --import tsx --watch src/main.ts",
+    "dev": "tsx watch --exclude \"**/node_modules/**\" --exclude \"**/.data/**\" --exclude \"**/dist/**\" --env-file-if-exists=.env src/main.ts",
     "start": "node --env-file-if-exists=.env dist/main.js",
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",

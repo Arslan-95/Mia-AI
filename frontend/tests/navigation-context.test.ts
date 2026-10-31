@@ -19,7 +19,7 @@ test('visible-reference identity ignores JSON property order while preserving ev
   assert.equal(sameContext(null, null), true); assert.equal(sameContext(phone, null), false);
 });
 
-test('assistant home and messenger pages have explicit routes while requests retain the open conversation', () => {
+test('chats is the common home and legacy assistant routes return there while requests retain the open conversation', () => {
   const navigation = new NavigationContext();
   navigation.move(viewRoute('chats', 'anna-chat'));
   const snapshot = navigation.snapshot();
@@ -28,8 +28,8 @@ test('assistant home and messenger pages have explicit routes while requests ret
   snapshot.route = '/settings';
   assert.equal(navigation.snapshot().route, '/chat/anna-chat');
   assert.equal(viewRoute('people'), '/contacts');
-  assert.equal(viewRoute('assistant'), '/mia');
-  assert.deepEqual(routeView('/mia'), { view: 'assistant', chatId: null });
+  assert.equal(viewRoute('chats'), '/chats');
+  assert.deepEqual(routeView('/mia'), { view: 'chats', chatId: null });
   assert.equal(pageView('/drafts'), 'drafts');
   for (const route of ['/chat/anna', 'https://example.com', '/settings/../mia', undefined]) assert.equal(pageView(route), null);
 });

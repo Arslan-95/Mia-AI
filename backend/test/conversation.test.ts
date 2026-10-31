@@ -66,5 +66,12 @@ test('conversation replays confirmed speech chronologically, preserves interrupt
   const joined = await conversationInput(db, state, fragment.turn);
   const last = joined.at(-1)!;
   assert.equal(last.role, 'user');
-  assert.equal((last.content as { text: string }[])[0]!.text, 'Would you please make something like that question\nbut another one');
+  assert.deepEqual(last, { role: 'user', content: [{ type: 'input_text', text: 'but another one' }] });
+  assert.equal(joined.at(-2)!.role, 'user');
+  assert.equal((joined.at(-2)!.content as { text: string }[])[0]!.text, 'Would you please make something like that question');
+  await add('Open Ben and play the last voice message.', null, 'interrupted');
+  const close = await state.accept(owner, session.id, randomUUID(), 'Please close this message.', undefined, screen);
+  const closingInput = await conversationInput(db, state, close.turn);
+  assert.deepEqual(closingInput.at(-1), { role: 'user', content: [{ type: 'input_text', text: 'Please close this message.' }] });
+  assert.ok(JSON.stringify(closingInput.slice(0, -1)).includes('Open Ben and play the last voice message.'));
 });

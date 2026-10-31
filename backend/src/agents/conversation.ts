@@ -44,6 +44,8 @@ export async function conversationInput(db: Database, state: AssistantState, tur
     const screen = screenContext(entry.context);
     const serialized = JSON.stringify(screen);
     const record = {
+      recordedAt: entry.createdAt,
+      navigationAtRequest: entry.context ? { route: entry.context.route, revision: entry.context.revision, navigationSessionId: entry.context.navigationSessionId } : null,
       ...(serialized !== previousScreen ? { screenAtRequest: screen } : {}),
       ...(entry.status !== 'completed' ? { status: entry.status, finalReplyUnavailable: !entry.assistantText } : {}),
     };
@@ -54,6 +56,10 @@ export async function conversationInput(db: Database, state: AssistantState, tur
     if (speech.length) input.push({ role: 'assistant', content: speech.map(text => ({ type: 'output_text', text })) });
     else continueUserSpeech = entry.status === 'interrupted';
   }
+  // Keep successive historical speech fragments together, but preserve the
+  // current utterance as the latest user message. Appending a cancellation to
+  // an older interrupted playback request can otherwise revive the old task.
+  continueUserSpeech = false;
   appendUser(turn.userText);
   return input;
 }

@@ -1,8 +1,9 @@
 import type { ClientContext } from './types';
 
-export type View = 'assistant' | 'chats' | 'people' | 'settings' | 'drafts';
-const routes: Record<View, string> = { assistant: '/mia', chats: '/chats', people: '/contacts', settings: '/settings', drafts: '/drafts' };
+export type View = 'chats' | 'people' | 'settings' | 'drafts';
+const routes: Record<View, string> = { chats: '/chats', people: '/contacts', settings: '/settings', drafts: '/drafts' };
 export function pageView(route: unknown): View | null {
+  if (route === '/mia') return 'chats'; // Previously issued actions still return to the main chat list.
   return (Object.keys(routes) as View[]).find(view => routes[view] === route) ?? null;
 }
 export function viewRoute(view: View, chatId: string | null = null) {
@@ -16,7 +17,7 @@ export function sameContext(left: ClientContext | null, right: ClientContext | n
   const a = left?.reference, b = right?.reference;
   // JSONB can reorder object keys. Identity is the values, including the exact
   // source revision/excerpt; voice state has its own control-revision guard.
-  return left?.route === right?.route && left?.revision === right?.revision && left?.previousRoute === right?.previousRoute
+  return left?.navigationSessionId === right?.navigationSessionId && left?.route === right?.route && left?.revision === right?.revision && left?.previousRoute === right?.previousRoute
     && left?.voiceNote?.id === right?.voiceNote?.id && left?.voiceNote?.recipientId === right?.voiceNote?.recipientId && left?.voiceNote?.durationMs === right?.voiceNote?.durationMs
     && a?.chatId === b?.chatId && a?.messageId === b?.messageId && a?.revision === b?.revision
     && a?.focus?.start === b?.focus?.start && a?.focus?.end === b?.focus?.end;
