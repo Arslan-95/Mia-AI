@@ -1,11 +1,11 @@
 import React, { useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import type { Mia } from '../useMia';
-import { Avatar, HeaderAction, Icon, ScreenAtmosphere, ScreenHeader, SectionCaption, agentColors, classicColors, useUi } from '../ui';
+import { Avatar, HeaderAction, Icon, ScreenHeader, SectionCaption, agentColors, classicColors, useUi } from '../ui';
 import { Reveal } from '../motion';
 import { ConfirmationDialog } from './ConfirmationDialog';
 
-export function Settings({ mia }: { mia: Mia }) {
+export function Settings({ mia, overlayInset = 0 }: { mia: Mia; overlayInset?: number }) {
   const { agent, colors, s } = useUi();
   const p = agent ? agentStyles : classicStyles;
   const { width, fontScale } = useWindowDimensions();
@@ -30,7 +30,7 @@ export function Settings({ mia }: { mia: Mia }) {
     finally { pending.current = false; setBusy(false); }
   }
   return <>
-    <View style={{ flex: 1 }}>{agent && <ScreenAtmosphere />}<Reveal style={{ flex: 1 }}><ScrollView contentContainerStyle={[s.content, { paddingHorizontal: width < 375 ? 16 : 20 }]}>
+    <View style={{ flex: 1 }}><Reveal style={{ flex: 1 }}><ScrollView contentContainerStyle={[s.content, { paddingHorizontal: width < 375 ? 16 : 20, paddingBottom: 20 + overlayInset }]}>
       <ScreenHeader title="Settings" action={<HeaderAction label="Sign out" icon="log-out-outline" onPress={() => setConfirmation('logout')} />} />
       <View style={[s.card, p.profile, stacked && p.stacked]}><Avatar name={mia.session!.user.displayName} size={agent ? 60 : 48} /><View style={[p.identity, stacked && p.stackedText]}><Text style={s.sectionTitle}>{mia.session!.user.displayName}</Text><Text style={agent ? s.body : s.small}>@{mia.session!.user.username}</Text><Text style={[agent ? s.body : s.small, agent && { marginTop: 3 }]}>{mia.session!.user.phoneNumber}</Text></View></View>
       <View style={p.assistantSection}>{agent ? <SectionCaption>Your assistant</SectionCaption> : <Text style={p.groupTitle}>YOUR ASSISTANT</Text>}

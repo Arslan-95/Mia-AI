@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Animated, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StatusBar, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useMia, type Tab } from './useMia';
 import { Auth, CompleteProfile } from './screens/Auth';
@@ -12,9 +12,9 @@ import { ConversationStatus } from './screens/ConversationStatus';
 import { People } from './screens/People';
 import { Settings } from './screens/Settings';
 import { useKeyboardVisible } from './useKeyboardVisible';
-import { Button, Empty, Icon, ScreenHeader, UiProvider, useUi, agentColors, agentStyles, colors, s } from './ui';
+import { Button, Empty, Icon, ScreenHeader, ScreenAtmosphere, UiProvider, useUi, agentColors, agentStyles, colors, s } from './ui';
 import { usePressOpacity } from './motion';
-import type { RecordingGesture } from './voiceNoteGesture';
+import { agentDockGeometry, type RecordingGesture } from './voiceNoteGesture';
 
 const tabs: { id: Tab; label: string; icon: React.ComponentProps<typeof Icon>['name']; activeIcon: React.ComponentProps<typeof Icon>['name'] }[] = [
   { id: 'people', label: 'Contacts', icon: 'people-outline', activeIcon: 'people' },
@@ -25,6 +25,8 @@ const tabs: { id: Tab; label: string; icon: React.ComponentProps<typeof Icon>['n
 function Application() {
   const mia = useMia();
   const insets = useSafeAreaInsets();
+  const { height, fontScale } = useWindowDimensions();
+  const [agentOverlayHeight, setAgentOverlayHeight] = useState(0);
   const keyboardVisible = useKeyboardVisible();
   const bottomInset = keyboardVisible ? 0 : insets.bottom;
   const [elapsed, setElapsed] = useState(0);
@@ -34,6 +36,10 @@ function Application() {
   const voiceMode = !!(mia.aiMode && mia.session?.user.profileComplete && !mia.booting);
   const ui = { colors: voiceMode ? agentColors : colors, s: voiceMode ? agentStyles : s };
   const chatOpen = mia.tab === 'chats' && mia.chats.some(chat => chat.id === mia.activeChatId);
+  const fallbackFooterHeight = agentDockGeometry(height, fontScale, insets.bottom,
+    recordingGesture.active || mia.audioState === 'recording',
+    recordingGesture.active || mia.audioState === 'recording' || ['sending', 'saving'].includes(mia.voiceNoteStage) || !!mia.recording).totalHeight;
+  const agentFooterClearance = voiceMode ? agentOverlayHeight || fallbackFooterHeight : 0;
   useEffect(() => { if (voiceMode) Keyboard.dismiss(); else setAgentHolding(false); }, [voiceMode]);
   useEffect(() => {
     if (mia.audioState !== 'recording') { setElapsed(0); return; }
@@ -50,6 +56,7 @@ function Application() {
 
   return <UiProvider agent={voiceMode}><View style={ui.s.page}>
     <StatusBar barStyle="light-content" />
+    {voiceMode && !chatOpen && <ScreenAtmosphere />}
     <SafeAreaView style={app.fill} edges={mia.session?.user.profileComplete && !mia.booting ? ['top', 'left', 'right'] : ['top', 'bottom', 'left', 'right']}
       pointerEvents={voiceMode ? 'none' : 'auto'} accessibilityElementsHidden={voiceMode} importantForAccessibility={voiceMode ? 'no-hide-descendants' : 'auto'}>
       <KeyboardAvoidingView style={app.fill} behavior="padding">
@@ -57,10 +64,7 @@ function Application() {
           : !mia.session ? <Auth mia={mia} />
           : !mia.session.user.profileComplete ? <CompleteProfile mia={mia} />
           : <View style={app.fill}>
-            <View style={app.fill}>{mia.tab === 'people' ? <People mia={mia} /> : mia.tab === 'settings' ? <Settings mia={mia} /> : mia.tab === 'drafts' ? <ScrollView contentContainerStyle={ui.s.content} keyboardShouldPersistTaps="handled"><ScreenHeader title="Saved messages" />{mia.drafts.length ? voiceMode ? <Text style={ui.s.small}>{mia.drafts.length} saved {mia.drafts.length === 1 ? 'message' : 'messages'}. Ask Mia to review or open a saved message.</Text> : <MessageDrafts mia={mia} drafts={mia.drafts} /> : <Empty icon="bookmark-outline" title="All clear" text="Messages you prepare with Mia appear here for review." />}</ScrollView> : <Chats mia={mia} bottomInset={voiceMode ? 0 : bottomInset} />}{voiceMode && chatOpen && <MessageReferenceCard key={mia.activeChatId} source={mia.messageReference?.chatId === mia.activeChatId ? mia.messageReference : null} userId={mia.session!.user.id} playback={mia.originalPlayback} dismissalRevision={mia.referenceDismissalRevision} onPresented={mia.referencePresented} />}</View>
-            {voiceMode && <>
-              <VoiceMode mia={mia} bottomInset={bottomInset} holding={agentHolding} elapsed={elapsed} recordingGesture={recordingGesture} recordingProgress={recordingProgress} />
-            </>}
+            <View style={app.fill}>{mia.tab === 'people' ? <People mia={mia} overlayInset={agentFooterClearance} /> : mia.tab === 'settings' ? <Settings mia={mia} overlayInset={agentFooterClearance} /> : mia.tab === 'drafts' ? <ScrollView contentContainerStyle={[ui.s.content, { paddingBottom: 20 + agentFooterClearance }]} keyboardShouldPersistTaps="handled"><ScreenHeader title="Saved messages" />{mia.drafts.length ? voiceMode ? <Text style={ui.s.small}>{mia.drafts.length} saved {mia.drafts.length === 1 ? 'message' : 'messages'}. Ask Mia to review or open a saved message.</Text> : <MessageDrafts mia={mia} drafts={mia.drafts} /> : <Empty icon="bookmark-outline" title="All clear" text="Messages you prepare with Mia appear here for review." />}</ScrollView> : <Chats mia={mia} bottomInset={voiceMode ? 0 : bottomInset} overlayInset={agentFooterClearance} />}{voiceMode && chatOpen && <MessageReferenceCard key={mia.activeChatId} source={mia.messageReference?.chatId === mia.activeChatId ? mia.messageReference : null} userId={mia.session!.user.id} playback={mia.originalPlayback} bottomClearance={agentFooterClearance} dismissalRevision={mia.referenceDismissalRevision} onPresented={mia.referencePresented} />}</View>
             {!voiceMode && !chatOpen && !!mia.error && <View style={{ paddingHorizontal: 16 }}><ConversationStatus error={mia.error} onDismiss={() => mia.setError('')} /></View>}
             {!voiceMode && !chatOpen && <View style={[app.dock, { paddingBottom: Math.max(bottomInset, 12) }]}>
               <Nav item={tabs[0]!} selected={mia.tab === 'people'} onPress={() => void mia.navigate('people')} count={0} />
@@ -70,6 +74,14 @@ function Application() {
           </View>}
       </KeyboardAvoidingView>
     </SafeAreaView>
+    {voiceMode && <View testID="agent-viewport-footer" pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+      style={[app.agentOverlay, { left: insets.left, right: insets.right }]}
+      onLayout={event => {
+        const measured = event.nativeEvent.layout.height;
+        if (Number.isFinite(measured) && measured > 0) setAgentOverlayHeight(previous => previous === measured ? previous : measured);
+      }}>
+      <VoiceMode mia={mia} bottomInset={insets.bottom} holding={agentHolding} elapsed={elapsed} recordingGesture={recordingGesture} recordingProgress={recordingProgress} />
+    </View>}
     {voiceMode && <AgentInteraction mia={mia} onHoldingChange={setAgentHolding} onRecordingGestureChange={setRecordingGesture} recordingProgress={recordingProgress} />}
   </View></UiProvider>;
 }
@@ -87,6 +99,7 @@ function Nav({ item, selected, onPress, count }: { item: typeof tabs[number]; se
 }
 export default function App() { return <SafeAreaProvider><Application /></SafeAreaProvider>; }
 const app = StyleSheet.create({
+  agentOverlay: { position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 40, elevation: 40, overflow: 'visible' },
   fill: { flex: 1, minWidth: 0 }, loading: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   error: { paddingHorizontal: 24, paddingTop: 10 },
   dock: { flexDirection: 'row', alignItems: 'center', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line, paddingHorizontal: 20, paddingTop: 8, backgroundColor: colors.paper },

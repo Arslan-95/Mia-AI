@@ -2,9 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import type { Mia } from '../useMia';
 import type { Profile } from '../types';
-import { Avatar, Empty, Icon, ScreenAtmosphere, ScreenHeader, SearchField, SectionCaption, agentColors, classicColors, useUi } from '../ui';
+import { Avatar, Empty, Icon, ScreenHeader, SearchField, SectionCaption, agentColors, classicColors, useUi } from '../ui';
 import { Reveal } from '../motion';
-export function People({ mia }: { mia: Mia }) {
+export function People({ mia, overlayInset = 0 }: { mia: Mia; overlayInset?: number }) {
   const { agent, s } = useUi();
   const p = agent ? agentStyles : classicStyles;
   const { width } = useWindowDimensions();
@@ -37,7 +37,7 @@ export function People({ mia }: { mia: Mia }) {
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); if (activeRequest.current === controller) activeRequest.current = null; };
   }, [api, fail, searchQuery]);
-  return <View style={{ flex: 1 }}>{agent && <ScreenAtmosphere />}<Reveal style={{ flex: 1 }}><ScrollView contentContainerStyle={[s.content, { paddingHorizontal: width < 375 ? 16 : 20 }]} keyboardShouldPersistTaps="handled">
+  return <View style={{ flex: 1 }}><Reveal style={{ flex: 1 }}><ScrollView contentContainerStyle={[s.content, { paddingHorizontal: width < 375 ? 16 : 20, paddingBottom: 20 + overlayInset }]} keyboardShouldPersistTaps="handled">
     <ScreenHeader title="Contacts" />
     <SearchField label="Find by phone number or username" hint="Type at least two characters. For phone numbers, include the country code. Search finds people registered on Mia."
       placeholder="Phone number or username" value={query} onChangeText={changeQuery} maxLength={50} loading={loading} />

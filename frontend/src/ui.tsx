@@ -28,7 +28,7 @@ export function Icon({ name, size = 22, color }: { name: React.ComponentProps<ty
 export function ScreenAtmosphere() {
   const { agent, s } = useUi();
   if (!agent) return null;
-  return <View pointerEvents="none" accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={s.atmosphere}><View style={s.amethystLight} /><View style={s.periwinkleLight} /></View>;
+  return <View pointerEvents="none" accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={s.atmosphere}><View style={s.amethystLight} /></View>;
 }
 export function ScreenHeader({ title, action }: { title: string; action?: React.ReactNode }) {
   const { s } = useUi();
@@ -86,12 +86,12 @@ export function SearchField({ label, hint, placeholder, value, onChangeText, max
 }
 const classicAvatarColors = [ ['#25203D', '#C9B6FF'], ['#1D2B36', '#A3C9E7'], ['#322338', '#E3B1D4'], ['#25312D', '#B2D7C7'] ];
 const avatarColors = [ ['#29213D', '#D4C0FF'], ['#1D2B36', '#A3C9E7'], ['#322338', '#E3B1D4'], ['#25312D', '#B2D7C7'] ];
-export function Avatar({ name, size: requestedSize }: { name: string; size?: number }) {
+export function Avatar({ name, size: requestedSize, round = false }: { name: string; size?: number; round?: boolean }) {
   const { agent, s } = useUi();
   const size = requestedSize ?? (agent ? 48 : 52);
   const initials = name.trim().split(/\s+/).map(part => part[0]).slice(0, 2).join('').toUpperCase();
   const palette = (agent ? avatarColors : classicAvatarColors)[Array.from(name).reduce((sum, char) => sum + char.charCodeAt(0), 0) % avatarColors.length]!;
-  return <View accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[s.avatar, { width: size, height: size, borderRadius: size * (agent ? .34 : .36), backgroundColor: palette[0] }]}><Text allowFontScaling={false} style={{ fontSize: size * .3, fontWeight: '600', color: palette[1] }}>{initials}</Text></View>;
+  return <View accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[s.avatar, { width: size, height: size, borderRadius: round ? size / 2 : size * (agent ? .34 : .36), backgroundColor: palette[0] }]}>{round && <><View style={{ position: 'absolute', width: size * 1.1, height: size * .8, borderRadius: size, top: -size * .35, left: -size * .3, backgroundColor: palette[1], opacity: .15 }} /><View style={{ position: 'absolute', width: size * .7, height: size * .65, borderRadius: size, bottom: -size * .2, right: -size * .25, backgroundColor: '#A184EE', opacity: .2 }} /></>}<Text allowFontScaling={false} style={{ fontSize: size * .3, fontWeight: '600', color: palette[1] }}>{initials}</Text></View>;
 }
 export function Empty({ icon = 'chatbubble-ellipses-outline', title, text, children, compact = false }: { icon?: React.ComponentProps<typeof Ionicons>['name']; title: string; text: string; children?: React.ReactNode; compact?: boolean }) {
   const { agent, colors, s } = useUi();
@@ -105,8 +105,7 @@ export const agentStyles = StyleSheet.create({
   screenHeader: { minHeight: 54, paddingTop: 4, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
   headerAction: { width: 44, height: 44, borderRadius: 16, borderWidth: 1, borderColor: '#49365F', backgroundColor: agentColors.soft, alignItems: 'center', justifyContent: 'center' },
   atmosphere: { position: 'absolute', top: 0, left: 0, right: 0, height: 190, overflow: 'hidden' },
-  amethystLight: { position: 'absolute', width: 360, height: 220, borderRadius: 180, top: -145, right: -55, backgroundColor: agentColors.accent, opacity: .065 },
-  periwinkleLight: { position: 'absolute', width: 320, height: 190, borderRadius: 160, top: -130, right: 100, backgroundColor: '#92A8FF', opacity: .04 },
+  amethystLight: { position: 'absolute', width: 260, height: 260, borderRadius: 130, top: -120, right: -90, backgroundColor: agentColors.accent, opacity: .045 },
   insetList: { backgroundColor: agentColors.paper, borderWidth: 1, borderColor: agentColors.line, borderRadius: 22, padding: 4 },
   sectionCaption: { color: agentColors.muted, fontSize: 12, lineHeight: 18, fontWeight: '500', paddingHorizontal: 4 },
   personRow: { flexDirection: 'row', gap: 12, alignItems: 'center', paddingHorizontal: 12, paddingVertical: 14, borderRadius: 18, minHeight: 80 },

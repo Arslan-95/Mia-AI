@@ -261,9 +261,12 @@ test('exact old references stay passive and retained while source-specific narra
     const command = async (id: string, kind: string, payload: Record<string, unknown>, sequence: number) => {
       await act(async () => { await h.n.event({ id, type: 'device.action_requested', createdAt: new Date().toISOString(), payload: { actionId: id, turnId: turn.id, sessionId: 'assistant', kind, payload, sequence: String(sequence), expiresIn: 180000, context: turn.context } }, 0); });
     };
+    // Native region measurements now include the area behind the floating
+    // footer; preserve these scenarios' original usable card heights.
+    const fullHeight = (usable: number) => usable + h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'MessageReferenceCard')[0]!.props.bottomClearance;
     const layout = async () => {
       const region = h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'message-reference-region')[0]!;
-      await act(async () => { region.props.onLayout({ nativeEvent: { layout: { width: 320, height: 380 } } }); });
+      await act(async () => { region.props.onLayout({ nativeEvent: { layout: { width: 320, height: fullHeight(380) } } }); });
       const card = h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'message-reference-card')[0]!;
       assert.ok(card); assert.equal(card.props.pointerEvents, 'none'); assert.equal(card.props.accessible, false);
       assert.equal(card.props.importantForAccessibility, 'no-hide-descendants');
@@ -295,7 +298,7 @@ test('exact old references stay passive and retained while source-specific narra
     assert.equal(h.mia.messageReference?.messageId, 'old-two', 'speech ending never dismisses the card');
     const beforeResize = h.mia.messageReference!.displayFocus!;
     const retainedRegion = h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'message-reference-region')[0]!;
-    await act(async () => { retainedRegion.props.onLayout({ nativeEvent: { layout: { width: 320, height: 270 } } }); });
+    await act(async () => { retainedRegion.props.onLayout({ nativeEvent: { layout: { width: 320, height: fullHeight(270) } } }); });
     const resized = h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'message-reference-card')[0]!;
     await act(async () => { resized.props.onLayout({ nativeEvent: { layout: { width: 296, height: 240 } } }); });
     assert.ok(h.mia.messageReference!.displayFocus!.end < beforeResize.end);
@@ -305,7 +308,7 @@ test('exact old references stay passive and retained while source-specific narra
     assert.match(target.props.accessibilityLabel, /focused excerpt/);
     await act(async () => { await h.mia.toggleMicrophone(); });
     assert.equal(h.mia.messageReference?.messageId, 'old-two');
-    await act(async () => { retainedRegion.props.onLayout({ nativeEvent: { layout: { width: 320, height: 90 } } }); });
+    await act(async () => { retainedRegion.props.onLayout({ nativeEvent: { layout: { width: 320, height: fullHeight(90) } } }); });
     assert.equal(h.mia.messageReference, null, 'insufficient visual space safely removes a retained card');
     assert.equal((h.n.frames.filter(frame => frame.type === 'voice.context').at(-1)!.context as any).reference, undefined,
       'continuous ASR cannot keep referring to a source removed by a layout guard');
@@ -2139,13 +2142,14 @@ test('People submits a formatted phone number, presents the result and adds the 
   } finally { await h.close(); }
 });
 
-test('Contacts and Chats share header geometry and row height; chat back swipe returns to its origin', async () => {
+test('Contacts and Chats retain their actions and row height; chat back swipe returns to its origin', async () => {
   const h = await mount(false, true);
   const button = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
   const flatten = (value: any): Record<string, any> => Array.isArray(value) ? Object.assign({}, ...value.filter(Boolean).map(flatten)) : value ?? {};
   const header = (title: string) => h.tree.findAll(node => node.type === 'Text' as any && node.props.accessibilityRole === 'header' && node.props.children === title)[0]!.parent!;
   try {
-    const chatHeader = flatten(header('Chats').props.style);
+    assert.ok(header('Chats'));
+    assert.ok(button('New chat')); assert.ok(button('Open settings'));
     const chatRow = flatten(button('Anna. No messages yet').props.style({ pressed: false }));
     const tabs = h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityRole === 'tab');
     assert.deepEqual(tabs.map(node => node.props.accessibilityLabel), ['Contacts', 'Chats', 'Settings']);
@@ -2154,7 +2158,7 @@ test('Contacts and Chats share header geometry and row height; chat back swipe r
     assert.equal(tabs[1]!.props.accessibilityState.selected, true);
     h.n.savedContacts.push({ ...chat.recipient, contactId: 'contact-anna', name: 'Anna' });
     await act(async () => { await h.mia.refresh(); button('Contacts').props.onPress(); });
-    assert.deepEqual(flatten(header('Contacts').props.style), chatHeader, 'the search row has the same header above it on both tabs');
+    assert.ok(header('Contacts'));
     const contactRow = flatten(button('Anna, @anna').props.style({ pressed: false }));
     for (const key of ['minHeight', 'paddingVertical', 'paddingHorizontal', 'gap']) assert.equal(contactRow[key], chatRow[key]);
     assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Saved contacts').length, 0, 'normal contacts retain the simple ungrouped list');
@@ -2468,7 +2472,7 @@ test('appearance follows the actual mode and round-tripping preserves drafts, co
   const layer = () => h.tree.findAll(node => node.props.testID === 'agent-interaction-layer' && node.type === 'Pressable' as any)[0];
   const profileAvatar = () => h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'Avatar')[0]!;
   try {
-    assert.equal(appearance(), false); assert.equal(flatten(title('Chats').props.style).fontSize, 28);
+    assert.equal(appearance(), false); assert.equal(flatten(title('Chats').props.style).color, '#F3F0FF');
     h.n.history = [{ id: 'mode-message', chatId: 'anna', senderId: 'recipient', kind: 'text', text: 'A message kept in place.', mediaId: null, createdAt: '2026-10-30T12:00:00Z' }];
     h.n.savedDrafts.push({ id: 'mode-draft', recipientId: 'recipient', recipient: chat.recipient, kind: 'text', text: 'An unsent draft.', mediaId: null,
       version: 1, state: 'editing', reviewedVersion: null, updatedAt: new Date().toISOString() });
@@ -2477,7 +2481,7 @@ test('appearance follows the actual mode and round-tripping preserves drafts, co
     await act(async () => { timeline().props.onScrollBeginDrag(); timeline().props.onScroll({ nativeEvent: { contentOffset: { y: 210 } } }); });
     await act(async () => { await h.mia.saveAiMode(true); await h.mia.navigate('chats'); });
     assert.equal(appearance(), true); assert.ok(layer());
-    assert.equal(flatten(title('Chats').props.style).fontSize, 32);
+    assert.equal(flatten(title('Chats').props.style).color, '#F3EEFF');
     assert.ok(h.n.animations.some(animation => animation.duration === 140));
     await act(async () => { await h.mia.navigate('settings'); });
     assert.equal(profileAvatar().props.size, 60);
@@ -2693,4 +2697,78 @@ test('classic recording remains accessible through activate-to-start, activate-t
     await h.wait(() => h.mia.voiceNoteStage === 'discarded');
     assert.equal(h.n.requests.filter(r => r.path === '/v1/chats/anna/messages' && r.method === 'POST').length, 1);
   } finally { await h.close(); }
+});
+
+
+test('agent footer is pinned to the viewport above source cards, outside keyboard layout, with measured content clearance', async () => {
+  const h = await mount(true, true);
+  const flatten = (value: any): Record<string, any> => Array.isArray(value) ? Object.assign({}, ...value.filter(Boolean).map(flatten)) : value ?? {};
+  const footer = () => h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'agent-viewport-footer')[0]!;
+  const content = () => h.tree.findAll(node => node.type === 'SafeAreaView' as any)[0]!;
+  try {
+    const pinned = footer();
+    const bounds = flatten(pinned.props.style);
+    assert.equal(bounds.position, 'absolute'); assert.equal(bounds.bottom, 0);
+    assert.equal(pinned.props.pointerEvents, 'none'); assert.equal(pinned.props.accessibilityElementsHidden, true);
+    assert.equal(content().findAll(node => node.props.testID === 'agent-viewport-footer').length, 0);
+    assert.equal(h.tree.findAll(node => node.type === 'KeyboardAvoidingView' as any)[0]!.findAll(node => node.props.testID === 'agent-viewport-footer').length, 0);
+    assert.equal(flatten(content().props.style).paddingBottom, undefined, 'the page viewport must extend behind the footer');
+    assert.ok(flatten(h.tree.findAll(node => node.type === 'ScrollView' as any)[0]!.props.contentContainerStyle).paddingBottom > 20, 'scroll content alone reserves footer clearance');
+    await act(async () => { pinned.props.onLayout({ nativeEvent: { layout: { height: 180 } } }); });
+    assert.equal(flatten(content().props.style).paddingBottom, undefined);
+    for (const [tab, chatId] of [['chats', 'anna'], ['people', null], ['settings', null], ['drafts', null], ['chats', null]] as const) {
+      await act(async () => { await h.mia.navigate(tab, chatId); });
+      assert.equal(footer(), pinned, 'page changes keep the same viewport overlay mounted');
+      assert.deepEqual(flatten(footer().props.style), bounds);
+      if (chatId) {
+        const region = h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'message-reference-region')[0]!;
+        assert.ok(bounds.zIndex > flatten(region.props.style).zIndex, 'source overlays cannot cover the footer');
+        assert.equal(flatten(region.props.style).bottom, 0);
+        const scrim = h.tree.findAll(node => node.props.testID === 'message-reference-scrim')[0]!;
+        assert.equal(flatten(scrim.props.style).bottom, 0, 'dimming reaches the same bottom edge as the chat');
+        const presentation = h.tree.findAll(node => node.props.testID === 'message-reference-presentation')[0]!;
+        assert.equal(flatten(presentation.props.style).bottom, 180, 'only the card placement excludes the footer');
+        const list = h.tree.findAll(node => node.type === 'FlatList' as any)[0]!;
+        assert.equal(flatten(list.props.contentContainerStyle).paddingTop, 196, 'inverted list padding keeps the latest row above the floating orb');
+      } else {
+        const page = h.tree.findAll(node => node.type === 'ScrollView' as any)[0]!;
+        assert.equal(flatten(page.props.contentContainerStyle).paddingBottom, 200);
+      }
+    }
+    await act(async () => { h.n.keyboardHandlers.get('keyboardWillShow')!(); });
+    assert.deepEqual(flatten(footer().props.style), bounds, 'keyboard avoidance cannot move the viewport footer');
+    assert.equal(h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'VoiceMode')[0]!.props.bottomInset, 34);
+    await act(async () => { await h.mia.saveAiMode(false); });
+    assert.equal(footer(), undefined); assert.equal(flatten(content().props.style).paddingBottom, undefined);
+  } finally { await h.close(); }
+});
+
+
+test('reference scrim fills the viewport while footer clearance constrains only the source card', async () => {
+  const h = await mount(false);
+  let probe: ReactTestRenderer | undefined;
+  const flatten = (value: any): Record<string, any> => Array.isArray(value) ? Object.assign({}, ...value.filter(Boolean).map(flatten)) : value ?? {};
+  const source: MessageReference = { chatId: 'anna', messageId: 'full-scrim', revision: 1, recipient: chat.recipient,
+    source: { id: 'full-scrim', chatId: 'anna', senderId: 'recipient', kind: 'text', text: 'The actual source message.', mediaId: null, createdAt: new Date().toISOString() } };
+  const sample = (bottomClearance: number) => React.createElement(h.components.MessageReferenceCard, {
+    source, userId: 'user', playback: null, bottomClearance, onPresented() {},
+  });
+  try {
+    await act(async () => { probe = create(sample(110)); });
+    const region = () => probe!.root.findAll(node => node.props.testID === 'message-reference-region')[0]!;
+    await act(async () => { region().props.onLayout({ nativeEvent: { layout: { width: 390, height: 740 } } }); });
+    const scrim = () => probe!.root.findAll(node => node.props.testID === 'message-reference-scrim')[0]!;
+    const presentation = () => probe!.root.findAll(node => node.props.testID === 'message-reference-presentation')[0]!;
+    const shutter = () => probe!.root.findAll(node => typeof node.type === 'function' && node.type.name === 'ShutterCard')[0]!;
+    for (const edge of ['top', 'bottom', 'left', 'right']) assert.equal(flatten(scrim().props.style)[edge], 0);
+    assert.equal(flatten(region().props.style).bottom, 0);
+    assert.equal(flatten(presentation().props.style).bottom, 110);
+    assert.equal(shutter().props.maximumHeight, 622);
+    const originalScrim = scrim();
+    await act(async () => { probe!.update(sample(180)); });
+    assert.equal(scrim(), originalScrim); assert.equal(flatten(scrim().props.style).bottom, 0);
+    assert.equal(flatten(region().props.style).bottom, 0);
+    assert.equal(flatten(presentation().props.style).bottom, 180);
+    assert.equal(shutter().props.maximumHeight, 552);
+  } finally { if (probe) await act(async () => { probe!.unmount(); }); await h.close(); }
 });

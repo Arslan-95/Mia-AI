@@ -13,9 +13,9 @@ type Fit = { serial: number; budget: number; focus?: { start: number; end: numbe
 const sameSource = (a: MessageReference | null, b: MessageReference | null) => referenceKey(a) === referenceKey(b) && a?.source.text === b?.source.text;
 
 /** Passive sibling under the sole AgentInteraction touch and accessibility target. */
-export function MessageReferenceCard({ source, userId, playback, dismissalRevision, onPresented }: {
+export function MessageReferenceCard({ source, userId, playback, dismissalRevision, onPresented, bottomClearance = 0 }: {
   source: MessageReference | null; userId: string; playback: OriginalPlayback | null;
-  dismissalRevision?: number; onPresented(revision: number, success?: boolean, focus?: { start: number; end: number }): void;
+  bottomClearance?: number; dismissalRevision?: number; onPresented(revision: number, success?: boolean, focus?: { start: number; end: number }): void;
 }) {
   const reduced = useReducedMotion();
   const { fontScale } = useWindowDimensions();
@@ -28,7 +28,7 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
   const backdrop = useRef<Animated.CompositeAnimation | null>(null);
   const backdropToken = useRef(0);
   const width = Math.max(0, Math.min(420, region.width - (region.width <= 320 ? 24 : 32)));
-  const available = region.height - 24;
+  const available = Math.max(0, region.height - bottomClearance - 24);
   const padding = region.width <= 320 ? 16 : 20;
   const latest = useRef({ source, dismissalRevision, onPresented, width, available, padding, fontScale, reduced });
   latest.current = { source, dismissalRevision, onPresented, width, available, padding, fontScale, reduced };
@@ -83,7 +83,7 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
     if (budget !== view.budget) fitted.current = null;
     if (view.reference !== source || view.budget !== budget) commit({ ...view, reference: source, budget });
     notifyIfReady();
-  }, [source, dismissalRevision, region.width, region.height, fontScale]);
+  }, [source, dismissalRevision, region.width, region.height, fontScale, bottomClearance]);
   useEffect(() => () => { backdropToken.current++; backdrop.current?.stop(); current.current = null; }, []);
 
   const rendered = display?.reference;
@@ -95,7 +95,7 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
     setRegion(previous => previous.width === width && previous.height === height ? previous : { width, height });
   }}>
     <Animated.View {...passive} testID="message-reference-scrim" style={[styles.scrim, { opacity: scrim }]} />
-    {display && rendered && excerpt && <ShutterCard key={`${display.serial}/${display.budget}`} width={width} maximumHeight={Math.max(0, region.height - 8)} phase={display.phase} reduced={reduced}
+    <View {...passive} testID="message-reference-presentation" style={[styles.presentation, { bottom: bottomClearance }]}>{display && rendered && excerpt && <ShutterCard key={`${display.serial}/${display.budget}`} width={width} maximumHeight={Math.max(0, region.height - bottomClearance - 8)} phase={display.phase} reduced={reduced}
       style={[styles.card, { paddingHorizontal: padding, backgroundColor: sent ? '#2A1E40' : '#211D2B' }]}
       onLayout={event => {
         const view = current.current;
@@ -125,11 +125,12 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
       {rendered.source.kind === 'voice' && <VoiceMessageContent playback={associated} reduced={reduced} />}
       {rendered.source.kind === 'text' && !!rendered.source.text && <View {...passive}>{excerpt.partial && <Text {...passive} style={styles.partial}>Excerpt · {excerpt.end - excerpt.start} of {excerpt.total} characters</Text>}{excerpt.start > 0 && <Text {...passive} style={styles.date}>…</Text>}<Text {...passive} style={styles.body}>{excerpt.text}</Text>{excerpt.end < excerpt.total && <Text {...passive} style={styles.date}>…</Text>}{excerpt.partial && <Text {...passive} style={styles.hint}>Ask Mia for another part</Text>}</View>}
       <Text {...passive} style={styles.date}>{referenceDate(rendered.source.createdAt)}</Text>
-    </ShutterCard>}
+    </ShutterCard>}</View>
   </View>;
 }
 const styles = StyleSheet.create({
-  region: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 20, alignItems: 'center', justifyContent: 'center' },
+  region: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, zIndex: 20 },
+  presentation: { position: 'absolute', top: 0, left: 0, right: 0, alignItems: 'center', justifyContent: 'center' },
   scrim: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: '#000000' },
   card: { borderRadius: 24, borderWidth: 1, borderColor: '#684A82', paddingVertical: 18, gap: 12, overflow: 'hidden' },
   metadata: { gap: 3 }, direction: { fontSize: 13, lineHeight: 19, fontWeight: '600' }, date: { fontSize: 12, lineHeight: 18, color: '#C9C0D2' },

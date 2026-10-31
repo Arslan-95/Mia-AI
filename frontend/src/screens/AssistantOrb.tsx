@@ -3,7 +3,7 @@ import { AccessibilityInfo, Animated, Easing, StyleSheet, Text, View, useWindowD
 import type { Mia } from '../useMia';
 import type { VoicePhase } from '../voiceConversation';
 import { Icon, agentColors as colors } from '../ui';
-import { recordingGeometry, type RecordingGesture } from '../voiceNoteGesture';
+import { agentDockGeometry, type RecordingGesture } from '../voiceNoteGesture';
 import { AgentRecordingAura } from './AgentRecordingAura';
 import { ConversationStatus } from './ConversationStatus';
 
@@ -100,7 +100,6 @@ export function VoiceMode({ mia, bottomInset = 0, elapsed = 0, recordingGesture,
   const { height, fontScale } = useWindowDimensions();
   const { phase } = voiceStatus(mia);
   const chat = mia.tab === 'chats' ? mia.chats.find(item => item.id === mia.activeChatId) : undefined;
-  const { diameter, radius } = recordingGeometry(height, fontScale);
   const recording = mia.audioState === 'recording';
   const sending = mia.voiceNoteStage === 'sending' || mia.voiceNoteStage === 'saving';
   const active = recordingGesture.active || recording;
@@ -109,13 +108,12 @@ export function VoiceMode({ mia, bottomInset = 0, elapsed = 0, recordingGesture,
   const discarded = mia.voiceNoteStage === 'discarded';
   const draft = chat ? mia.drafts.find(item => item.recipientId === chat.recipient.id) : undefined;
   const showTimer = active || sending || !!mia.recording;
-  const bottomPadding = Math.max(bottomInset, 10);
-  const centreY = diameter / 2 - 10;
+  const { diameter, radius, centreY, headroom, bodyHeight } = agentDockGeometry(height, fontScale, bottomInset, active, showTimer);
   return <>
     {(!!mia.error || !!draft) && <View testID="agent-feedback" pointerEvents="none" style={orb.feedback}>
       <ConversationStatus error={mia.error} draft={draft} passive />
     </View>}
-    <View testID="agent-dock" style={[orb.dock, { marginTop: active ? radius - centreY + 8 : 12, height: diameter - 10 + bottomPadding + (showTimer ? 24 : 0) }]}>
+    <View testID="agent-dock" style={[orb.dock, { marginTop: headroom, height: bodyHeight }]}>
       <View pointerEvents="none" style={[orb.rails, { top: centreY }]}><View style={orb.rail} /><View style={{ width: diameter * 1.6 }} /><View style={orb.rail} /></View>
       <View style={[orb.coreControl, { top: centreY - radius, width: radius * 2, height: radius * 2 }]}><AgentRecordingAura active={active} cancelReady={cancelling} progress={recordingProgress} diameter={diameter} radius={radius}>
         <MiaCore phase={sending ? 'thinking' : active ? 'listening' : phase} diameter={diameter} level={active || phase === 'paused' ? 0 : mia.voiceLevel} error={errorWarmth} recording={recording} />
