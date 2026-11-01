@@ -1722,7 +1722,7 @@ test('the transparent global layer owns every page and consumes taps, swipes and
     const bounds = layer().props.style;
     for (const edge of ['top', 'left', 'right', 'bottom']) assert.equal(bounds[edge], 0);
     assert.equal(bounds.backgroundColor, 'transparent');
-    assert.ok(layer().parent?.parent === h.tree.findAll(node => node.type === 'View' as any)[0], 'the layer is a sibling of the blocked content');
+    assert.equal(layer().parent?.parent, h.tree.findAll(node => node.type === 'SafeAreaView' as any)[0]!.parent, 'the layer is a sibling of the blocked content');
     for (const [tab, chatId] of [['chats', null], ['chats', 'anna'], ['people', null], ['settings', null]] as const) {
       await act(async () => { await h.mia.navigate(tab, chatId); });
       const content = h.tree.findAll(node => node.type === 'SafeAreaView' as any)[0]!;
@@ -2336,6 +2336,67 @@ test('edge swipe returns from chat, preserves input, and restores the inset-awar
     await act(async () => { back.onPanResponderGrant!(); back.onPanResponderMove!(null, edge); back.onPanResponderRelease!(null, edge); });
     await h.wait(() => h.mia.activeChatId === null);
     assert.equal(tabs().length, 3); assert.equal(h.mia.composers.anna, 'Keep this unsent text.');
+  } finally { await h.close(); }
+});
+
+test('chat switching covers the outgoing chat before swapping and reveals the entire destination together', async () => {
+  for (const mode of [false, true]) {
+    const h = await mount(mode, true, mode);
+    const overlay = () => h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'chat-transition-overlay')[0]!;
+    const list = () => h.tree.findAll(node => node.type === 'FlatList' as any)[0]!;
+    const pending = (toValue: number) => h.n.pendingAnimations.find(item => item.active() && item.config.toValue === toValue && item.config.duration === (toValue ? 220 : 300));
+    try {
+      h.n.savedChats.push({ ...chat, id: 'ben', recipient: { ...chat.recipient, id: 'ben', displayName: 'Ben' } });
+      await act(async () => { await h.mia.refresh(); await h.mia.navigate('chats', 'anna'); });
+      const outgoing = list();
+      h.n.holdAnimation = true;
+      await act(async () => { await h.mia.navigate('chats', 'ben'); });
+      assert.equal(h.mia.activeChatId, 'anna', 'old chat stays mounted during the fade to black');
+      assert.equal(list(), outgoing);
+      assert.equal(overlay().props.pointerEvents, 'auto');
+      const style = Object.assign({}, ...overlay().props.style);
+      for (const edge of ['top', 'bottom', 'left', 'right']) assert.equal(style[edge], 0);
+      assert.equal(style.backgroundColor, '#000000');
+      assert.ok(style.zIndex > 40, 'blackout covers the floating Mia footer too');
+      assert.equal(style.opacity.value, 0);
+      assert.equal(pending(1)!.config.useNativeDriver, true);
+      await act(async () => { pending(1)!.finish(); });
+      assert.equal(style.opacity.value, 1, 'destination is mounted only at full black');
+      assert.equal(h.mia.activeChatId, 'ben');
+      assert.notEqual(list(), outgoing);
+      assert.equal(overlay().props.pointerEvents, 'auto');
+      assert.equal(pending(0)!.config.delay, 60);
+      await act(async () => { pending(0)!.finish(); });
+      assert.equal(style.opacity.value, 0);
+      assert.equal(overlay().props.pointerEvents, 'none');
+    } finally { await h.close(); }
+  }
+});
+
+test('rapid chat switches discard stale transitions and Reduce Motion clears an in-flight blackout', async () => {
+  const h = await mount(false, true);
+  const overlay = () => h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'chat-transition-overlay')[0]!;
+  const pending = () => h.n.pendingAnimations.find(item => item.active() && item.config.duration === 220)!;
+  try {
+    h.n.savedChats.push(...['ben', 'chloe'].map(id => ({ ...chat, id, recipient: { ...chat.recipient, id, displayName: id } })));
+    await act(async () => { await h.mia.refresh(); await h.mia.navigate('chats', 'anna'); });
+    h.n.holdAnimation = true;
+    await act(async () => { await h.mia.navigate('chats', 'ben'); });
+    const stale = pending();
+    await act(async () => { await h.mia.navigate('chats', 'chloe'); });
+    await act(async () => { stale.finish(); });
+    assert.equal(stale.active(), false);
+    assert.equal(h.mia.activeChatId, 'anna');
+    await act(async () => { pending().finish(); });
+    assert.equal(h.mia.activeChatId, 'chloe', 'only the latest requested chat appears');
+    await act(async () => { await h.mia.navigate('chats', 'ben'); });
+    await act(async () => { h.n.reducedMotion = true; for (const handler of h.n.motionHandlers) handler(true); });
+    assert.equal(h.mia.activeChatId, 'ben');
+    assert.equal(overlay().props.pointerEvents, 'none');
+    assert.equal(Object.assign({}, ...overlay().props.style).opacity.value, 0);
+    await act(async () => { h.n.finishAnimation?.(); await h.mia.navigate('chats', 'anna'); });
+    assert.equal(h.mia.activeChatId, 'anna');
+    assert.equal(overlay().props.pointerEvents, 'none');
   } finally { await h.close(); }
 });
 

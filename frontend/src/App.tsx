@@ -7,6 +7,7 @@ import { Chats } from './screens/Chats';
 import { VoiceMode } from './screens/AssistantOrb';
 import { AgentInteraction } from './screens/AgentInteraction';
 import { MessageReferenceCard } from './screens/MessageReferenceCard';
+import { ChatTransitionOverlay, useChatTransition } from './screens/ChatTransition';
 import { MessageDrafts } from './screens/MessageDrafts';
 import { ConversationStatus } from './screens/ConversationStatus';
 import { People } from './screens/People';
@@ -23,7 +24,8 @@ const tabs: { id: Tab; label: string; icon: React.ComponentProps<typeof Icon>['n
 ];
 
 function Application() {
-  const mia = useMia();
+  const transition = useChatTransition(useMia());
+  const mia = transition.mia;
   const insets = useSafeAreaInsets();
   const { height, fontScale } = useWindowDimensions();
   const [agentOverlayHeight, setAgentOverlayHeight] = useState(0);
@@ -56,6 +58,7 @@ function Application() {
 
   return <UiProvider agent={voiceMode}><View style={ui.s.page}>
     <StatusBar barStyle="light-content" />
+    <View style={app.fill} pointerEvents={transition.transitioning ? 'none' : 'auto'} accessibilityElementsHidden={transition.transitioning} importantForAccessibility={transition.transitioning ? 'no-hide-descendants' : 'auto'}>
     {voiceMode && !chatOpen && <ScreenAtmosphere />}
     <SafeAreaView style={app.fill} edges={mia.session?.user.profileComplete && !mia.booting ? ['top', 'left', 'right'] : ['top', 'bottom', 'left', 'right']}
       pointerEvents={voiceMode ? 'none' : 'auto'} accessibilityElementsHidden={voiceMode} importantForAccessibility={voiceMode ? 'no-hide-descendants' : 'auto'}>
@@ -84,6 +87,8 @@ function Application() {
       <VoiceMode mia={mia} bottomInset={insets.bottom} holding={agentHolding} elapsed={elapsed} recordingGesture={recordingGesture} recordingProgress={recordingProgress} />
     </View>}
     {voiceMode && <AgentInteraction mia={mia} onHoldingChange={setAgentHolding} onRecordingGestureChange={setRecordingGesture} recordingProgress={recordingProgress} />}
+    </View>
+    <ChatTransitionOverlay opacity={transition.opacity} transitioning={transition.transitioning} />
   </View></UiProvider>;
 }
 
