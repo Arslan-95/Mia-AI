@@ -2,6 +2,14 @@ import { resolve } from 'node:path';
 import { z } from 'zod';
 import { calmSpeechPrompt } from './speech/delivery.js';
 
+const jsonArray = (item: z.ZodString) => z.string().trim().default('[]').transform((value, context) => {
+  try { return JSON.parse(value || '[]') as unknown; }
+  catch {
+    context.addIssue({ code: 'custom', message: 'Must be a JSON array of strings.' });
+    return z.NEVER;
+  }
+}).pipe(z.array(item));
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   HOST: z.string().default('127.0.0.1'),
@@ -11,6 +19,8 @@ const schema = z.object({
   MEDIA_DIRECTORY: z.string().default('.data/media'),
   DEV_OTP_CODE: z.preprocess((value) => value === '' ? undefined : value,
     z.string().regex(/^\d{6}$/, 'DEV_OTP_CODE must contain exactly six digits.').optional()),
+  TEST_PHONE_NUMBERS: jsonArray(z.string().trim().regex(/^\+[1-9]\d{6,14}$/, 'Use an international phone number with country code.')),
+  TEST_OTP_CODES: jsonArray(z.string().regex(/^\d{6}$/, 'Each test OTP must contain exactly six digits.')),
   META_API_KEY: z.string().default(''),
   META_BASE_URL: z.url().default('https://api.meta.ai/v1'),
   META_MODEL: z.string().min(1).default('muse-spark-1.3'),
@@ -28,6 +38,12 @@ const schema = z.object({
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env) {
   const input = schema.parse(env);
+  if (input.TEST_PHONE_NUMBERS.length !== input.TEST_OTP_CODES.length) {
+    throw new Error('TEST_PHONE_NUMBERS and TEST_OTP_CODES must have the same number of entries.');
+  }
+  if (new Set(input.TEST_PHONE_NUMBERS).size !== input.TEST_PHONE_NUMBERS.length) {
+    throw new Error('TEST_PHONE_NUMBERS must not contain duplicate phone numbers.');
+  }
   if (input.NODE_ENV === 'production' && !input.META_BASE_URL.startsWith('https://')) {
     throw new Error('META_BASE_URL must use HTTPS in production');
   }
@@ -42,6 +58,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env) {
     corsOrigins: input.CORS_ORIGINS.split(',').map((value) => value.trim()).filter(Boolean),
     mediaDirectory: resolve(input.MEDIA_DIRECTORY),
     developmentOtpCode: input.DEV_OTP_CODE,
+    testPhoneOtps: new Map(input.TEST_PHONE_NUMBERS.map((phoneNumber, index) => [phoneNumber, input.TEST_OTP_CODES[index]!])),
     metaApiKey: input.META_API_KEY,
     metaBaseUrl: input.META_BASE_URL.replace(/\/$/, ''),
     metaModel: input.META_MODEL,

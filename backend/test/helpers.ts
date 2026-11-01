@@ -63,10 +63,10 @@ export async function testDatabase(): Promise<Database> {
   return db;
 }
 
-export async function testApp(options: Parameters<typeof createApp>[2] = {}) {
+export async function testApp(options: Parameters<typeof createApp>[2] = {}, env: NodeJS.ProcessEnv = {}) {
   const db = await testDatabase();
   const directory = await mkdtemp(join(tmpdir(), 'mia-test-'));
-  const config = readConfig({ NODE_ENV: 'test', DEV_OTP_CODE: '123456', LOG_LEVEL: 'silent', MEDIA_DIRECTORY: directory });
+  const config = readConfig({ NODE_ENV: 'test', DEV_OTP_CODE: '123456', LOG_LEVEL: 'silent', MEDIA_DIRECTORY: directory, ...env });
   const app = await createApp(config, db, options);
   await app.ready();
   return { app, db, config, async close() {

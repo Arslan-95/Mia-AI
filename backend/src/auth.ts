@@ -14,17 +14,27 @@ const invalidCode = () => new AppError(401, 'INVALID_OTP', 'The code is incorrec
 
 export class AuthService {
   private readonly revocations = new Map<string, Set<() => void>>();
-  constructor(private readonly db: Database, private readonly config: Pick<Config, 'environment' | 'developmentOtpCode'>) {}
+  constructor(private readonly db: Database, private readonly config: Pick<Config, 'environment' | 'developmentOtpCode' | 'testPhoneOtps'>) {}
 
-  private requireDevelopmentProvider() {
-    if (this.config.environment === 'production' || !this.config.developmentOtpCode) {
-      throw new AppError(503, 'PHONE_AUTH_UNAVAILABLE', 'Phone verification is not configured for this environment.');
+  get configured() {
+    return this.config.testPhoneOtps.size > 0 || (this.config.environment !== 'production' && Boolean(this.config.developmentOtpCode));
+  }
+
+  private providerFor(phoneNumber: string) {
+    const testCode = this.config.testPhoneOtps.get(phoneNumber);
+    if (testCode) return { code: testCode, delivery: 'test' as const };
+    if (this.config.environment !== 'production' && this.config.developmentOtpCode) {
+      return { code: this.config.developmentOtpCode, delivery: 'development' as const };
     }
-    return this.config.developmentOtpCode;
+    throw this.unavailable();
+  }
+
+  private unavailable() {
+    return new AppError(503, 'PHONE_AUTH_UNAVAILABLE', 'Phone verification is not configured for this environment.');
   }
 
   async requestCode(phoneNumber: string) {
-    const configuredCode = this.requireDevelopmentProvider();
+    const provider = this.providerFor(phoneNumber);
     return this.db.transaction(async (sql) => {
       await sql.query('SELECT pg_advisory_xact_lock(hashtextextended($1,317))', [phoneNumber]);
       const [recent] = await sql.query<{ count: number }>(`SELECT count(*)::integer AS count FROM otp_challenges
@@ -34,21 +44,24 @@ export class AuthService {
       const challengeId = randomUUID();
       const expiresAt = new Date(Date.now() + OTP_DURATION_MS);
       await sql.query('INSERT INTO otp_challenges(id,phone_number,code_hash,expires_at) VALUES ($1,$2,$3,$4)',
-        [challengeId, phoneNumber, this.codeHash(challengeId, phoneNumber, configuredCode), expiresAt]);
-      return { challengeId, expiresAt, delivery: 'development' as const };
+        [challengeId, phoneNumber, this.codeHash(challengeId, phoneNumber, provider.code), expiresAt]);
+      return { challengeId, expiresAt, delivery: provider.delivery };
     });
   }
 
   async verifyCode(challengeId: string, code: string): Promise<AuthSession> {
-    this.requireDevelopmentProvider();
+    if (!this.configured) throw this.unavailable();
     const result = await this.db.transaction<{ session: AuthSession } | { error: AppError }>(async (sql) => {
       const [challenge] = await sql.query<Challenge>(`SELECT id,phone_number AS "phoneNumber",code_hash AS "codeHash",attempts,
         expires_at <= now() AS expired,consumed_at IS NOT NULL AS consumed FROM otp_challenges WHERE id = $1 FOR UPDATE`, [challengeId]);
       if (!challenge || challenge.expired || challenge.consumed) return { error: invalidCode() };
       if (challenge.attempts >= 5) return { error: new AppError(429, 'OTP_LOCKED', 'Too many incorrect attempts. Request a new code.') };
+      const provider = this.providerFor(challenge.phoneNumber);
       const expected = Buffer.from(challenge.codeHash, 'hex');
       const actual = Buffer.from(this.codeHash(challengeId, challenge.phoneNumber, code), 'hex');
-      if (!timingSafeEqual(expected, actual)) {
+      // A deployment may remove a number or rotate its code while a challenge is still valid.
+      const configured = Buffer.from(this.codeHash(challengeId, challenge.phoneNumber, provider.code), 'hex');
+      if (!timingSafeEqual(expected, actual) || !timingSafeEqual(expected, configured)) {
         await sql.query('UPDATE otp_challenges SET attempts = attempts + 1 WHERE id = $1', [challengeId]);
         return { error: challenge.attempts + 1 >= 5
           ? new AppError(429, 'OTP_LOCKED', 'Too many incorrect attempts. Request a new code.') : invalidCode() };
