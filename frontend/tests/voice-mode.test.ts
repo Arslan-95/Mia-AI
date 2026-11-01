@@ -263,7 +263,7 @@ test('exact old references stay passive and retained while source-specific narra
     };
     // Native region measurements now include the area behind the floating
     // footer; preserve these scenarios' original usable card heights.
-    const fullHeight = (usable: number) => usable + h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'MessageReferenceCard')[0]!.props.bottomClearance;
+    const fullHeight = (usable: number) => usable + h.n.insets.top + h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'MessageReferenceCard')[0]!.props.bottomClearance;
     const layout = async () => {
       const region = h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'message-reference-region')[0]!;
       await act(async () => { region.props.onLayout({ nativeEvent: { layout: { width: 320, height: fullHeight(380) } } }); });
@@ -2724,10 +2724,14 @@ test('agent footer is pinned to the viewport above source cards, outside keyboar
         const region = h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'message-reference-region')[0]!;
         assert.ok(bounds.zIndex > flatten(region.props.style).zIndex, 'source overlays cannot cover the footer');
         assert.equal(flatten(region.props.style).bottom, 0);
+        assert.equal(flatten(region.props.style).top, 0);
+        assert.equal(content().findAll(node => node.props.testID === 'message-reference-region').length, 0, 'source backdrop is outside the safe-area viewport');
+        assert.equal(h.tree.findAll(node => node.type === 'KeyboardAvoidingView' as any)[0]!.findAll(node => node.props.testID === 'message-reference-region').length, 0);
         const scrim = h.tree.findAll(node => node.props.testID === 'message-reference-scrim')[0]!;
         assert.equal(flatten(scrim.props.style).bottom, 0, 'dimming reaches the same bottom edge as the chat');
         const presentation = h.tree.findAll(node => node.props.testID === 'message-reference-presentation')[0]!;
         assert.equal(flatten(presentation.props.style).bottom, 180, 'only the card placement excludes the footer');
+        assert.equal(flatten(presentation.props.style).top, 47, 'only the card placement excludes the status bar');
         const list = h.tree.findAll(node => node.type === 'FlatList' as any)[0]!;
         assert.equal(flatten(list.props.contentContainerStyle).paddingTop, 196, 'inverted list padding keeps the latest row above the floating orb');
       } else {
@@ -2751,7 +2755,7 @@ test('reference scrim fills the viewport while footer clearance constrains only 
   const source: MessageReference = { chatId: 'anna', messageId: 'full-scrim', revision: 1, recipient: chat.recipient,
     source: { id: 'full-scrim', chatId: 'anna', senderId: 'recipient', kind: 'text', text: 'The actual source message.', mediaId: null, createdAt: new Date().toISOString() } };
   const sample = (bottomClearance: number) => React.createElement(h.components.MessageReferenceCard, {
-    source, userId: 'user', playback: null, bottomClearance, onPresented() {},
+    source, userId: 'user', playback: null, bottomClearance, contentInsets: { top: 47, left: 12, right: 12 }, onPresented() {},
   });
   try {
     await act(async () => { probe = create(sample(110)); });
@@ -2762,13 +2766,21 @@ test('reference scrim fills the viewport while footer clearance constrains only 
     const shutter = () => probe!.root.findAll(node => typeof node.type === 'function' && node.type.name === 'ShutterCard')[0]!;
     for (const edge of ['top', 'bottom', 'left', 'right']) assert.equal(flatten(scrim().props.style)[edge], 0);
     assert.equal(flatten(region().props.style).bottom, 0);
+    assert.equal(flatten(region().props.style).top, 0);
+    assert.equal(flatten(presentation().props.style).top, 47);
+    assert.equal(flatten(presentation().props.style).left, 12);
+    assert.equal(flatten(presentation().props.style).right, 12);
     assert.equal(flatten(presentation().props.style).bottom, 110);
-    assert.equal(shutter().props.maximumHeight, 622);
+    assert.equal(shutter().props.maximumHeight, 575);
     const originalScrim = scrim();
     await act(async () => { probe!.update(sample(180)); });
     assert.equal(scrim(), originalScrim); assert.equal(flatten(scrim().props.style).bottom, 0);
     assert.equal(flatten(region().props.style).bottom, 0);
+    assert.equal(flatten(region().props.style).top, 0);
+    assert.equal(flatten(presentation().props.style).top, 47);
+    assert.equal(flatten(presentation().props.style).left, 12);
+    assert.equal(flatten(presentation().props.style).right, 12);
     assert.equal(flatten(presentation().props.style).bottom, 180);
-    assert.equal(shutter().props.maximumHeight, 552);
+    assert.equal(shutter().props.maximumHeight, 505);
   } finally { if (probe) await act(async () => { probe!.unmount(); }); await h.close(); }
 });

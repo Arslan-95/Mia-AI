@@ -13,9 +13,9 @@ type Fit = { serial: number; budget: number; focus?: { start: number; end: numbe
 const sameSource = (a: MessageReference | null, b: MessageReference | null) => referenceKey(a) === referenceKey(b) && a?.source.text === b?.source.text;
 
 /** Passive sibling under the sole AgentInteraction touch and accessibility target. */
-export function MessageReferenceCard({ source, userId, playback, dismissalRevision, onPresented, bottomClearance = 0 }: {
+export function MessageReferenceCard({ source, userId, playback, dismissalRevision, onPresented, bottomClearance = 0, contentInsets }: {
   source: MessageReference | null; userId: string; playback: OriginalPlayback | null;
-  bottomClearance?: number; dismissalRevision?: number; onPresented(revision: number, success?: boolean, focus?: { start: number; end: number }): void;
+  contentInsets?: { top: number; left: number; right: number }; bottomClearance?: number; dismissalRevision?: number; onPresented(revision: number, success?: boolean, focus?: { start: number; end: number }): void;
 }) {
   const reduced = useReducedMotion();
   const { fontScale } = useWindowDimensions();
@@ -27,9 +27,11 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
   const scrim = useRef(new Animated.Value(0)).current;
   const backdrop = useRef<Animated.CompositeAnimation | null>(null);
   const backdropToken = useRef(0);
-  const width = Math.max(0, Math.min(420, region.width - (region.width <= 320 ? 24 : 32)));
-  const available = Math.max(0, region.height - bottomClearance - 24);
-  const padding = region.width <= 320 ? 16 : 20;
+  const topInset = contentInsets?.top ?? 0, leftInset = contentInsets?.left ?? 0, rightInset = contentInsets?.right ?? 0;
+  const contentWidth = Math.max(0, region.width - leftInset - rightInset);
+  const width = Math.max(0, Math.min(420, contentWidth - (contentWidth <= 320 ? 24 : 32)));
+  const available = Math.max(0, region.height - topInset - bottomClearance - 24);
+  const padding = contentWidth <= 320 ? 16 : 20;
   const latest = useRef({ source, dismissalRevision, onPresented, width, available, padding, fontScale, reduced });
   latest.current = { source, dismissalRevision, onPresented, width, available, padding, fontScale, reduced };
 
@@ -83,7 +85,7 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
     if (budget !== view.budget) fitted.current = null;
     if (view.reference !== source || view.budget !== budget) commit({ ...view, reference: source, budget });
     notifyIfReady();
-  }, [source, dismissalRevision, region.width, region.height, fontScale, bottomClearance]);
+  }, [source, dismissalRevision, region.width, region.height, fontScale, bottomClearance, topInset, leftInset, rightInset]);
   useEffect(() => () => { backdropToken.current++; backdrop.current?.stop(); current.current = null; }, []);
 
   const rendered = display?.reference;
@@ -95,7 +97,7 @@ export function MessageReferenceCard({ source, userId, playback, dismissalRevisi
     setRegion(previous => previous.width === width && previous.height === height ? previous : { width, height });
   }}>
     <Animated.View {...passive} testID="message-reference-scrim" style={[styles.scrim, { opacity: scrim }]} />
-    <View {...passive} testID="message-reference-presentation" style={[styles.presentation, { bottom: bottomClearance }]}>{display && rendered && excerpt && <ShutterCard key={`${display.serial}/${display.budget}`} width={width} maximumHeight={Math.max(0, region.height - bottomClearance - 8)} phase={display.phase} reduced={reduced}
+    <View {...passive} testID="message-reference-presentation" style={[styles.presentation, { top: topInset, left: leftInset, right: rightInset, bottom: bottomClearance }]}>{display && rendered && excerpt && <ShutterCard key={`${display.serial}/${display.budget}`} width={width} maximumHeight={Math.max(0, region.height - topInset - bottomClearance - 8)} phase={display.phase} reduced={reduced}
       style={[styles.card, { paddingHorizontal: padding, backgroundColor: sent ? '#2A1E40' : '#211D2B' }]}
       onLayout={event => {
         const view = current.current;
