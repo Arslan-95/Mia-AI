@@ -90,6 +90,7 @@ export function useMia() {
   const [mediaPaused, setMediaPausedState] = useState(false);
   const mediaPausedRef = useRef(false);
   const originalAudioEpoch = useRef(0);
+  const mediaPreparation = useRef<{ mediaId: string; operation: number } | null>(null);
   const presentationQueue = useRef<Promise<void>>(Promise.resolve());
   const seenActions = useRef(new Set<string>());
   function clearReference() {
@@ -332,22 +333,27 @@ export function useMia() {
       if (nativeStream.current === id && nativeCapture.current !== id) handleVoiceFailure(new ApiError(503, 'ASR_UNAVAILABLE', ''));
     }, 15000);
   }
-  async function stopAudio() {
-    // A spoken request can arrive immediately after interrupting a paused
-    // original. Release its input lease before the accepted-turn frame arrives.
-    if (originalMediaActive.current && mediaPausedRef.current) {
-      originalMediaActive.current = false; setManualAudio(false);
+  async function stopAudio(preserveOperation?: number) {
+    if (preserveOperation !== undefined && preserveOperation !== originalAudioEpoch.current) throw new CancelledError();
+    if (preserveOperation === undefined) {
+      const releasingMedia = originalMediaActive.current || mediaPreparation.current !== null;
+      originalAudioEpoch.current++; mediaPreparation.current = null; originalMediaActive.current = false;
+      if (releasingMedia && !heldRecording.current) setManualAudio(false);
     }
+    const stopEpoch = originalAudioEpoch.current;
     setMediaPaused(false);
     nativeMedia.current?.abort(); nativeMedia.current = null;
     if (nativeRecording.current) { nativeRecording.current = false; duplex.cancelRecording(); }
-    if (originalOperation.current) { const id = originalOperation.current; originalOperation.current = null; setOriginalPlayback(value => value?.operationId === id ? { ...value, state: 'stopped' } : value); }
+    const previousOperation = originalOperation.current; originalOperation.current = null;
+    setOriginalPlayback(value => value && (preserveOperation === undefined || value.operationId === previousOperation)
+      && !['finished', 'failed', 'stopped'].includes(value.state) ? { ...value, state: 'stopped' } : value);
     clearInterval(voiceEnvelope.current); voiceEnvelope.current = undefined; setVoiceLevel(0);
     speech.current?.settle(new CancelledError()); speech.current = null; socket.current?.send({ type: 'speech.cancel' });
     if (!nativeStream.current) socket.current?.send({ type: 'voice.cancel' });
     await duplex.stopPlayback();
+    if (originalAudioEpoch.current !== stopEpoch) return;
     if (!duplex.ownsSession) await audio.current!.stop();
-    setAudioState('idle');
+    if (originalAudioEpoch.current === stopEpoch) setAudioState('idle');
   }
   stopRef.current = stopAudio;
   useEffect(() => {
@@ -358,14 +364,14 @@ export function useMia() {
     });
     return () => { heldRecording.current?.controller.abort(); subscription.remove(); void stopRef.current().catch(fail); };
   }, []);
-  async function interrupt(preserveVoice = false) {
+  async function interrupt(preserveVoice = false, stopRemote = true) {
     heldRecording.current?.controller.abort(); heldRecording.current = null;
     nativeResponse.current?.abort(); nativeResponse.current = null; nativeCandidate.current = null;
     const stopped = Promise.all([conversation.stop(), preserveVoice ? Promise.resolve() : stopNativeVoice()]);
     referencePresentation.current?.reject(new CancelledError()); referencePresentation.current = null;
     lease.revoke(); requestContext.current = null;
     const current = state.current.assistantSession;
-    try { await Promise.all([stopAudio(), stopped, current && state.current.session ? assistantControl.stop(api, current.id, preserveVoice) : Promise.resolve()]); }
+    try { await Promise.all([stopAudio(), stopped, stopRemote && current && state.current.session ? assistantControl.stop(api, current.id, preserveVoice) : Promise.resolve()]); }
     finally { if (!heldRecording.current) setManualAudio(false); if (!preserveVoice) setVoiceRevision(value => value + 1); }
   }
   function presentView(next: Tab, chatId: string | null) {
@@ -859,6 +865,8 @@ export function useMia() {
     });
   }
   async function toggleMediaPlayback(mediaId: string) {
+    if (heldRecording.current || finishingRecording.current || state.current.audioState === 'recording') return;
+    if (mediaPreparation.current?.mediaId === mediaId && mediaPreparation.current.operation === originalAudioEpoch.current) return;
     const controls = mediaControls.current;
     if (controls?.mediaId === mediaId && originalOperation.current === controls.operationId && originalPlayback?.operationId === controls.operationId) {
       if (originalPlayback.state === 'playing' || originalPlayback.state === 'buffering') {
@@ -884,20 +892,28 @@ export function useMia() {
   }
   async function playMedia(mediaId: string, onStarted?: () => void, allowed = () => true, operationId = Crypto.randomUUID()) {
     const operation = ++originalAudioEpoch.current;
+    mediaPreparation.current = { mediaId, operation };
     originalMediaActive.current = true;
     setMediaPaused(false);
+    setOriginalPlayback({ mediaId, operationId, state: 'preparing', positionMs: 0 });
     try {
       if (!onStarted) { setManualAudio(true); if (!duplex.available || !aiModeRef.current) await Promise.all([conversation.stop(), stopNativeVoice()]); }
-      await stopAudio(); if (!allowed() || !foreground.current) throw new CancelledError();
+      if (originalAudioEpoch.current !== operation) throw new CancelledError();
+      await stopAudio(operation);
+      if (originalAudioEpoch.current !== operation || !allowed() || !foreground.current) throw new CancelledError();
       originalOperation.current = operationId;
-      setOriginalPlayback({ mediaId, operationId, state: 'preparing', positionMs: 0 }); setAudioState('playing');
+      setAudioState('playing');
       const progress = (progress: import('./audio/types').PlaybackProgress) => {
         if (originalOperation.current !== operationId || !allowed()) return;
         setOriginalPlayback(previous => previous?.operationId === operationId ? { ...previous,
           positionMs: progress.positionMs, durationMs: progress.durationMs ?? previous.durationMs,
           state: previous.state === 'paused' ? 'paused' : progress.buffering ? 'buffering' : progress.playing ? 'playing' : previous.state } : previous);
       };
-      const started = () => { setOriginalPlayback(value => value?.operationId === operationId ? { ...value, state: 'playing' } : value); onStarted?.(); };
+      const started = () => {
+        if (originalAudioEpoch.current !== operation || originalOperation.current !== operationId) return;
+        if (mediaPreparation.current?.operation === operation) mediaPreparation.current = null;
+        setOriginalPlayback(value => value?.operationId === operationId ? { ...value, state: 'playing' } : value); onStarted?.();
+      };
       if (aiModeRef.current) {
         await playPcmMedia(`${address}/v1/media/${mediaId}`, { Authorization: `Bearer ${session!.token}` }, started, progress,
           player => { mediaControls.current = { mediaId, operationId, pause: () => player.pause(), resume: () => player.resume() }; }, onStarted ? 175000 : undefined);
@@ -907,9 +923,10 @@ export function useMia() {
       }
       if (originalOperation.current === operationId) setOriginalPlayback(value => value?.operationId === operationId ? { ...value, state: 'finished', positionMs: value.durationMs ?? value.positionMs } : value);
     } catch (reason) {
-      if (originalOperation.current === operationId) setOriginalPlayback(value => value?.operationId === operationId ? { ...value, state: reason instanceof CancelledError ? 'stopped' : 'failed' } : value);
+      setOriginalPlayback(value => value?.operationId === operationId ? { ...value, state: reason instanceof CancelledError ? 'stopped' : 'failed' } : value);
       throw reason;
     } finally {
+      if (mediaPreparation.current?.operation === operation) mediaPreparation.current = null;
       if (mediaControls.current?.operationId === operationId) mediaControls.current = null;
       if (originalAudioEpoch.current === operation) {
         originalMediaActive.current = false; setMediaPaused(false); setAudioState('idle');
@@ -962,7 +979,7 @@ export function useMia() {
     const epoch = lease.snapshot();
     try {
       if (signal) checkVoice(signal);
-      await stopAudio();
+      await stopAudio(operation);
       if (await AccessibilityInfo.isScreenReaderEnabled()) await new Promise(resolve => setTimeout(resolve, 350));
       if (signal) checkVoice(signal);
       if (!lease.current(epoch) || !foreground.current) throw new CancelledError();
@@ -983,7 +1000,9 @@ export function useMia() {
     recordingRevision.current++;
     const chatId = state.current.activeChatId;
     const mode = aiModeRef.current;
-    const stopped = interrupt(duplex.available && mode);
+    // A classic voice note is a local microphone action. Do not make its
+    // startup wait for an unrelated assistant-session HTTP acknowledgement.
+    const stopped = interrupt(duplex.available && mode, mode);
     const held = { controller: new AbortController(), started: false, mode };
     heldRecording.current = held;
     setVoiceNoteStage('starting');
@@ -1042,6 +1061,10 @@ export function useMia() {
         } else result = await audio.current!.finish();
         if (userEpoch !== authEpoch.current) { await audio.current!.disposeRecording(result); return; }
         diagnoseVoiceNote('file_saved', { durationMs: result.durationMs });
+        if (sendOnRelease && held && !held.mode && result.durationMs < 300) {
+          await audio.current!.disposeRecording(result).catch(() => {});
+          recordDestination.current = null; setVoiceNoteStage('discarded'); return;
+        }
         setRecording(result);
         setVoiceNoteStage('idle');
         if (recordDestination.current) localVoiceNote.current = { id: Crypto.randomUUID(), recipientId: recordDestination.current.id, durationMs: result.durationMs };
@@ -1114,7 +1137,7 @@ export function useMia() {
     syncAgentInput();
     try {
       setManualAudio(true); if (!duplex.available || !aiModeRef.current) await Promise.all([conversation.stop(), stopNativeVoice()]);
-      await stopAudio(); if (!foreground.current) throw new CancelledError();
+      await stopAudio(operation); if (originalAudioEpoch.current !== operation || !foreground.current) throw new CancelledError();
       setAudioState('playing');
       if (duplex.available && aiModeRef.current) await playPcmMedia(value.uri);
       else await audio.current!.play(value.uri);

@@ -21,7 +21,7 @@ const sources: Record<string, string> = {
       return { remove() { n.motionHandlers.delete(callback); } };
     }, announceForAccessibility: text => n.announcements.push(text) };
     export const Vibration = { vibrate: () => { n.vibrations++; } };
-    export const Keyboard = { dismiss() {}, isVisible: () => false, addListener: (name, callback) => {
+    export const Keyboard = { dismiss() { n.keyboardDismissals++; }, isVisible: () => false, addListener: (name, callback) => {
       n.keyboardHandlers.set(name, callback); return { remove() { n.keyboardHandlers.delete(name); } };
     } };
     export const Platform = { OS: 'ios' };
@@ -76,11 +76,13 @@ const sources: Record<string, string> = {
         });
       }
       async start(signal) {
+        n.noteStarts++;
+        if (n.permissionDenied) throw new UserFacingError('Microphone access is off. Enable it in your iPhone settings to record.');
         if (n.holdNoteStart) await new Promise(resolve => { n.releaseNoteStart = resolve; });
         if (signal?.aborted) throw new CancelledError();
         n.noteRecording = true;
       }
-      async finish() { n.noteRecording = false; return { uri: 'file:///note.wav', durationMs: 1000 }; }
+      async finish() { n.noteRecording = false; return { uri: 'file:///note.wav', durationMs: n.noteDuration }; }
       async stop() { if (n.nativeSession) n.audioConflicts++; n.playback?.(); n.playback = null; n.noteRecording = false; }
       async playPcm() { n.playbacks++; await new Promise(resolve => { n.playback = resolve; }); }
       async pausePlayback() { n.playerPaused = true; if (n.holdPlayerPause) await new Promise(resolve => { n.releasePlayerPause = resolve; }); }
@@ -527,7 +529,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     playbackProgress: null as ((progress: PlaybackProgress) => void) | null,
     appState: (_state: string) => {}, event: async (_event: ServerEvent, _time: number, _replayed?: boolean) => {}, frame: (_frame: Frame) => {},
     connection: (_status: string) => {}, offline: false, holdHealth: false, healthHeld: false, healthCancelled: false,
-    noteRecording: false, complete: true, text: 'Open Anna', holdRecognition: false, recognitionCancelled: false, failSpeech: false, permissionDenied: false, dropAcceptedTurn: false,
+    noteRecording: false, noteStarts: 0, noteDuration: 1000, complete: true, text: 'Open Anna', holdRecognition: false, recognitionCancelled: false, failSpeech: false, permissionDenied: false, dropAcceptedTurn: false,
     nativeAvailable, nativeStarts: 0, nativeStops: 0, nativePCM: null as ((bytes: Uint8Array) => void) | null,
     nativeReject: null as ((reason: unknown) => void) | null, pcmPackets: 0,
     nativeRevision: 0, nativeSession: false, audioConflicts: 0, holdNativeStart: false, holdNativeStop: false,
@@ -541,7 +543,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     dimensions: { width: 390, height: 844, scale: 3, fontScale: 1 }, reducedMotion: false,
     motionHandlers: new Set<(value: boolean) => void>(), animations: [] as { duration: number; useNativeDriver: boolean; toValue: number }[],
     loops: [] as { child: any; started: boolean; stopped: boolean }[],
-    keyboardHandlers: new Map<string, () => void>(), insets: { top: 47, bottom: 34, left: 0, right: 0 },
+    keyboardHandlers: new Map<string, () => void>(), keyboardDismissals: 0, insets: { top: 47, bottom: 34, left: 0, right: 0 },
     backGesture: null as Record<string, (...args: any[]) => any> | null, holdAnimation: false, finishAnimation: null as (() => void) | null,
     pendingAnimations: [] as { config: { duration: number; toValue: number; delay?: number; useNativeDriver: boolean; isInteraction?: boolean }; finish(): void; active(): boolean }[],
     savedContacts: [] as Contact[],
@@ -1090,6 +1092,40 @@ test('a delayed pause cannot change a stopped message back to paused', async () 
     assert.equal(h.mia.originalPlayback?.state, 'stopped');
     assert.equal(h.mia.audioState, 'idle');
   } finally { h.n.releasePlayerPause?.(); await h.close(); }
+});
+
+test('classic playback coalesces repeated taps during preparation and only the newest message can start', async () => {
+  const h = await mount(false, true, true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    h.n.holdNativeStop = true;
+    let first!: Promise<void>, second!: Promise<void>;
+    await act(async () => { first = h.mia.playMedia('first').catch(() => {}); });
+    await h.wait(() => !!h.n.releaseNativeStop);
+    assert.equal(h.mia.originalPlayback?.state, 'preparing');
+    await act(async () => { await h.mia.toggleMediaPlayback('first'); second = h.mia.toggleMediaPlayback('second'); });
+    await act(async () => { h.n.holdNativeStop = false; h.n.releaseNativeStop!(); });
+    await h.wait(() => !!h.n.playback);
+    assert.equal(h.n.playbacks, 1); assert.equal(h.mia.originalPlayback?.mediaId, 'second');
+    await first;
+    await act(async () => { h.n.playback!(); await second; });
+    assert.equal(h.mia.originalPlayback?.state, 'finished');
+    assert.equal(h.n.nativeStarts, 0, 'classic playback does not start Mia microphone capture');
+  } finally { h.n.releaseNativeStop?.(); await h.close(); }
+});
+
+test('stopping classic playback during preparation prevents a late player from starting', async () => {
+  const h = await mount(false, true, true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    h.n.holdNativeStop = true;
+    let task!: Promise<void>;
+    await act(async () => { task = h.mia.playMedia('pending').catch(() => {}); });
+    await h.wait(() => !!h.n.releaseNativeStop);
+    await act(async () => { await h.mia.stopAudio(); h.n.holdNativeStop = false; h.n.releaseNativeStop!(); await task; });
+    assert.equal(h.n.playbacks, 0); assert.equal(h.mia.originalPlayback?.state, 'stopped');
+    assert.equal(h.mia.audioState, 'idle');
+  } finally { h.n.releaseNativeStop?.(); await h.close(); }
 });
 
 test('classic voice messages show inline play and pause with real duration and never open a bottom player', async () => {
@@ -2719,7 +2755,7 @@ test('compact screens retain readable large-text identity, expanded conversation
     const title = h.tree.findAll(node => node.type === 'Text' as any && node.props.accessibilityRole === 'header' && node.props.children === 'Anna')[0]!;
     assert.equal(title.props.numberOfLines, 2);
     const input = h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Message Anna')[0]!;
-    assert.equal(flatten(input.props.style).flex, 1); assert.equal(flatten(input.props.style).maxHeight, 120);
+    assert.equal(flatten(input.parent!.props.style).flex, 1); assert.equal(flatten(input.props.style).maxHeight, 120);
     assert.equal(input.props.maxLength, 8000); assert.equal(input.props.multiline, true);
     const timeline = h.tree.findAll(node => node.type === 'FlatList' as any)[0]!;
     const item = { id: 'large', senderId: 'user', createdAt: '2026-10-30T12:00:00Z', kind: 'text', text: 'A long message stays fully readable.' };
@@ -2785,7 +2821,7 @@ test('classic hold sends on release, cancels beyond the shared circle and can re
       await act(async () => { gesture!.begin(); });
       await h.wait(() => h.mia.audioState === 'recording');
       assert.equal(h.n.vibrations, 0, 'startup must not vibrate into the voice note');
-      const aura = () => h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'AgentRecordingAura')[0]!;
+      const aura = () => h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'ComposerVoiceAction')[0]!;
       assert.equal(aura().props.active, true);
       if (ending !== 'send') {
         await act(async () => { gesture!.move(280, 740); });
@@ -2822,6 +2858,72 @@ test('classic short taps and release during microphone startup never send audio'
     await h.wait(() => h.mia.audioState === 'idle' && h.mia.voiceNoteStage === 'idle');
     assert.equal(h.n.requests.filter(r => r.method === 'POST' && (r.path === '/v1/media' || r.path === '/v1/chats/anna/messages')).length, 0);
     assert.equal(h.n.noteRecording, false);
+  } finally { gesture?.dispose(); await h.close(); }
+});
+
+test('classic recording preserves the focused input, keyboard and fixed button geometry throughout recording and sending', async () => {
+  const h = await mount(false, true); let gesture: ReturnType<typeof pressGesture> | undefined;
+  const input = () => h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Message Anna')[0]!;
+  const action = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'composer-action')[0]!;
+  const flatten = (value: any): any => Array.isArray(value) ? Object.assign({}, ...value.filter(Boolean).map(flatten)) : value ?? {};
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); h.n.keyboardHandlers.get('keyboardWillShow')!(); });
+    const focused = input(); const dismissals = h.n.keyboardDismissals;
+    const stops = h.n.requests.filter(request => request.path.endsWith('/stop')).length;
+    const geometry = flatten(action().props.style({ pressed: false }));
+    h.n.holdSend = true;
+    gesture = pressGesture(action().props, { x: 340, y: 400 });
+    await act(async () => { gesture!.begin(); }); await h.wait(() => h.mia.audioState === 'recording');
+    assert.equal(h.n.noteStarts, 1, 'one hold starts one recorder');
+    assert.equal(h.n.requests.filter(request => request.path.endsWith('/stop')).length, stops, 'classic capture does not wait for a remote assistant stop');
+    assert.equal(input(), focused, 'the native input must not be unmounted when recording UI appears');
+    assert.equal(h.n.keyboardDismissals, dismissals);
+    const activeGeometry = flatten(action().props.style({ pressed: true }));
+    for (const key of ['width', 'height', 'borderRadius']) assert.equal(activeGeometry[key], geometry[key]);
+    assert.equal(h.tree.findAll(node => node.props.testID === 'composer-recording-stop').length, 1);
+    await act(async () => { gesture!.release(); }); await h.wait(() => !!h.n.releaseSend);
+    assert.equal(input(), focused); assert.equal(action().props.disabled, true);
+    await act(async () => { h.n.releaseSend!(); }); await h.wait(() => h.mia.voiceNoteStage === 'sent');
+    assert.equal(input(), focused); assert.equal(h.n.keyboardDismissals, dismissals);
+    assert.equal(flatten(input().props.style).opacity, 1);
+  } finally { h.n.releaseSend?.(); gesture?.dispose(); await h.close(); }
+});
+
+test('classic microphone denial returns to the record action and an unsent note cannot be overwritten by holding Retry', async () => {
+  const h = await mount(false, true); let gesture: ReturnType<typeof pressGesture> | undefined;
+  const action = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'composer-action')[0]!;
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    h.n.permissionDenied = true;
+    gesture = pressGesture(action().props, { x: 340, y: 740 });
+    await act(async () => { gesture!.begin(); }); await h.wait(() => h.mia.voiceNoteStage === 'failed');
+    await act(async () => { gesture!.release(); }); gesture.dispose();
+    assert.equal(action().props.accessibilityLabel, 'Record voice note'); assert.equal(h.mia.recording, null);
+    h.n.permissionDenied = false; h.n.failSend = true;
+    gesture = pressGesture(action().props, { x: 340, y: 740 });
+    await act(async () => { gesture!.begin(); }); await h.wait(() => h.mia.audioState === 'recording');
+    await act(async () => { gesture!.release(); }); gesture.dispose(); await h.wait(() => h.mia.voiceNoteStage === 'failed');
+    const note = h.mia.recording; const starts = h.n.noteStarts;
+    gesture = pressGesture(action().props, { x: 340, y: 740 });
+    await act(async () => { gesture!.begin(); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 550)); });
+    assert.equal(h.n.noteStarts, starts); assert.equal(h.mia.recording, note, 'holding Retry preserves the original recording');
+    await act(async () => { gesture!.cancel(); });
+    assert.equal(h.mia.recording, note);
+  } finally { gesture?.dispose(); await h.close(); }
+});
+
+test('a tiny classic recording is discarded locally instead of sending an accidental voice message', async () => {
+  const h = await mount(false, true); let gesture: ReturnType<typeof pressGesture> | undefined;
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    h.n.noteDuration = 100;
+    gesture = pressGesture(h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'composer-action')[0]!.props, { x: 340, y: 740 });
+    await act(async () => { gesture!.begin(); }); await h.wait(() => h.mia.audioState === 'recording');
+    await act(async () => { gesture!.release(); }); await h.wait(() => h.mia.voiceNoteStage === 'discarded');
+    assert.equal(h.mia.recording, null); assert.equal(h.n.noteRecording, false);
+    assert.ok(h.n.deleted.includes('file:///note.wav'));
+    assert.equal(h.n.requests.filter(request => request.path === '/v1/media').length, 0);
   } finally { gesture?.dispose(); await h.close(); }
 });
 

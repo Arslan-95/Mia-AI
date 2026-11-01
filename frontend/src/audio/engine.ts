@@ -11,7 +11,9 @@ export class Engine implements AudioEngine {
   private recorder?: AudioRecorder; private player?: AudioPlayer; private startedAt = 0;
   private rejectPlayback?: (error: Error) => void; private owner = new AudioOwnership();
   private playbackPaused = false;
+  private playbackLoad?: AbortController;
   async start(signal?: AbortSignal) {
+    this.playbackLoad?.abort();
     await this.owner.transition(async current => {
     const valid = current;
     current = () => valid() && !signal?.aborted;
@@ -59,15 +61,21 @@ export class Engine implements AudioEngine {
     let result: Recording | undefined;
     await this.owner.transition(async current => {
     const recorder = this.recorder; if (!recorder) throw new Error('No recording is active.');
-    await recorder.stop(); const uri = recorder.uri; const durationMs = Math.min(119000, Date.now() - this.startedAt);
-    this.recorder = undefined; recorder.release(); await setAudioModeAsync({ allowsRecording: false });
+    let durationMs = Math.min(119000, Date.now() - this.startedAt);
+    let uri: string | null = null;
+    try {
+      const status = recorder.getStatus();
+      if (status.durationMillis > 0) durationMs = Math.min(119000, status.durationMillis);
+      await recorder.stop(); uri = recorder.uri;
+    }
+    finally { this.recorder = undefined; recorder.release(); await setAudioModeAsync({ allowsRecording: false }); }
     if (!uri) throw new UserFacingError('The recording could not be saved. Please try again.');
     if (!current()) { const file = new File(uri); if (file.exists) file.delete(); throw new CancelledError(); }
     result = { uri, durationMs };
     });
     return result!;
   }
-  async stop() { await this.owner.transition(async () => this.cleanup()); }
+  async stop() { this.playbackLoad?.abort(); await this.owner.transition(async () => this.cleanup()); }
   private async cleanup() {
     this.playbackPaused = false;
     this.rejectPlayback?.(new CancelledError()); this.rejectPlayback = undefined;
@@ -77,41 +85,83 @@ export class Engine implements AudioEngine {
     await setAudioModeAsync({ allowsRecording: false, shouldPlayInBackground: false });
   }
   async play(uri: string, headers?: Record<string, string>, onStarted?: () => void, onProgress?: (progress: PlaybackProgress) => void) {
+    this.playbackLoad?.abort();
+    const controller = this.playbackLoad = new AbortController();
+    let cached: File | undefined;
     let completion: Promise<void> | undefined;
+    try {
     await this.owner.transition(async current => {
-    await this.cleanup(); if (!current()) throw new CancelledError();
+    const valid = () => current() && !controller.signal.aborted;
+    await this.cleanup(); if (!valid()) throw new CancelledError();
+    // The authenticated media endpoint returns a complete WAV, not an AVPlayer
+    // byte-range stream. Download it explicitly, then play the local file.
+    if (/^https?:/i.test(uri)) {
+      let timedOut = false;
+      const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 20000);
+      try {
+        const response = await fetch(uri, { headers, signal: controller.signal });
+        if (!valid()) throw new CancelledError();
+        if (!response.ok || Number(response.headers.get('content-length')) > 12_000_000) throw new UserFacingError('The voice message could not be loaded. Please try again.');
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (!valid()) throw new CancelledError();
+        try { playbackPcm(bytes); } catch { throw new UserFacingError('The voice message could not be played. Please try again.'); }
+        cached = new File(Paths.cache, `mia-playback-${Date.now()}-${Math.random().toString(36).slice(2)}.wav`);
+        cached.write(bytes); uri = cached.uri;
+      } catch (error) {
+        if (timedOut) throw new UserFacingError('Loading the voice message took too long. Please try again.');
+        if (!valid()) throw new CancelledError();
+        if (error instanceof UserFacingError) throw error;
+        throw new UserFacingError('The voice message could not be loaded. Check your connection and try again.');
+      } finally { clearTimeout(timeout); }
+    }
+    if (!valid()) throw new CancelledError();
     await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true, shouldPlayInBackground: false, interruptionMode: 'doNotMix' });
-    if (!current()) throw new CancelledError();
+    if (!valid()) throw new CancelledError();
     completion = new Promise<void>((resolve, reject) => {
-      const player = this.player = createAudioPlayer({ uri, headers }, { updateInterval: 100 });
+      const player = this.player = createAudioPlayer({ uri }, { updateInterval: 100 });
       let settled = false;
+      let listener: { remove(): void } | undefined;
+      let timeout: ReturnType<typeof setInterval> | undefined;
+      let stalledAt: number | undefined;
       const finish = (error?: Error) => {
         if (settled) return;
-        settled = true; clearInterval(timeout); listener.remove();
+        settled = true; clearInterval(timeout); listener?.remove();
         this.rejectPlayback = undefined;
         if (this.player === player) { this.player = undefined; player.release(); }
         if (error) reject(error); else resolve();
       };
       this.rejectPlayback = error => finish(error);
       let remaining = 125000, measuredAt = Date.now();
-      const timeout = setInterval(() => {
+      timeout = setInterval(() => {
         const now = Date.now(); if (!this.playbackPaused) remaining -= now - measuredAt; measuredAt = now;
-        if (remaining <= 0) finish(new UserFacingError('Playback did not finish. Please try again.'));
+        if (this.playbackPaused) stalledAt = undefined;
+        if (stalledAt !== undefined && now - stalledAt > 3000) finish(new UserFacingError('Playback was interrupted. Please try again.'));
+        else if (!started && now - loadingAt > 15000) finish(new UserFacingError('The voice message could not start. Please try again.'));
+        else if (remaining <= 0) finish(new UserFacingError('Playback did not finish. Please try again.'));
       }, 1000);
-      let started = false;
-      const listener = player.addListener('playbackStatusUpdate', status => {
+      let started = false; const loadingAt = Date.now();
+      try {
+      listener = player.addListener('playbackStatusUpdate', status => {
         if (settled) return;
+        if (status.playbackState === 'failed' || status.mediaServicesDidReset) { finish(new UserFacingError('The voice message could not be played. Please try again.')); return; }
         if (Number.isFinite(status.currentTime)) onProgress?.({ positionMs: Math.max(0, status.currentTime * 1000),
           ...(Number.isFinite(status.duration) && status.duration > 0 ? { durationMs: status.duration * 1000 } : {}),
           playing: status.playing, buffering: status.isBuffering });
         if (status.playing && !started) { started = true; onStarted?.(); }
+        if (started && !this.playbackPaused && !status.playing && !status.isBuffering && !status.didJustFinish) stalledAt ??= Date.now();
+        else stalledAt = undefined;
         if (status.didJustFinish) finish();
-        else if (!this.playbackPaused && !status.playing && status.isLoaded && status.currentTime > 0 && !status.isBuffering) finish(new UserFacingError('Playback was interrupted. Please try again.'));
       });
-      player.play();
+      if (settled) listener.remove(); else player.play();
+      } catch { finish(new UserFacingError('The voice message could not be played. Please try again.')); }
     });
+    void completion.catch(() => {});
     });
     await completion;
+    } finally {
+      if (this.playbackLoad === controller) this.playbackLoad = undefined;
+      try { if (cached?.exists) cached.delete(); } catch { /* Cache cleanup cannot undo completed playback. */ }
+    }
   }
   async pausePlayback() { if (this.player) { this.playbackPaused = true; this.player.pause(); } }
   resumePlayback() { if (this.player) { this.playbackPaused = false; this.player.play(); } }

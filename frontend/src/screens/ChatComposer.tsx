@@ -1,23 +1,25 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Animated, AppState, Keyboard, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Animated, AppState, Pressable, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import type { Mia } from '../useMia';
-import { Button, Icon, useUi } from '../ui';
+import { Button, useUi } from '../ui';
 import { recordingCancelProgress } from '../voiceNoteGesture';
-import { AgentRecordingAura } from './AgentRecordingAura';
+import { ComposerVoiceAction } from './ComposerVoiceAction';
 
-const radius = 44, diameter = 48, holdDelay = 500;
+const radius = 44, holdDelay = 500;
 
 /** One composer action: text send, or original client-owned hold-to-record. */
 export function ChatComposer({ mia, chatId, recipient, bottomInset }: {
   mia: Mia; chatId: string; recipient: string; bottomInset: number;
 }) {
   const { colors } = useUi();
+  const { fontScale } = useWindowDimensions();
   const composer = mia.composers[chatId] ?? '';
   const [gesture, setGesture] = useState({ active: false, cancelReady: false });
   const [elapsed, setElapsed] = useState(0);
   const progress = useRef(new Animated.Value(0)).current;
   const current = useRef({ mia, composer }); current.current = { mia, composer };
   const held = useRef(false), suppressTap = useRef(false), mounted = useRef(true);
+  const revision = useRef(0);
   const origin = useRef<{ x: number; y: number } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const recording = mia.audioState === 'recording';
@@ -30,17 +32,21 @@ export function ChatComposer({ mia, chatId, recipient, bottomInset }: {
     if (render && mounted.current) setGesture({ active: false, cancelReady: false });
   };
   const finish = (cancel: boolean, render = true) => {
+    revision.current++;
     const owns = held.current; held.current = false; reset(render);
     if (owns) void current.current.mia.endHeldRecording(cancel).catch(current.current.mia.fail);
   };
   const begin = () => {
     const latest = current.current;
-    if (held.current || latest.composer.trim() || latest.mia.aiMode || latest.mia.activeChatId !== chatId
+    if (held.current || latest.mia.recording || latest.composer.trim() || latest.mia.aiMode || latest.mia.activeChatId !== chatId
       || ['sending', 'saving'].includes(latest.mia.voiceNoteStage)) return;
     clearTimeout(timer.current); timer.current = undefined;
+    const token = ++revision.current;
     held.current = true; suppressTap.current = true;
-    Keyboard.dismiss(); setGesture({ active: true, cancelReady: false }); progress.setValue(0);
-    void latest.mia.beginHeldRecording().catch(reason => { held.current = false; reset(); latest.mia.fail(reason); });
+    setGesture({ active: true, cancelReady: false }); progress.setValue(0);
+    void latest.mia.beginHeldRecording().catch(reason => {
+      if (mounted.current && revision.current === token) { held.current = false; reset(); latest.mia.fail(reason); }
+    });
   };
   useEffect(() => {
     mounted.current = true;
@@ -58,21 +64,25 @@ export function ChatComposer({ mia, chatId, recipient, bottomInset }: {
   const duration = recording ? elapsed : Math.floor((mia.recording?.durationMs ?? 0) / 1000);
   const time = `${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, '0')}`;
   const label = sending ? 'Sending voice note' : active ? 'Finish and send voice note' : retained ? 'Retry voice note' : composer.trim() ? 'Send' : 'Record voice note';
+  const showStatus = active || sending || retained;
   return <View testID="message-composer-area" style={[styles.area, { paddingBottom: Math.max(bottomInset, 8) }]}>
     <View style={[styles.composer, { backgroundColor: colors.paper, borderColor: cancelReady ? colors.red : colors.line }]}>
-      {active || sending || retained ? <View testID="composer-recording-status" accessibilityLiveRegion="polite" style={styles.recordingInfo}>
-        {retained && !sending && !active && <Button quiet iconOnly label="Discard recording" icon="close" onPress={() => void mia.discardRecording().catch(mia.fail)} style={styles.discard} />}
-        <View style={[styles.dot, { backgroundColor: cancelReady ? colors.red : colors.accentLight }]} />
-        <Text testID="composer-recording-time" style={[styles.time, { color: colors.ink }]}>{time}</Text>
-        <Text numberOfLines={2} style={[styles.hint, { color: cancelReady ? colors.red : colors.muted }]}>{cancelReady ? 'Release to delete' : sending ? 'Sending…' : retained && !active ? `Not sent · ${mia.recordingRecipient?.displayName ?? recipient}` : mia.voiceNoteStage === 'starting' ? 'Getting ready…' : 'Move away to cancel'}</Text>
-      </View> : <TextInput accessibilityLabel={`Message ${recipient}`} placeholder="Message…" placeholderTextColor={colors.muted} keyboardAppearance="dark" selectionColor={colors.accentLight} multiline maxLength={8000} value={composer} onChangeText={mia.setComposer} style={[styles.input, { color: colors.ink }]} />}
+      <View style={[styles.inputArea, showStatus && { minHeight: Math.max(44, Math.ceil(44 * fontScale)) }]}>
+        <TextInput accessibilityLabel={`Message ${recipient}`} placeholder="Message…" placeholderTextColor={colors.muted} keyboardAppearance="dark" selectionColor={colors.accentLight} multiline maxLength={8000} value={composer} onChangeText={mia.setComposer}
+          pointerEvents={showStatus ? 'none' : 'auto'} accessibilityElementsHidden={showStatus} importantForAccessibility={showStatus ? 'no-hide-descendants' : 'auto'}
+          style={[styles.input, { color: colors.ink, opacity: showStatus ? 0 : 1 }]} />
+        {showStatus && <View testID="composer-recording-status" accessibilityLiveRegion="polite" style={styles.recordingInfo}>
+          {retained && !sending && !active && <Button quiet iconOnly label="Discard recording" icon="close" onPress={() => void mia.discardRecording().catch(mia.fail)} style={styles.discard} />}
+          <View style={[styles.dot, { backgroundColor: cancelReady ? colors.red : colors.accentLight }]} />
+          <Text testID="composer-recording-time" style={[styles.time, { color: colors.ink }]}>{time}</Text>
+          <Text numberOfLines={2} style={[styles.hint, { color: cancelReady ? colors.red : colors.muted }]}>{cancelReady ? 'Release to delete' : sending ? 'Sending…' : retained && !active ? `Not sent · ${mia.recordingRecipient?.displayName ?? recipient}` : mia.voiceNoteStage === 'starting' ? 'Getting ready…' : 'Move away to cancel'}</Text>
+        </View>}
+      </View>
       <View style={styles.actionSlot}>
-        <View pointerEvents="none" style={styles.aura}><AgentRecordingAura active={active} cancelReady={cancelReady} progress={progress} diameter={diameter} radius={radius}>
-          <View style={[styles.core, { backgroundColor: cancelReady ? '#8D335B' : colors.accent, width: active ? diameter : 44, height: active ? diameter : 44, borderRadius: diameter / 2 }]} />
-        </AgentRecordingAura></View>
         <Pressable testID="composer-action" accessibilityRole="button" accessibilityLabel={label}
           accessibilityHint={composer.trim() ? 'Send your text message.' : 'Hold to record. Release to send; move away until the red circle fills, then release to delete. With a screen reader, activate to start and activate again to send.'}
-          accessibilityState={{ disabled: sending, busy: sending }} disabled={sending} style={({ pressed }) => [styles.action, pressed && { opacity: .8 }, sending && { opacity: .5 }]}
+          accessibilityState={{ disabled: sending, busy: sending || mia.voiceNoteStage === 'starting' }} disabled={sending} style={({ pressed }) => [styles.action, pressed && !active && { opacity: .8 }, sending && { opacity: .6 }]}
+          hitSlop={6} pressRetentionOffset={radius}
           accessibilityActions={[{ name: 'record', label: 'Start voice note' }, { name: 'finish', label: 'Finish and send voice note' }, { name: 'discard', label: 'Cancel voice note' }]}
           onAccessibilityAction={event => {
             if (event.nativeEvent.actionName === 'record') begin();
@@ -84,7 +94,7 @@ export function ChatComposer({ mia, chatId, recipient, bottomInset }: {
           onTouchStart={event => {
             if (event.nativeEvent.touches.length !== 1) { suppressTap.current = true; finish(true); return; }
             suppressTap.current = false;
-            if (current.current.composer.trim()) return;
+            if (current.current.composer.trim() || current.current.mia.recording || ['sending', 'saving'].includes(current.current.mia.voiceNoteStage)) return;
             origin.current = { x: event.nativeEvent.pageX, y: event.nativeEvent.pageY };
             timer.current = setTimeout(begin, holdDelay);
           }}
@@ -101,17 +111,17 @@ export function ChatComposer({ mia, chatId, recipient, bottomInset }: {
             finish(!!cancel);
           }}
           onTouchCancel={() => { suppressTap.current = true; finish(true); }}
-          onLongPress={() => { if (origin.current) begin(); }} delayLongPress={holdDelay}
           onPress={event => {
             const physical = !!event?.nativeEvent.changedTouches?.length;
             if (suppressTap.current && physical) return;
             const latest = current.current;
-            if (latest.composer.trim()) { void latest.mia.sendText(); return; }
+            if (['sending', 'saving'].includes(latest.mia.voiceNoteStage)) return;
             if (!physical && held.current) finish(false);
             else if (latest.mia.recording) void latest.mia.useRecording().catch(latest.mia.fail);
+            else if (latest.composer.trim()) { void latest.mia.sendText(); }
             else if (!physical) begin();
           }}>
-          {!active && <Icon name={sending ? 'ellipsis-horizontal' : retained ? 'arrow-up' : composer.trim() ? 'arrow-up' : 'mic'} size={21} color={colors.white} />}
+          <ComposerVoiceAction active={active} cancelReady={cancelReady} busy={sending || mia.voiceNoteStage === 'starting'} send={retained || !!composer.trim()} progress={progress} />
         </Pressable>
       </View>
     </View>
@@ -121,12 +131,11 @@ export function ChatComposer({ mia, chatId, recipient, bottomInset }: {
 const styles = StyleSheet.create({
   area: { paddingHorizontal: 16, paddingTop: 6 },
   composer: { flexDirection: 'row', alignItems: 'flex-end', borderRadius: 26, borderWidth: 1, padding: 3, paddingRight: 10 },
-  input: { flex: 1, minWidth: 0, minHeight: 44, maxHeight: 120, paddingVertical: 12, paddingHorizontal: 12, fontSize: 15, lineHeight: 20 },
+  inputArea: { flex: 1, minWidth: 0 },
+  input: { minWidth: 0, minHeight: 44, maxHeight: 120, paddingVertical: 12, paddingHorizontal: 12, fontSize: 15, lineHeight: 20 },
   actionSlot: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', zIndex: 2 },
-  aura: { position: 'absolute', width: radius * 2, height: radius * 2, alignItems: 'center', justifyContent: 'center' },
-  core: { alignItems: 'center', justifyContent: 'center' },
   action: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 22 },
-  recordingInfo: { flex: 1, minWidth: 0, minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 12, paddingRight: 14 },
+  recordingInfo: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, paddingLeft: 12, paddingRight: 30 },
   dot: { width: 5, height: 5, borderRadius: 3 },
   time: { fontSize: 13, fontVariant: ['tabular-nums'] },
   hint: { fontSize: 11, lineHeight: 16, flex: 1 },
