@@ -72,11 +72,11 @@ export function useMia() {
   const pendingSends = useRef(new Map<string, Promise<void>>()).current;
   const deliveryReceipts = useRef(new Map<string, (message: Message) => void>()).current;
   const mediaControls = useRef<{ mediaId: string; operationId: string; pause(): Promise<void>; resume(): void } | null>(null);
-  const [tab, setTab] = useState<Tab>('chats');
+  const [{ tab, activeChatId }, setRoute] = useState<{ tab: Tab; activeChatId: string | null }>({ tab: 'chats', activeChatId: null });
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [chats, setChats] = useState<Chat[]>([]); const [contacts, setContacts] = useState<Contact[]>([]);
   const [drafts, setDrafts] = useState<Draft[]>([]); const [messages, setMessages] = useState<Record<string, Message[]>>({});
-  const [hasOlder, setHasOlder] = useState<Record<string, boolean>>({}); const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [hasOlder, setHasOlder] = useState<Record<string, boolean>>({});
   const [composers, setComposers] = useState<Record<string, string>>({}); const [pending, setPending] = useState<PendingMessage[]>([]);
   const [assistantSession, setAssistantSession] = useState<AssistantSession | null>(null); const [turns, setTurns] = useState<Turn[]>([]);
   const [audioState, setAudioState] = useState<'idle' | 'recording' | 'loading' | 'playing'>('idle');
@@ -190,9 +190,9 @@ export function useMia() {
     finishingControl.current = null; setFinishingControlReply(false); appliedVoiceControl.current = null;
     void conversation.stop(); await stopNativeVoice();
     setManualAudio(false); setVoiceFault(false); setVoiceRecoverable(false); setRealtimeReady(false);
-    navigation.reset(); requestContext.current = null; setTab('chats');
+    navigation.reset(); requestContext.current = null; setRoute({ tab: 'chats', activeChatId: null });
     authEpoch.current++; lease.revoke(); socket.current?.dispose(); await audio.current!.stop();
-    await sessionStorage.write(null).catch(fail); setSession(null); setChats([]); setContacts([]); setDrafts([]); setMessages({}); setTurns([]); setPending([]); setComposers({}); setActiveChatId(null); setAssistantSession(null); setAudioState('idle');
+    await sessionStorage.write(null).catch(fail); setSession(null); setChats([]); setContacts([]); setDrafts([]); setMessages({}); setTurns([]); setPending([]); setComposers({}); setAssistantSession(null); setAudioState('idle');
     if (recording) await audio.current!.disposeRecording(recording); setRecording(null);
   }
   useEffect(() => {
@@ -370,7 +370,7 @@ export function useMia() {
   }
   function presentView(next: Tab, chatId: string | null) {
     if (reference.current && (next !== 'chats' || chatId !== reference.current.chatId)) clearReference();
-    setTab(next); setActiveChatId(chatId);
+    setRoute({ tab: next, activeChatId: chatId });
     publishVoiceState();
     state.current = { ...state.current, tab: next, activeChatId: chatId };
   }

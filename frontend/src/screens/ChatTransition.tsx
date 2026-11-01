@@ -17,6 +17,13 @@ export function useChatTransition(mia: Mia) {
   const generation = useRef(0);
   const [reveal, setReveal] = useState(0);
   const [transitioning, setTransitioning] = useState(false);
+  // Only a forward conversation change needs an outgoing visual snapshot.
+  // Back/root navigation renders the authoritative route in this same render;
+  // waiting for a layout effect would briefly pair the old chat with the new
+  // navigation revision and reset its native translation before removing it.
+  const betweenChats = !reduced && navigationDirection !== 'back' && shown.userId === userId && !!userId
+    && shown.tab === 'chats' && tab === 'chats'
+    && !!shown.activeChatId && !!activeChatId && shown.activeChatId !== activeChatId;
 
   useLayoutEffect(() => {
     const token = ++generation.current;
@@ -24,11 +31,11 @@ export function useChatTransition(mia: Mia) {
     const next = { tab, activeChatId, userId };
     const previous = current.current;
     const commit = () => { current.current = next; setShown(next); };
-    const betweenChats = navigationDirection !== 'back' && previous.userId === userId && !!userId
+    const animate = !reduced && navigationDirection !== 'back' && previous.userId === userId && !!userId
       && previous.tab === 'chats' && tab === 'chats'
       && !!previous.activeChatId && !!activeChatId && previous.activeChatId !== activeChatId;
 
-    if (reduced || !betweenChats) {
+    if (!animate) {
       opacity.setValue(0); setTransitioning(false); commit();
     } else {
       Keyboard.dismiss();
@@ -57,8 +64,7 @@ export function useChatTransition(mia: Mia) {
     });
   }, [reveal, opacity]);
 
-  // Never retain a previous account's conversation, even for one render.
-  const route = shown.userId === userId ? shown : { tab, activeChatId };
+  const route = betweenChats ? shown : { tab, activeChatId };
   return { mia: { ...mia, tab: route.tab, activeChatId: route.activeChatId }, opacity, transitioning };
 }
 

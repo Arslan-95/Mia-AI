@@ -60,7 +60,7 @@ export function Chats({ mia, bottomInset, overlayInset = 0, preview = false, ren
     {!mia.aiMode && <ChatComposer key={chat.id} mia={mia} chatId={chat.id} recipient={chat.recipient.displayName} bottomInset={bottomInset} />}
   </>;
   return preview ? <View style={{ flex: 1, backgroundColor: colors.background }}>{conversation}</View>
-    : <ChatBackGesture chatId={chat.id} navigationRevision={mia.navigationRevision} enabled={!mia.aiMode} onBack={() => void mia.navigateBack()} renderBackScreen={renderBackScreen}>{conversation}</ChatBackGesture>;
+    : <ChatBackGesture key={chat.id} chatId={chat.id} navigationRevision={mia.navigationRevision} enabled={!mia.aiMode} onBack={() => void mia.navigateBack()} renderBackScreen={renderBackScreen}>{conversation}</ChatBackGesture>;
 }
 
 function createStyles(colors: typeof agentColors, agent: boolean) { return StyleSheet.create({

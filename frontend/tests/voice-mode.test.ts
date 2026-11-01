@@ -2405,6 +2405,43 @@ test('back swipe can reveal the previous conversation without changing its saved
   } finally { await h.close(); }
 });
 
+test('a completed back swipe never moves the departed chat back onscreen during the route commit', async () => {
+  for (const origin of ['chats', 'people', 'conversation'] as const) {
+    const h = await mount(false, true);
+    const flatten = (value: any): any => Array.isArray(value) ? Object.assign({}, ...value.filter(Boolean).map(flatten)) : value ?? {};
+    try {
+      h.n.savedChats.push({ ...chat, id: 'ben', recipient: { ...chat.recipient, id: 'ben', displayName: 'Ben' } });
+      await act(async () => {
+        await h.mia.refresh();
+        await h.mia.navigate(origin === 'people' ? 'people' : 'chats', origin === 'conversation' ? 'anna' : null);
+        await h.mia.navigate('chats', 'ben');
+      });
+      h.n.holdAnimation = true;
+      const back = h.n.backGesture!;
+      const screen = h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'chat-screen')[0]!;
+      const offset = flatten(screen.props.style).transform[0].translateX;
+      await act(async () => { back.onPanResponderGrant!(); back.onPanResponderMove!(null, { dx: 160 }); back.onPanResponderRelease!(null, { dx: 160, vx: .2 }); });
+      // Track native commands, including writes from intermediate React commits.
+      // A final-tree assertion misses an old screen being reset before removal.
+      const writes: number[] = [];
+      const setValue = offset.setValue.bind(offset);
+      offset.setValue = (value: number) => { writes.push(value); setValue(value); };
+      await act(async () => {
+        h.n.pendingAnimations.find(item => item.active() && item.config.duration === 180)!.finish();
+        back.onPanResponderTerminate!();
+      });
+      assert.equal(h.mia.tab, origin === 'people' ? 'people' : 'chats');
+      assert.equal(h.mia.activeChatId, origin === 'conversation' ? 'anna' : null);
+      assert.equal(writes.includes(0), false, `the departed Ben screen must stay offscreen when returning to ${origin}`);
+      assert.equal(offset.value, h.n.dimensions.width);
+      if (origin === 'conversation') {
+        const restored = h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'chat-screen')[0]!;
+        assert.notEqual(flatten(restored.props.style).transform[0].translateX, offset, 'the previous conversation owns a separate animation value');
+      }
+    } finally { await h.close(); }
+  }
+});
+
 test('chat switching covers the outgoing chat before swapping and reveals the entire destination together', async () => {
   for (const mode of [false, true]) {
     const h = await mount(mode, true, mode);

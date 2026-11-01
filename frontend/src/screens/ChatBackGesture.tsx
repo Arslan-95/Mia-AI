@@ -20,6 +20,9 @@ export function ChatBackGesture({ chatId, navigationRevision, enabled, onBack, c
   const revision = useRef(0);
   const animation = useRef<Animated.CompositeAnimation | null>(null);
   const reset = () => {
+    // A late terminate/release after a successful pop must never return the
+    // departed native view to its starting position while React removes it.
+    if (!dragging.current) return;
     const token = ++revision.current;
     dragging.current = null;
     animation.current?.stop();
