@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { ActivityIndicator, Animated, Keyboard, Pressable, StyleSheet, Text, TextInput, View, type TextInputProps, type StyleProp, type ViewStyle } from 'react-native';
+import { ActivityIndicator, Animated, Keyboard, Pressable, StyleSheet, Text, TextInput, View, type TextInputProps, type StyleProp, type ViewStyle, type ViewProps } from 'react-native';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { usePressOpacity } from './motion';
 import { useAgentAppearance } from './appearance';
@@ -61,9 +61,9 @@ export function Button({ label, onPress, icon, secondary, quiet, destructive, di
 }
 export function Field({ label, ...props }: TextInputProps & { label: string }) {
   const { colors, s } = useUi(); return <View style={s.field}><Text style={s.label}>{label}</Text><TextInput accessibilityLabel={label} placeholderTextColor={colors.muted} selectionColor={colors.accentLight} keyboardAppearance="dark" {...props} style={[s.input, props.multiline && { minHeight: 100 }, props.style]} /></View>; }
-export function SearchField({ label, hint, placeholder, value, onChangeText, maxLength, loading = false }: {
+export function SearchField({ label, hint, placeholder, value, onChangeText, maxLength, keyboardType, loading = false }: {
   label: string; hint?: string; placeholder: string; value: string; onChangeText(value: string): void;
-  maxLength?: number; loading?: boolean;
+  maxLength?: number; keyboardType?: TextInputProps['keyboardType']; loading?: boolean;
 }) {
   const { agent, colors, s } = useUi();
   const [inputFocused, setInputFocused] = useState(false);
@@ -72,7 +72,7 @@ export function SearchField({ label, hint, placeholder, value, onChangeText, max
   const hasText = value.length > 0;
   return <View style={s.searchRow}>
     <TextInput ref={input} accessibilityLabel={label} accessibilityHint={hint} accessibilityState={{ busy: loading }} placeholder={placeholder} value={value} onChangeText={onChangeText}
-      maxLength={maxLength} autoCapitalize="none" autoCorrect={false} keyboardAppearance="dark" placeholderTextColor={colors.muted}
+      maxLength={maxLength} keyboardType={keyboardType} autoCapitalize="none" autoCorrect={false} keyboardAppearance="dark" placeholderTextColor={colors.muted}
       selectionColor={colors.accentLight} returnKeyType="search" onFocus={() => setInputFocused(true)} onBlur={() => setInputFocused(false)}
       onSubmitEditing={() => Keyboard.dismiss()} clearButtonMode="never"
       style={[s.input, s.searchInput, { paddingRight: 12 + (hasText ? 44 : 0) + (loading ? 28 : 0) }, inputFocused && s.searchInputFocused]} />
@@ -93,9 +93,10 @@ export function Avatar({ name, size: requestedSize, round = false }: { name: str
   const palette = (agent ? avatarColors : classicAvatarColors)[Array.from(name).reduce((sum, char) => sum + char.charCodeAt(0), 0) % avatarColors.length]!;
   return <View accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={[s.avatar, { width: size, height: size, borderRadius: round ? size / 2 : size * (agent ? .34 : .36), backgroundColor: palette[0] }]}>{round && <><View style={{ position: 'absolute', width: size * 1.1, height: size * .8, borderRadius: size, top: -size * .35, left: -size * .3, backgroundColor: palette[1], opacity: .15 }} /><View style={{ position: 'absolute', width: size * .7, height: size * .65, borderRadius: size, bottom: -size * .2, right: -size * .25, backgroundColor: '#A184EE', opacity: .2 }} /></>}<Text allowFontScaling={false} style={{ fontSize: size * .3, fontWeight: '600', color: palette[1] }}>{initials}</Text></View>;
 }
-export function Empty({ icon = 'chatbubble-ellipses-outline', title, text, children, compact = false }: { icon?: React.ComponentProps<typeof Ionicons>['name']; title: string; text: string; children?: React.ReactNode; compact?: boolean }) {
+export function Empty({ icon = 'chatbubble-ellipses-outline', title, text, children, compact = false, style, onLayout }: { icon?: React.ComponentProps<typeof Ionicons>['name']; title: string; text: string; children?: React.ReactNode; compact?: boolean; style?: StyleProp<ViewStyle>; onLayout?: ViewProps['onLayout'] }) {
   const { agent, colors, s } = useUi();
-  return <View style={[s.empty, compact && s.emptyCompact]}>{agent ? <View accessible={false} accessibilityElementsHidden style={s.emptySymbol}><View style={s.emptyReflection} /><View style={s.emptyIcon}><Icon name={icon} size={28} color={colors.accentLight} /></View></View> : <View accessible={false} accessibilityElementsHidden style={s.emptyIcon}><Icon name={icon} size={30} color={colors.accentLight} /></View>}<Text accessibilityRole="header" style={[s.sectionTitle, { textAlign: 'center' }]}>{title}</Text><Text style={[s.body, { textAlign: 'center', maxWidth: agent ? 290 : 320 }]}>{text}</Text>{children && (agent ? <View style={{ marginTop: 12 }}>{children}</View> : children)}</View>;
+  // VirtualizedList injects the counter-transform and layout callback into its empty slot.
+  return <View onLayout={onLayout} style={[s.empty, compact && s.emptyCompact, style]}>{agent ? <View accessible={false} accessibilityElementsHidden style={s.emptySymbol}><View style={s.emptyReflection} /><View style={s.emptyIcon}><Icon name={icon} size={28} color={colors.accentLight} /></View></View> : <View accessible={false} accessibilityElementsHidden style={s.emptyIcon}><Icon name={icon} size={30} color={colors.accentLight} /></View>}<Text accessibilityRole="header" style={[s.sectionTitle, { textAlign: 'center' }]}>{title}</Text><Text style={[s.body, { textAlign: 'center', maxWidth: agent ? 290 : 320 }]}>{text}</Text>{children && (agent ? <View style={{ marginTop: 12 }}>{children}</View> : children)}</View>;
 }
 export function Notice({ children, error = false }: { children: React.ReactNode; error?: boolean }) {
   const { agent, colors, s } = useUi(); return <View accessibilityLiveRegion={error ? 'assertive' : 'polite'} style={[s.notice, error && { backgroundColor: colors.errorSurface, borderColor: agent ? '#613449' : '#573044' }]}>{agent && <Icon name={error ? 'alert-circle-outline' : 'information-circle-outline'} size={20} color={error ? colors.red : colors.accentLight} />}<Text style={[agent ? s.body : s.small, agent && { flex: 1 }, error && { color: colors.red }]}>{children}</Text></View>; }

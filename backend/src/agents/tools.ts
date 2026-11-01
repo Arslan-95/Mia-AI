@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Database } from '../db/database.js';
 import { AppError, conflict } from '../errors.js';
+import { normalizePhoneSearch } from '../phone.js';
 import { MessagingService } from '../messaging.js';
 import { contentSchema } from '../routes/messaging.js';
 import { AssistantState, type Turn } from './state.js';
@@ -14,6 +15,7 @@ import { draftReviewContinuity } from './draft-send-policy.js';
 import { assertSourceFocus } from './context.js';
 import { speechDeliverySchema, defaultSpeechDelivery } from '../speech/delivery.js';
 import { RECIPIENT_APPROVAL_RULE } from './prompts.js';
+import { publish } from '../events.js';
 
 export type AgentName = 'mia' | 'messaging' | 'contacts';
 export type Tool = { definition: FunctionDefinition; execute(input: unknown): Promise<unknown> };
@@ -40,7 +42,7 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
   const messaging = new MessagingService(db);
   const memory = new AgentMemory(db);
   const resolution = async (contact: Awaited<ReturnType<MessagingService['contact']>>) => ({ contact,
-    sameNameContacts: await db.query(`SELECT c.id AS "contactId",c.name,u.username FROM contacts c JOIN users u ON u.id=c.user_id
+    sameNameContacts: await db.query(`SELECT c.id AS "contactId",c.name,u.phone_number AS "phoneNumber" FROM contacts c JOIN users u ON u.id=c.user_id
       WHERE c.owner_id=$1 AND lower(c.name)=lower($2) ORDER BY c.id LIMIT 50`, [turn.userId, contact.name]),
   });
   const review = (change: MemoryChange) => {
@@ -72,16 +74,48 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
   };
   const mutate = <T>(fn: (service: MessagingService, scoped: Database) => Promise<T>) =>
     state.mutate(turn, signal, (scoped) => fn(new MessagingService(scoped), scoped));
+  const contactForm = (payload: Record<string, unknown>) => state.emit(turn, signal, 'agent.contact_form', payload);
+  const saveContact = async (operation: 'create' | 'rename', profile: { phoneNumber: string | null }, name: string,
+    save: (service: MessagingService, scoped: Database) => Promise<Awaited<ReturnType<MessagingService['contact']>>>,
+    validate?: () => Promise<unknown>) => {
+    const fields = { operation, name, identifier: profile.phoneNumber };
+    await contactForm({ ...fields, status: 'saving' });
+    try {
+      await validate?.();
+      return await mutate(async (service, scoped) => {
+        const contact = await save(service, scoped);
+        // Commit the success presentation together with the contact itself.
+        await publish(scoped, turn.userId, 'agent.contact_form', {
+          sessionId: turn.sessionId, turnId: turn.id, ...fields, status: 'saved',
+        });
+        return contact;
+      });
+    } catch (reason) {
+      if (!signal.aborted) await contactForm({ ...fields, status: 'failed' });
+      throw reason;
+    }
+  };
   const tools = [
-    define('list_contacts', 'Search saved contacts by name, username or full international phone number; an empty query lists contacts.',
+    define('show_contact_form', 'Show or replace the passive contact form while collecting a requested new contact or saved name change. Supply a full snapshot of known fields; null means not yet known. Only show phone numbers supplied by the user or verified by contact tools. Never show a username. This does not save anything.',
+      z.object({ operation: z.enum(['create', 'rename']), name: z.string().trim().min(1).max(80).nullable(),
+        identifier: z.string().trim().min(1).max(100).nullable() }).strict(), async input => {
+        const identifier = input.identifier === null ? null : normalizePhoneSearch(input.identifier);
+        await contactForm({ ...input, identifier, status: 'editing' });
+        return { requested: true, saved: false };
+      }),
+    define('dismiss_contact_form', 'Hide the contact form when the user cancels the contact task or moves on. This does not undo a saved contact.', empty, async () => {
+      await contactForm({ status: 'dismissed' });
+      return { requested: true };
+    }),
+    define('list_contacts', 'Search saved contacts by saved name or full international phone number; an empty query lists contacts.',
       z.object({ query: z.string().max(100) }).strict(), ({ query }) => messaging.contacts(turn.userId, query)),
     define('get_contact', 'Read a saved contact by its contact ID, including the registered user ID and name.',
       z.object({ contactId: uuid }).strict(), ({ contactId }) => messaging.contact(turn.userId, contactId)),
-    define('search_users', 'Find registered people by username prefix or exact full international phone number with country code (for example +1 202 555 0101). Never guess a country code or search a phone prefix. A result does not expose the person\'s phone number.',
+    define('search_users', 'Find registered people by exact full international phone number with country code (for example +1 202 555 0101). Never guess a country code or search a phone prefix. Results include the verified phone number.',
       z.object({ query: z.string().min(2).max(50) }).strict(), ({ query }) => messaging.searchUsers(turn.userId, query)),
     define('add_contact', 'Save a registered person as a contact when the user requests it.',
       z.object({ userId: uuid, name: z.string().min(1).max(80) }).strict(),
-      ({ userId, name }) => mutate(async (service, scoped) => {
+      async ({ userId, name }) => saveContact('create', await messaging.profile(userId), name, async (service, scoped) => {
         const [existing] = await scoped.query<{ id: string; name: string }>('SELECT id,name FROM contacts WHERE owner_id=$1 AND user_id=$2', [turn.userId, userId]);
         if (existing) {
           if (existing.name !== name) throw conflict('This person is already saved. Use rename_contact for a requested name change.');
@@ -92,8 +126,8 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
     define('rename_contact', 'Change only the saved display label of an existing contact when requested. Resolve its contact ID first. This does not change personal memory, a legal name, or a family relationship.',
       z.object({ contactId: uuid, name: z.string().trim().min(1).max(80) }).strict(), async ({ contactId, name }) => {
         const contact = await messaging.contact(turn.userId, contactId);
-        await review({ action: 'rename_contact', data: { ...await resolution(contact), name } });
-        return mutate(service => service.renameContact(turn.userId, contactId, name));
+        return saveContact('rename', contact, name, service => service.renameContact(turn.userId, contactId, name),
+          async () => review({ action: 'rename_contact', data: { ...await resolution(contact), name } }));
       }),
     define('list_memories', 'Read saved long-term knowledge. Empty query lists ALL kinds, including relationships. For semantic recall, inspect the supplied memory context or list memories rather than guessing a name. Follow next cursors to see further records. Contacts include their CURRENT label and stable IDs.',
       z.object({ query: z.string().trim().max(100).nullable(), contactId: uuid.nullable(), after: uuid.nullable() }).strict(),
@@ -273,7 +307,7 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       }),
   ];
   const allowed = agent === 'contacts'
-    ? tools.filter((tool) => ['list_contacts', 'get_contact', 'search_users', 'add_contact', 'rename_contact', 'list_memories', 'get_memory'].includes(tool.definition.name))
-    : agent === 'messaging' ? tools.filter((tool) => !['add_contact', 'rename_contact'].includes(tool.definition.name)) : [...tools, ...coordinator];
+    ? tools.filter((tool) => ['show_contact_form', 'dismiss_contact_form', 'list_contacts', 'get_contact', 'search_users', 'add_contact', 'rename_contact', 'list_memories', 'get_memory'].includes(tool.definition.name))
+    : agent === 'messaging' ? tools.filter((tool) => !['show_contact_form', 'dismiss_contact_form', 'add_contact', 'rename_contact'].includes(tool.definition.name)) : [...tools, ...coordinator];
   return new Map(allowed.map((tool) => [tool.definition.name, tool]));
 }

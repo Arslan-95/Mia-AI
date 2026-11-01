@@ -16,16 +16,18 @@ test('phone discovery matches only a full normalized international number and re
   assert.equal((await app.inject(`/v1/users?query=${encodeURIComponent('+12025550101')}`)).statusCode, 401);
   for (const query of ['+12025550101', '+1 (202) 555-0101', '001 202 555 0101']) {
     const response = await lookup(query); assert.equal(response.statusCode, 200, response.body);
-    assert.deepEqual(response.json(), [{ id: anna.user.id, username: 'lookup_anna', displayName: anna.user.displayName }]);
-    assert.ok(!response.body.includes('phoneNumber')); assert.ok(!response.body.includes('+12025550101'));
+    assert.deepEqual(response.json(), [{ id: anna.user.id, phoneNumber: anna.user.phoneNumber, displayName: anna.user.displayName }]);
+    assert.ok(!response.body.includes('username'));
   }
   for (const query of ['2025550101', '+1202', '+1202555%', '+12025550101 OR 1=1', '+012025550101', '+1202555010111111']) {
     const response = await lookup(query); assert.equal(response.statusCode, 400, query);
     assert.equal(response.json().error.code, 'INVALID_PHONE_NUMBER');
   }
   for (const query of ['+12025550100', '+12025550103', '+12025550199']) assert.deepEqual((await lookup(query)).json(), []);
-  assert.deepEqual((await lookup('@LOOKUP_AN')).json().map((value: { id: string }) => value.id), [anna.user.id]);
-  assert.deepEqual((await lookup('lookup_%')).json(), [], 'SQL wildcards stay literal');
+  for (const query of ['@LOOKUP_AN', 'lookup_anna', 'lookup_%', 'Anna']) {
+    const response = await lookup(query); assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error.code, 'INVALID_PHONE_NUMBER');
+  }
   await app.inject({ method: 'POST', url: '/v1/contacts', headers, payload: { userId: anna.user.id, name: 'Anna' } });
   const saved = await app.inject({ url: `/v1/contacts?query=${encodeURIComponent('+1 (202) 555-0101')}`, headers });
   assert.equal(saved.statusCode, 200, saved.body); assert.equal(saved.json()[0].id, anna.user.id);

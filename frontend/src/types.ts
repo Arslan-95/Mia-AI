@@ -1,10 +1,12 @@
-export type Profile = { id: string; username: string; displayName: string };
+import type { ContactForm } from './contactForm';
+
+export type Profile = { id: string; phoneNumber: string | null; displayName: string };
 export type VoiceState = { enabled: boolean; microphoneMuted: boolean; revision: number };
 export type MessageReferenceIdentity = { chatId: string; messageId: string; revision: number; focus?: { start: number; end: number } };
 export type MessageReference = MessageReferenceIdentity & { source: Message; recipient: Profile; displayFocus?: { start: number; end: number } };
 export type OriginalPlayback = { mediaId: string; operationId: string; state: 'preparing' | 'buffering' | 'playing' | 'paused' | 'finished' | 'stopped' | 'failed'; positionMs?: number; durationMs?: number };
 export type VoiceNote = { id: string; recipientId: string; durationMs: number };
-export type ClientContext = { route: string; revision: number; navigationSessionId?: string; previousRoute?: string; reference?: MessageReferenceIdentity; voice?: VoiceState; voiceNote?: VoiceNote };
+export type ClientContext = { route: string; revision: number; navigationSessionId?: string; previousRoute?: string; contactForm?: ContactForm | null; reference?: MessageReferenceIdentity; voice?: VoiceState; voiceNote?: VoiceNote };
 export type AssistantRequest = { clientTurnId: string; text: string; context: ClientContext };
 export type User = Profile & { phoneNumber: string; profileComplete: boolean };
 export type Session = { user: User; token: string; expiresAt: string };

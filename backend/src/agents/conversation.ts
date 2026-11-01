@@ -6,7 +6,7 @@ import type { AssistantState, Turn } from './state.js';
 // Revisions and microphone changes do not make an old card a new topic.
 function screenContext(context: ClientContext | null) {
   if (!context) return null;
-  return { route: context.route, ...(context.voiceNote ? { voiceNote: context.voiceNote } : {}), ...(context.reference ? { reference: {
+  return { route: context.route, ...(context.contactForm !== undefined ? { contactForm: context.contactForm } : {}), ...(context.voiceNote ? { voiceNote: context.voiceNote } : {}), ...(context.reference ? { reference: {
     chatId: context.reference.chatId, messageId: context.reference.messageId,
     ...(context.reference.focus ? { focus: context.reference.focus } : {}),
   } } : {}) };

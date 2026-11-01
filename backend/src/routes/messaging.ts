@@ -9,7 +9,6 @@ import type { Database } from '../db/database.js';
 
 export const id = z.uuid();
 const idParams = z.object({ id });
-const username = z.string().trim().toLowerCase().regex(/^[a-z][a-z0-9_]{2,29}$/);
 const text = z.string().trim().min(1).max(8000);
 export const contentSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('text'), text }).strict(),
@@ -38,8 +37,8 @@ export function registerMessagingRoutes(app: FastifyInstance, deps: {
   });
   app.get('/v1/me', async (request) => request.user);
   app.patch('/v1/me', async (request) => {
-    const input = z.object({ username, displayName: z.string().trim().min(1).max(80) }).strict().parse(request.body);
-    return auth.updateProfile(request.user.id, input.username, input.displayName);
+    const input = z.object({ displayName: z.string().trim().min(1).max(80) }).strict().parse(request.body);
+    return auth.updateProfile(request.user.id, input.displayName);
   });
   app.get('/v1/users', { preHandler: app.rateLimit({ max: 30, timeWindow: '1 minute' }) }, async (request) => {
     const { query } = z.object({ query: z.string().trim().min(2).max(50) }).parse(request.query);
@@ -52,6 +51,10 @@ export function registerMessagingRoutes(app: FastifyInstance, deps: {
   app.post('/v1/contacts', async (request, reply) => {
     const input = z.object({ userId: id, name: z.string().trim().min(1).max(80).optional() }).strict().parse(request.body);
     return reply.code(201).send(await messaging.addContact(request.user.id, input.userId, input.name));
+  });
+  app.patch('/v1/contacts/:id', async request => {
+    const { name } = z.object({ name: z.string().trim().min(1).max(80) }).strict().parse(request.body);
+    return messaging.renameContact(request.user.id, idParams.parse(request.params).id, name);
   });
   app.get('/v1/chats', async (request) => messaging.chats(request.user.id));
   app.get('/v1/chats/:id', async request => messaging.chat(request.user.id, idParams.parse(request.params).id));

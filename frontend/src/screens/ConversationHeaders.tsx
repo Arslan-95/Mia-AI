@@ -31,20 +31,27 @@ export function ChatsHeader({ unreadCount, onNewChat, onSettings }: {
   </View>;
 }
 
-export function ConversationHeader({ name, username, headingRef, onBack }: {
-  name: string; username: string; headingRef: React.Ref<Text>; onBack(): void;
+export function ConversationHeader({ name, phoneNumber, headingRef, onBack, onOpenContact }: {
+  name: string; phoneNumber: string | null; headingRef: React.Ref<Text>; onBack(): void; onOpenContact?(): void;
 }) {
-  const { colors } = useUi();
+  const { colors, s } = useUi();
+  const [focused, setFocused] = useState(false);
   const { fontScale, width } = useWindowDimensions();
   const largeText = fontScale >= 1.4;
   return <View style={[styles.conversation, { paddingHorizontal: width < 375 ? 12 : 18 }]}>
     <View style={styles.identityRow}>
       <HeaderButton label="Back" icon="chevron-back" onPress={onBack} />
+      <Pressable testID="conversation-contact" accessibilityRole={onOpenContact ? 'button' : undefined} accessible={!!onOpenContact}
+        accessibilityLabel={`Contact details for ${name}`} accessibilityHint="View phone number and change the saved contact name."
+        disabled={!onOpenContact} onPress={onOpenContact} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+        style={({ pressed }) => [styles.contact, pressed && { opacity: .65 }, focused && s.focus]}>
       <View style={[styles.portrait, { borderColor: '#B49ADD30', backgroundColor: colors.background }]}><Avatar name={name} size={44} round /></View>
       <View style={styles.identity}>
         <Text ref={headingRef} accessibilityRole="header" numberOfLines={largeText ? 2 : 1} style={[styles.name, { color: colors.ink }]}>{name}</Text>
-        <Text numberOfLines={largeText ? 2 : 1} style={[styles.username, { color: colors.textTertiary }]}>@{username}</Text>
+        <Text numberOfLines={largeText ? 2 : 1} style={[styles.phoneNumber, { color: colors.textTertiary }]}>{phoneNumber || 'Phone number unavailable'}</Text>
       </View>
+      {!!onOpenContact && <Icon name="chevron-forward" size={16} color={colors.muted} />}
+      </Pressable>
     </View>
     <View pointerEvents="none" style={[styles.rule, { backgroundColor: colors.line }]}><View style={styles.ruleLight} /></View>
   </View>;
@@ -62,10 +69,11 @@ const styles = StyleSheet.create({
   button: { width: 44, height: 44, flexShrink: 0, borderRadius: 22, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center' },
   conversation: { flexShrink: 0, paddingTop: 8, backgroundColor: 'transparent' },
   identityRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingBottom: 15 },
+  contact: { flex: 1, minWidth: 0, minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: 12 },
   portrait: { width: 54, height: 54, borderRadius: 27, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center', marginLeft: 1 },
   identity: { flex: 1, minWidth: 0, gap: 3 },
   name: { fontSize: 19, lineHeight: 25, fontWeight: '600', letterSpacing: -.5 },
-  username: { fontSize: 11, lineHeight: 16, letterSpacing: .3 },
+  phoneNumber: { fontSize: 11, lineHeight: 16, letterSpacing: .3 },
   rule: { height: StyleSheet.hairlineWidth, marginLeft: 56, opacity: .6 },
   ruleLight: { width: 38, height: StyleSheet.hairlineWidth, backgroundColor: '#BDA2E8', opacity: .65 },
 });

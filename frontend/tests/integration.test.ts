@@ -11,7 +11,6 @@ test('real backend: phone OTP, profile, contacts, stable retries, pagination, re
   const base = process.env.MIA_TEST_API!;
   const developmentCode = process.env.MIA_TEST_OTP!;
   assert.match(developmentCode, /^\d{6}$/, 'Provide the configured server development code through MIA_TEST_OTP.');
-  const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
   const phonePrefix = '+1999' + String(Date.now()).slice(-8);
   const publicApi = new Api(base, null);
 
@@ -23,9 +22,9 @@ test('real backend: phone OTP, profile, contacts, stable retries, pagination, re
     assert.equal(session.user.phoneNumber, phoneNumber);
     assert.equal(session.user.profileComplete, false);
     const api = new Api(base, session);
-    const user = await api.request<User>('/v1/me', 'PATCH', { username: role + suffix, displayName: `Frontend QA ${role}` });
+    const user = await api.request<User>('/v1/me', 'PATCH', { displayName: `Frontend QA ${role}` });
     assert.equal(user.profileComplete, true);
-    assert.equal((await api.request<User>('/v1/me')).username, role + suffix);
+    assert.equal((await api.request<User>('/v1/me')).phoneNumber, phoneNumber);
     return { ...session, user };
   }
 
@@ -39,7 +38,7 @@ test('real backend: phone OTP, profile, contacts, stable retries, pagination, re
     assert.equal(login.user.id, sender.user.id); assert.equal(login.user.profileComplete, true);
     await new Api(base, login).request('/v1/auth/logout', 'POST');
     assert.equal((await api.request<Profile>('/v1/me')).id, sender.user.id);
-    assert.equal((await api.request<Profile[]>(`/v1/users?query=recipient${suffix}`))[0]?.id, recipient.user.id);
+    assert.equal((await api.request<Profile[]>(`/v1/users?query=${encodeURIComponent(recipient.user.phoneNumber)}`))[0]?.id, recipient.user.id);
     assert.equal((await api.request<Contact>('/v1/contacts', 'POST', { userId: recipient.user.id })).id, recipient.user.id);
     const chat = await api.request<{ id: string }>('/v1/chats', 'POST', { recipientId: recipient.user.id });
     const input = { clientMessageId: randomUUID(), content: { kind: 'text', text: 'Frontend integration hello.' } };

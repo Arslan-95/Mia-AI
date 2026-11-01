@@ -4,7 +4,7 @@ import { AppError, conflict, notFound, throwIfAborted } from './errors.js';
 import { publish } from './events.js';
 import { isPhoneSearch, normalizePhoneSearch } from './phone.js';
 
-export type Profile = { id: string; username: string; displayName: string };
+export type Profile = { id: string; phoneNumber: string | null; displayName: string };
 export type Contact = Profile & { contactId: string; name: string };
 export type Message = { id: string; chatId: string; senderId: string; kind: 'text' | 'voice';
   text: string | null; mediaId: string | null; createdAt: Date; clientMessageId?: string; durationMs?: number | null };
@@ -15,7 +15,7 @@ type Content = { kind: 'text' | 'voice'; text?: string; mediaId?: string };
 const messageColumns = 'id, chat_id AS "chatId", sender_id AS "senderId", kind, text, media_id AS "mediaId", created_at AS "createdAt", client_id AS "clientMessageId", (SELECT duration_ms FROM media WHERE media.id=media_id) AS "durationMs"';
 const draftColumns = `id, recipient_id AS "recipientId", kind, text, media_id AS "mediaId", version, state,
   reviewed_version AS "reviewedVersion", message_id AS "messageId", updated_at AS "updatedAt",
-  (SELECT json_build_object('id',u.id,'username',u.username,'displayName',COALESCE(c.name,u.display_name))
+  (SELECT json_build_object('id',u.id,'phoneNumber',u.phone_number,'displayName',COALESCE(c.name,u.display_name))
    FROM users u LEFT JOIN contacts c ON c.user_id = u.id AND c.owner_id = message_drafts.owner_id
    WHERE u.id = message_drafts.recipient_id) AS recipient`;
 
@@ -23,22 +23,17 @@ export class MessagingService {
   constructor(private readonly db: Database) {}
 
   async searchUsers(ownerId: string, query: string) {
-    if (isPhoneSearch(query)) {
-      return this.db.query<Profile>(`SELECT id, username, display_name AS "displayName" FROM users
-        WHERE id <> $1 AND profile_complete = true AND phone_number = $2 LIMIT 1`,
-      [ownerId, normalizePhoneSearch(query)]);
-    }
-    return this.db.query<Profile>(`SELECT id, username, display_name AS "displayName" FROM users
-      WHERE id <> $1 AND profile_complete = true AND username LIKE $2 ESCAPE '\\' ORDER BY username LIMIT 20`,
-    [ownerId, `${escapeLike(query.trim().replace(/^@/, '').toLowerCase())}%`]);
+    const phoneNumber = normalizePhoneSearch(query);
+    return this.db.query<Profile>(`SELECT id, phone_number AS "phoneNumber", display_name AS "displayName" FROM users
+      WHERE id <> $1 AND profile_complete = true AND phone_number = $2 LIMIT 1`, [ownerId, phoneNumber]);
   }
 
   async contacts(ownerId: string, query = '') {
     const phone = isPhoneSearch(query) ? normalizePhoneSearch(query) : null;
-    return this.db.query<Contact>(`SELECT u.id, u.username, u.display_name AS "displayName", c.id AS "contactId", c.name
+    return this.db.query<Contact>(`SELECT u.id, u.phone_number AS "phoneNumber", u.display_name AS "displayName", c.id AS "contactId", c.name
       FROM contacts c JOIN users u ON u.id = c.user_id WHERE c.owner_id = $1
       AND (($3::text IS NOT NULL AND u.phone_number = $3) OR ($3::text IS NULL
-        AND (c.name ILIKE $2 ESCAPE '\\' OR u.username ILIKE $2 ESCAPE '\\' OR u.display_name ILIKE $2 ESCAPE '\\')))
+        AND (c.name ILIKE $2 ESCAPE '\\' OR u.display_name ILIKE $2 ESCAPE '\\')))
       ORDER BY c.name, c.id LIMIT 50`, [ownerId, `%${escapeLike(query)}%`, phone]);
   }
 
@@ -46,16 +41,16 @@ export class MessagingService {
     if (ownerId === userId) throw conflict('You cannot add yourself as a contact.');
     const user = await this.profile(userId);
     return this.db.transaction(async (sql) => {
-      const [contact] = await sql.query<{ id: string }>(`INSERT INTO contacts(id, owner_id, user_id, name)
-        VALUES ($1,$2,$3,$4) ON CONFLICT(owner_id,user_id) DO UPDATE SET name = EXCLUDED.name RETURNING id`,
-      [randomUUID(), ownerId, userId, name ?? user.displayName]);
+      const [contact] = await sql.query<{ id: string; name: string }>(`INSERT INTO contacts(id, owner_id, user_id, name)
+        VALUES ($1,$2,$3,$4) ON CONFLICT(owner_id,user_id) DO UPDATE SET name = COALESCE($5::text,contacts.name) RETURNING id,name`,
+      [randomUUID(), ownerId, userId, name ?? user.displayName, name ?? null]);
       await publish(sql, ownerId, 'contact.updated', { contactId: contact?.id });
-      return { ...user, contactId: contact!.id, name: name ?? user.displayName };
+      return { ...user, contactId: contact!.id, name: contact!.name };
     });
   }
 
   async contact(ownerId: string, contactId: string) {
-    const [contact] = await this.db.query<Contact>(`SELECT u.id,u.username,u.display_name AS "displayName",c.id AS "contactId",c.name
+    const [contact] = await this.db.query<Contact>(`SELECT u.id,u.phone_number AS "phoneNumber",u.display_name AS "displayName",c.id AS "contactId",c.name
       FROM contacts c JOIN users u ON u.id = c.user_id WHERE c.owner_id = $1 AND c.id = $2`, [ownerId, contactId]);
     if (!contact) throw notFound();
     return contact;
@@ -72,7 +67,7 @@ export class MessagingService {
   }
 
   async profile(userId: string): Promise<Profile> {
-    const [user] = await this.db.query<Profile>('SELECT id, username, display_name AS "displayName" FROM users WHERE id = $1', [userId]);
+    const [user] = await this.db.query<Profile>('SELECT id, phone_number AS "phoneNumber", display_name AS "displayName" FROM users WHERE id = $1', [userId]);
     if (!user) throw notFound();
     return user;
   }
@@ -95,7 +90,7 @@ export class MessagingService {
 
   async chats(ownerId: string, chatId?: string) {
     return this.db.query<{ id: string; recipient: Profile; lastMessage: Message | null; unreadCount: number }>(`
-      SELECT c.id, json_build_object('id', u.id, 'username', u.username,
+      SELECT c.id, json_build_object('id', u.id, 'phoneNumber', u.phone_number,
         'displayName', COALESCE(ct.name, u.display_name)) AS recipient,
         (SELECT json_build_object('id',m.id,'senderId',m.sender_id,'kind',m.kind,'text',m.text,'mediaId',m.media_id,'createdAt',m.created_at)
           FROM messages m WHERE m.chat_id = c.id ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS "lastMessage",

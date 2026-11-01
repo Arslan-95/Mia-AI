@@ -105,7 +105,7 @@ test('raw route context stays durable while verified visible recipient reaches c
   assert.equal(completed, true);
   assert.ok(seen.some(entry => entry.role === 'mia')); assert.ok(seen.some(entry => entry.role === 'messaging'));
   for (const entry of seen) assert.deepEqual(entry.context, { ...payload.context, visibleRecipient: {
-    id: recipient.user.id, username: recipient.user.username, displayName: recipient.user.displayName,
+    id: recipient.user.id, phoneNumber: recipient.user.phoneNumber, displayName: recipient.user.displayName,
   } });
   assert.deepEqual((await state.history(owner.user.id, session.id))[0]?.context, payload.context);
   assert.equal((await context.app.inject({ method: 'POST', url, headers, payload })).statusCode, 200);

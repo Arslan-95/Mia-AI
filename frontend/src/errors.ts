@@ -10,7 +10,6 @@ const messages: Record<string, string> = {
   INVALID_OTP: 'That code is incorrect or has expired. Try again or request a new code.',
   OTP_LOCKED: 'Too many incorrect attempts. Request a new code to continue.',
   OTP_RATE_LIMIT: 'Please wait a little before requesting another code.',
-  USERNAME_TAKEN: 'That username is already taken. Choose another one.',
   INVALID_PHONE_NUMBER: 'Enter the full phone number with country code, for example +1 202 555 0101.',
   PHONE_AUTH_UNAVAILABLE: 'Sign-in is temporarily unavailable. Please try again later.',
   AGENT_UNAVAILABLE: 'Mia is temporarily unavailable. Please try again shortly.',

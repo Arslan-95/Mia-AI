@@ -12,8 +12,11 @@ const routeSchema = z.string().max(100).refine(route => {
 export const voiceStateSchema = z.object({ enabled: z.boolean(), microphoneMuted: z.boolean(), revision: z.int().nonnegative() }).strict();
 export const referenceSchema = z.object({ chatId: z.uuid(), messageId: z.uuid(), revision: z.int().nonnegative(), focus: z.object({ start: z.int().nonnegative(), end: z.int().positive() }).strict().optional() }).strict();
 export const voiceNoteSchema = z.object({ id: z.uuid(), recipientId: z.uuid(), durationMs: z.int().nonnegative().max(119000) }).strict();
+export const contactFormSchema = z.object({ turnId: z.uuid(), operation: z.enum(['create', 'rename']),
+  name: z.string().max(80).nullable(), identifier: z.string().max(100).nullable(),
+  status: z.enum(['editing', 'saving', 'saved', 'failed', 'interrupted']) }).strict();
 export const clientContextSchema = z.object({ route: routeSchema, revision: z.int().nonnegative(), navigationSessionId: z.uuid().optional(), voice: voiceStateSchema.optional(),
-  voiceNote: voiceNoteSchema.optional(), reference: referenceSchema.optional(), previousRoute: routeSchema.optional() }).strict();
+  contactForm: contactFormSchema.nullable().optional(), voiceNote: voiceNoteSchema.optional(), reference: referenceSchema.optional(), previousRoute: routeSchema.optional() }).strict();
 export type ClientContext = z.infer<typeof clientContextSchema>;
 export const deviceResultSchema = z.object({ message: z.string().max(500).optional(), mediaId: z.uuid().optional(),
   code: z.string().regex(/^[A-Z][A-Z0-9_]{0,79}$/).optional(),
@@ -25,6 +28,7 @@ export function sameContext(left: ClientContext | null, right: ClientContext | n
   const a = left?.reference, b = right?.reference;
   // Match values, not JSON key order after database serialization. Keep every
   // navigation/reference revision boundary; voice controls validate separately.
+  // Contact form fields are observational data, not a navigation/action boundary.
   return left?.navigationSessionId === right?.navigationSessionId && left?.route === right?.route && left?.revision === right?.revision && left?.previousRoute === right?.previousRoute
     && left?.voiceNote?.id === right?.voiceNote?.id && left?.voiceNote?.recipientId === right?.voiceNote?.recipientId && left?.voiceNote?.durationMs === right?.voiceNote?.durationMs
     && a?.chatId === b?.chatId && a?.messageId === b?.messageId && a?.revision === b?.revision
@@ -33,6 +37,8 @@ export function sameContext(left: ClientContext | null, right: ClientContext | n
 
 export async function assertContextAccess(sql: Sql, userId: string, context: ClientContext | null) {
   if (!context) return;
+  if (context.contactForm && !(await sql.query(`SELECT 1 FROM assistant_turns t JOIN assistant_sessions s ON s.id=t.session_id
+    WHERE t.id=$1 AND s.user_id=$2`, [context.contactForm.turnId, userId])).length) throw notFound();
   if (context.voiceNote && (context.voiceNote.recipientId === userId || !(await sql.query(`SELECT 1 FROM chat_members own
     JOIN chat_members recipient ON recipient.chat_id=own.chat_id WHERE own.user_id=$1 AND recipient.user_id=$2 LIMIT 1`,
     [userId, context.voiceNote.recipientId])).length)) throw notFound();

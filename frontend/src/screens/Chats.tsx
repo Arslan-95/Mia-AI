@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AccessibilityInfo, Pressable, ScrollView, StyleSheet, Text, View, findNodeHandle, useWindowDimensions } from 'react-native';
+import { AccessibilityInfo, Keyboard, Pressable, ScrollView, StyleSheet, Text, View, findNodeHandle, useWindowDimensions } from 'react-native';
 import type { Mia } from '../useMia';
 import { Avatar, Button, Empty, Icon, SearchField, agentColors, classicColors, useUi } from '../ui';
 import { Reveal } from '../motion';
@@ -9,6 +9,7 @@ import { ChatBackGesture } from './ChatBackGesture';
 import { MessageList } from './MessageList';
 import { ChatComposer } from './ChatComposer';
 import { ChatsHeader, ConversationHeader } from './ConversationHeaders';
+import { ContactDetails } from './ContactDetails';
 
 export function Chats({ mia, bottomInset, overlayInset = 0, preview = false, renderBackScreen }: {
   mia: Mia; bottomInset: number; overlayInset?: number; preview?: boolean; renderBackScreen?(): React.ReactNode;
@@ -20,11 +21,13 @@ export function Chats({ mia, bottomInset, overlayInset = 0, preview = false, ren
   const chat = mia.chats.find(item => item.id === mia.activeChatId);
   const heading = useRef<Text>(null);
   const [query, setQuery] = useState('');
+  const [contactDetailsChatId, setContactDetailsChatId] = useState<string | null>(null);
+  useEffect(() => { setContactDetailsChatId(null); }, [chat?.id, mia.aiMode, preview]);
   useEffect(() => {
     if (chat && !mia.aiMode && !preview) { const node = findNodeHandle(heading.current); if (node) AccessibilityInfo.setAccessibilityFocus(node); }
   }, [chat?.id, preview]);
   const searchQuery = query.trim().toLowerCase();
-  const matchingChats = mia.chats.filter(item => `${item.recipient.displayName} ${item.recipient.username}`.toLowerCase().includes(searchQuery));
+  const matchingChats = mia.chats.filter(item => `${item.recipient.displayName} ${item.recipient.phoneNumber ?? ''}`.toLowerCase().includes(searchQuery));
   if (!chat) return <View style={{ flex: 1 }}><Reveal style={{ flex: 1 }}><ScrollView contentContainerStyle={[c.content, { paddingHorizontal: width < 375 ? 16 : 20, paddingBottom: 20 + overlayInset }]} keyboardShouldPersistTaps="handled">
     <ChatsHeader unreadCount={mia.chats.reduce((sum, item) => sum + item.unreadCount, 0)} onNewChat={() => void mia.navigate('people')} onSettings={() => void mia.navigate('settings')} />
     <SearchField label="Search chats" placeholder="Search chats" value={query} onChangeText={setQuery} />
@@ -41,7 +44,8 @@ export function Chats({ mia, bottomInset, overlayInset = 0, preview = false, ren
   const messages = mia.messages[chat.id] ?? [];
   const drafts = mia.drafts.filter(draft => draft.recipientId === chat.recipient.id);
   const conversation = <>
-    <ConversationHeader name={chat.recipient.displayName} username={chat.recipient.username} headingRef={heading} onBack={() => void mia.navigateBack()} />
+    <ConversationHeader name={chat.recipient.displayName} phoneNumber={chat.recipient.phoneNumber} headingRef={heading} onBack={() => void mia.navigateBack()}
+      onOpenContact={!mia.aiMode && !preview ? () => { Keyboard.dismiss(); setContactDetailsChatId(chat.id); } : undefined} />
     <MessageList key={`${mia.session!.user.id}/${chat.id}`} userId={mia.session!.user.id} chatId={chat.id} positions={mia.chatScrollPositions} scrollRequest={mia.scrollRequests[chat.id]} passive={preview} scrollEnabled={!preview}
       data={messages} onVisibleMessages={mia.prefetchVoiceMessages} keyExtractor={item => item.id} contentContainerStyle={[c.messages, overlayInset > 0 && { paddingTop: 16 + overlayInset }]} ItemSeparatorComponent={() => <View style={c.messageGap} />} keyboardShouldPersistTaps="handled" scrollEventThrottle={32}
       ListFooterComponent={mia.hasOlder[chat.id] ? <Button quiet label="Load earlier messages" onPress={() => void mia.loadMessages(chat.id, messages[messages.length - 1]?.id).catch(mia.fail)} /> : null}
@@ -58,6 +62,9 @@ export function Chats({ mia, bottomInset, overlayInset = 0, preview = false, ren
       </View>} />
     {!mia.aiMode && <View style={{ paddingHorizontal: 16, paddingTop: 8 }}><ConversationStatus error={mia.error} draft={drafts[0]} recipient={chat.recipient.displayName} onDismiss={() => mia.setError('')} onOpenDraft={() => void mia.navigate('drafts')} /></View>}
     {!mia.aiMode && <ChatComposer key={chat.id} mia={mia} chatId={chat.id} recipient={chat.recipient.displayName} bottomInset={bottomInset} />}
+    {!mia.aiMode && !preview && contactDetailsChatId === chat.id && <ContactDetails key={`contact-details/${mia.session!.user.id}/${chat.id}`} profile={chat.recipient}
+      savedName={mia.contacts.find(contact => contact.id === chat.recipient.id)?.name}
+      onSave={name => mia.saveContactName(chat.recipient, name)} onClose={() => setContactDetailsChatId(null)} />}
   </>;
   return preview ? <View style={{ flex: 1, backgroundColor: colors.background }}>{conversation}</View>
     : <ChatBackGesture key={chat.id} chatId={chat.id} navigationRevision={mia.navigationRevision} enabled={!mia.aiMode} onBack={() => void mia.navigateBack()} renderBackScreen={renderBackScreen}>{conversation}</ChatBackGesture>;

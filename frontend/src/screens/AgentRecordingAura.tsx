@@ -31,7 +31,7 @@ export function AgentRecordingAura({ active, cancelReady, progress, diameter, ra
     </Animated.View>
     {children}
     <Animated.View style={[styles.coreTint, { width: diameter, height: diameter, borderRadius: diameter / 2, opacity: ready }]} />
-    <Animated.View testID="agent-recording-mic" style={[styles.symbol, { opacity: active ? ready.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }) : 0 }]}><Icon name="mic" size={22} color="#F5E9FF" /></Animated.View>
+    <Animated.View testID="agent-recording-mic" style={[styles.symbol, { opacity: Animated.multiply(reveal, ready.interpolate({ inputRange: [0, 1], outputRange: [1, 0] })) }]}><Icon name="mic" size={22} color="#F5E9FF" /></Animated.View>
     <Animated.View testID="agent-recording-delete" style={[styles.symbol, { opacity: ready, transform: [{ scale: ready.interpolate({ inputRange: [0, 1], outputRange: [.7, 1] }) }] }]}><Icon name="trash-outline" size={25} color="#FFE3ED" /></Animated.View>
   </View>;
 }

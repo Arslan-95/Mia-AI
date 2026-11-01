@@ -115,8 +115,7 @@ export function Auth({ mia }: { mia: Mia }) {
 
 export function CompleteProfile({ mia }: { mia: Mia }) {
   const [displayName, setDisplayName] = useState('');
-  const [username, setUsername] = useState('');
-  const valid = !!displayName.trim() && /^[a-z][a-z0-9_]{2,29}$/.test(username);
+  const valid = !!displayName.trim();
   return (
     <ScrollView contentContainerStyle={a.container} keyboardShouldPersistTaps="handled">
       <View style={a.brand}><Wordmark /></View>
@@ -127,10 +126,8 @@ export function CompleteProfile({ mia }: { mia: Mia }) {
       </View>
       <View style={a.form}>
         <Field label="Your name" value={displayName} onChangeText={setDisplayName} autoComplete="name" textContentType="name" maxLength={80} editable={!mia.busy} />
-        <Field label="Username" value={username} onChangeText={value => setUsername(value.toLowerCase())} autoCapitalize="none" autoCorrect={false} maxLength={30} editable={!mia.busy} />
-        <Text style={s.small}>People can find you by username. Use 3–30 lowercase letters, numbers, or underscores, starting with a letter.</Text>
         {!!mia.error && <Notice error>{mia.error}</Notice>}
-        <Button label="Start connecting" icon="arrow-forward" disabled={!valid} loading={mia.busy} onPress={() => void mia.completeProfile(username, displayName.trim())} />
+        <Button label="Start connecting" icon="arrow-forward" disabled={!valid} loading={mia.busy} onPress={() => void mia.completeProfile(displayName.trim())} />
         <Button quiet label="Use a different phone number" disabled={mia.busy} onPress={() => void mia.logout().catch(mia.fail)} />
       </View>
     </ScrollView>

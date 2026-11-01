@@ -420,7 +420,7 @@ test('WebSocket text and recognized speech carry authorized route snapshots to t
   assert.deepEqual((voice.turn as { context: unknown }).context, voiceContext);
   await waitFor(() => snapshots.length === 2 || undefined);
   assert.deepEqual(snapshots, [{ ...textContext, visibleRecipient: {
-    id: bob.user.id, username: bob.user.username, displayName: bob.user.displayName,
+    id: bob.user.id, phoneNumber: bob.user.phoneNumber, displayName: bob.user.displayName,
   } }, voiceContext]);
 });
 

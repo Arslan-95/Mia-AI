@@ -27,7 +27,7 @@ const sources: Record<string, string> = {
     } };
     export const Platform = { OS: 'ios' };
     export const useWindowDimensions = () => n.dimensions;
-    export const PanResponder = { create: handlers => { n.backGesture = handlers; return { panHandlers: {} }; } };
+    export const PanResponder = { create: handlers => { n.backGesture = handlers; n.panResponders.push(handlers); return { panHandlers: {} }; } };
     export const Easing = { inOut: value => value, sin: x => x, linear: x => x, bezier: () => x => x };
     const animation = (config, value) => {
       let stopped = false, completed = false;
@@ -39,7 +39,7 @@ const sources: Record<string, string> = {
         } else finish();
       } }, stop() { stopped = true; } };
     };
-    export const Animated = { add: () => 0, Value: class { constructor(value) { this.value = value; } setValue(value) { this.value = value; } stopAnimation() {} interpolate() { return 0; } }, View: 'AnimatedView', loop: child => {
+    export const Animated = { add: () => 0, multiply: () => 0, Value: class { constructor(value) { this.value = value; } setValue(value) { this.value = value; } stopAnimation(callback) { callback?.(this.value); } interpolate() { return 0; } }, View: 'AnimatedView', loop: child => {
       const loop = { child, started: false, stopped: false }; n.loops.push(loop);
       return { start() { loop.started = true; }, stop() { loop.stopped = true; } };
     }, sequence: children => ({ ...animation(), children }), timing: (value, config) => { n.animations.push(config); return animation(config, value); }, spring: (value, config) => animation(config, value) };
@@ -155,7 +155,7 @@ const sources: Record<string, string> = {
     }`,
 };
 const bundle = build({
-  stdin: { contents: `export { useMia } from './src/useMia'; export { default as App } from './src/App'; export { UiProvider, Button } from './src/ui'; export { Reveal } from './src/motion'; export { MessageReferenceCard } from './src/screens/MessageReferenceCard'; export { VoiceNoteBubble } from './src/screens/VoiceNoteBubble';`, resolveDir: root },
+  stdin: { contents: `export { useMia } from './src/useMia'; export { default as App } from './src/App'; export { UiProvider, Button } from './src/ui'; export { Reveal } from './src/motion'; export { ContactFormModal } from './src/screens/ContactFormModal'; export { MessageReferenceCard } from './src/screens/MessageReferenceCard'; export { VoiceNoteBubble } from './src/screens/VoiceNoteBubble';`, resolveDir: root },
   bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react'],
   define: { 'process.env.EXPO_PUBLIC_API_URL': JSON.stringify('http://mia.test') },
   plugins: [{ name: 'native-test', setup(build) {
@@ -258,7 +258,7 @@ test('retained cards allow subsequent reordered-context actions, same-source reu
     assert.equal(result('no-space').result.stage, 'presentation'); assert.equal(result('no-space').result.presentationConfirmed, false);
     assert.equal(result('no-space').result.reference, null);
     assert.equal(h.n.frames.filter(frame => frame.type === 'speech.request').length, speechRequests, 'failed presentation never starts narration');
-    h.n.savedChats.push({ ...chat, id: 'ben', recipient: { ...chat.recipient, id: 'ben-user', displayName: 'Ben', username: 'ben' } });
+    h.n.savedChats.push({ ...chat, id: 'ben', recipient: { ...chat.recipient, id: 'ben-user', displayName: 'Ben', phoneNumber: '+12025550102' } });
     await command(next, 'open-ben', 'open_chat', { chatId: 'ben' }, 9);
     await h.wait(() => !!result('open-ben'));
     assert.equal(result('open-ben').success, true); assert.equal(h.mia.activeChatId, 'ben'); assert.equal(h.mia.messageReference, null);
@@ -361,7 +361,7 @@ test('shutter replacement finishes the old card first, coalesces requests and ac
   let probe: ReactTestRenderer | undefined;
   const presented: number[] = [];
   const reference = (id: string, text: string, revision: number): MessageReference => ({
-    chatId: 'anna', messageId: id, revision, recipient: { id: 'recipient', username: 'anna', displayName: 'Anna' },
+    chatId: 'anna', messageId: id, revision, recipient: { id: 'recipient', phoneNumber: '+12025550101', displayName: 'Anna' },
     source: { id, chatId: 'anna', senderId: 'recipient', kind: 'text', text, mediaId: null, createdAt: '2026-10-30T12:00:00Z' },
   });
   const sample = (source: MessageReference | null, dismissalRevision?: number) => React.createElement(h.components.MessageReferenceCard, {
@@ -453,7 +453,7 @@ test('shutter switches to a short whole-card fade under Reduce Motion without ac
     await act(async () => { h.n.reducedMotion = true; for (const handler of h.n.motionHandlers) handler(true); });
     h.n.holdAnimation = true;
     const source: MessageReference = {
-      chatId: 'anna', messageId: 'reduced', revision: 8, recipient: { id: 'recipient', username: 'anna', displayName: 'Anna' },
+      chatId: 'anna', messageId: 'reduced', revision: 8, recipient: { id: 'recipient', phoneNumber: '+12025550101', displayName: 'Anna' },
       source: { id: 'reduced', chatId: 'anna', senderId: 'recipient', kind: 'text', text: 'Still readable.', mediaId: null, createdAt: '2026-10-30T12:00:00Z' },
     };
     await act(async () => { probe = create(React.createElement(h.components.MessageReferenceCard, { source, userId: 'user', playback: null, onPresented: revision => presented.push(revision) })); });
@@ -508,12 +508,16 @@ test('original recording reports real completion and stop or mute bypass the pre
     await command('input-mute', 'set_microphone_muted', { muted: true });
     await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/input-mute/result'));
     assert.equal(h.mia.originalPlayback?.state, 'playing', 'input mute cannot mark original audio finished');
+    const core = () => h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'MiaCore')[0]!;
+    assert.equal(core().props.phase, 'speaking');
+    assert.equal(core().props.microphoneMuted, true, 'original playback keeps input mute visible on the orb');
     const nativeStarts = h.n.nativeStarts;
     const playbackCompletion = h.n.playback;
     await command('input-unmute', 'set_microphone_muted', { muted: false });
     await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/input-unmute/result'));
     assert.equal(h.n.nativeStarts, nativeStarts, 'unmute defers native microphone acquisition until original media releases Expo audio');
     assert.equal(h.n.playback, playbackCompletion); assert.equal(h.mia.originalPlayback?.state, 'playing');
+    assert.equal(core().props.microphoneMuted, false);
     await act(async () => { h.n.playback!(); });
     await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/original-one/result'));
     assert.equal(h.mia.originalPlayback?.state, 'finished');
@@ -531,9 +535,9 @@ test('original recording reports real completion and stop or mute bypass the pre
     assert.equal(h.mia.voiceFault, false, 'original media handoff preserves the native response controller');
   } finally { await h.close(); }
 });
-const session = { token: 'token', expiresAt: '2099-01-01', user: { id: 'user', username: 'me', displayName: 'Me', phoneNumber: '+15550000000', profileComplete: true } };
+const session = { token: 'token', expiresAt: '2099-01-01', user: { id: 'user', displayName: 'Me', phoneNumber: '+15550000000', profileComplete: true } };
 const assistantSession = { id: 'assistant', generation: 0, activeChatId: null };
-const chat = { id: 'anna', recipient: { id: 'recipient', username: 'anna', displayName: 'Anna' }, unreadCount: 0, lastMessage: null };
+const chat = { id: 'anna', recipient: { id: 'recipient', phoneNumber: '+12025550101', displayName: 'Anna' }, unreadCount: 0, lastMessage: null };
 
 async function mount(mode = false, renderApp = false, nativeAvailable = false, holdStartup = false) {
   const code = (await bundle).outputFiles[0]!.text;
@@ -553,6 +557,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     holdNoteStart: false, releaseNoteStart: null as (() => void) | null, failSend: false, failContacts: false, failRecordingCleanup: false,
     savedPcm: null as Uint8Array | null, playerPaused: false, holdPlayerPause: false, releasePlayerPause: null as (() => void) | null, scrollOffsets: [] as { offset: number; animated: boolean }[],
     holdSend: false, releaseSend: null as (() => void) | null,
+    failContactSave: false, holdContactSave: false, releaseContactSave: null as (() => void) | null,
     holdMediaRead: false, releaseMediaRead: null as (() => void) | null,
     appStateHandlers: new Set<(state: string) => void>(), announcements: [] as string[], vibrations: 0,
     dimensions: { width: 390, height: 844, scale: 3, fontScale: 1 }, reducedMotion: false,
@@ -560,6 +565,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     loops: [] as { child: any; started: boolean; stopped: boolean }[],
     keyboardHandlers: new Map<string, () => void>(), keyboardDismissals: 0, insets: { top: 47, bottom: 34, left: 0, right: 0 },
     backGesture: null as Record<string, (...args: any[]) => any> | null, holdAnimation: false, finishAnimation: null as (() => void) | null,
+    panResponders: [] as Record<string, (...args: any[]) => any>[],
     pendingAnimations: [] as { config: { duration: number; toValue: number; delay?: number; useNativeDriver: boolean; isInteraction?: boolean }; finish(): void; active(): boolean }[],
     savedContacts: [] as Contact[],
     savedDrafts: [] as Draft[],
@@ -602,7 +608,16 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
       });
       return response([chat.recipient]);
     }
-    if (path === '/v1/contacts' && method === 'POST') { const contact = { ...chat.recipient, name: 'Anna', contactId: 'contact-anna' }; if (!n.savedContacts.length) n.savedContacts.push(contact); return response(contact); }
+    if ((path === '/v1/contacts' && method === 'POST') || (path.startsWith('/v1/contacts/') && method === 'PATCH')) {
+      if (n.holdContactSave) await new Promise<void>(resolve => { n.releaseContactSave = resolve; });
+      if (n.failContactSave) return Response.json({ error: { code: 'INTERNAL_ERROR' } }, { status: 500 });
+      const existing = n.savedContacts.find(item => method === 'PATCH' ? item.contactId === path.split('/').at(-1) : item.id === body.userId);
+      const contact = { ...chat.recipient, ...existing, name: body.name ?? existing?.name ?? 'Anna', contactId: existing?.contactId ?? 'contact-anna' };
+      n.savedContacts = [...n.savedContacts.filter(item => item.id !== contact.id), contact];
+      n.savedChats = n.savedChats.map(item => item.recipient.id === contact.id ? { ...item, recipient: { ...item.recipient, displayName: contact.name } } : item);
+      n.savedDrafts = n.savedDrafts.map(item => item.recipientId === contact.id && item.recipient ? { ...item, recipient: { ...item.recipient, displayName: contact.name } } : item);
+      return response(contact);
+    }
     if (path === '/v1/contacts') {
       if (n.failContacts) throw new Error('Contacts refresh failed');
       if (n.holdContacts) { n.contactsHeld = true; await new Promise<void>(resolve => { n.releaseContacts = resolve; }); }
@@ -644,7 +659,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     if (path.startsWith('/v1/device-actions/')) return response({});
     throw new Error(`Unexpected API call: ${method} ${path}`);
   };
-  const module = { exports: {} as { useMia: () => Mia; App: React.ComponentType; UiProvider: React.ComponentType<any>; Button: React.ComponentType<any>; Reveal: React.ComponentType<any>; VoiceNoteBubble: typeof import('../src/screens/VoiceNoteBubble').VoiceNoteBubble; MessageReferenceCard: React.ComponentType<React.ComponentProps<typeof import('../src/screens/MessageReferenceCard').MessageReferenceCard>> } };
+  const module = { exports: {} as { useMia: () => Mia; App: React.ComponentType; UiProvider: React.ComponentType<any>; Button: React.ComponentType<any>; Reveal: React.ComponentType<any>; ContactFormModal: typeof import('../src/screens/ContactFormModal').ContactFormModal; VoiceNoteBubble: typeof import('../src/screens/VoiceNoteBubble').VoiceNoteBubble; MessageReferenceCard: React.ComponentType<React.ComponentProps<typeof import('../src/screens/MessageReferenceCard').MessageReferenceCard>> } };
   new Function('require', 'module', 'exports', code)(createRequire(import.meta.url), module, module.exports);
   let mia!: Mia; let renderer!: ReactTestRenderer;
   function Host() { mia = module.exports.useMia(); return null; }
@@ -662,6 +677,146 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     async close() { await act(async () => { renderer.unmount(); }); globalThis.fetch = realFetch; globalThis.FormData = realFormData; delete (globalThis as any).__miaNative; },
   };
 }
+
+test('contact forms reuse the message shutter, retain their exit snapshot and coalesce rapid reopen requests', async () => {
+  const h = await mount(false);
+  let probe: ReactTestRenderer | undefined;
+  const form = { turnId: 'one', operation: 'create' as const, name: 'Anna', identifier: '+12025550101', status: 'editing' as const };
+  const sample = (value: import('../src/contactForm').ContactForm | null) => React.createElement(h.components.ContactFormModal, {
+    form: value, bottomClearance: 180, contentInsets: h.n.insets,
+  });
+  const card = () => probe!.root.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'contact-form-card')[0]!;
+  const text = () => card().findAll(node => node.type === 'Text' as any).map(node => node.props.children).join(' ');
+  const pending = (duration: number, toValue: number) => h.n.pendingAnimations.filter(item => item.active() && item.config.duration === duration && item.config.toValue === toValue);
+  const finish = async (duration: number, toValue: number) => { await act(async () => { pending(duration, toValue).forEach(item => item.finish()); }); };
+  const measure = async () => { await act(async () => { card().props.onLayout({ nativeEvent: { layout: { width: 358, height: 300 } } }); }); };
+  try {
+    h.n.holdAnimation = true;
+    await act(async () => { probe = create(sample(form)); });
+    await measure();
+    const entrance = pending(650, 1);
+    assert.equal(entrance.length, 6);
+    assert.ok(entrance.every(item => item.config.useNativeDriver && item.config.isInteraction === false));
+    await act(async () => { entrance.slice(0, -1).forEach(item => item.finish()); });
+    assert.equal(probe!.root.findAll(node => node.props.testID?.startsWith('contact-form-strip-')).length, 6);
+    await act(async () => { entrance.at(-1)!.finish(); });
+    assert.equal(probe!.root.findAll(node => node.props.testID?.startsWith('contact-form-strip-')).length, 0);
+    const shown = card();
+    await act(async () => { probe!.update(sample({ ...form, turnId: 'two', operation: 'rename', name: 'Studio Anna', status: 'saved' })); });
+    assert.equal(card(), shown, 'field, operation and status changes preserve the open card');
+    assert.match(text(), /Edit contact.*Studio Anna.*Contact saved/);
+    assert.equal(pending(650, 1).length, 0, 'filling a field does not restart the reveal');
+
+    await act(async () => { probe!.update(sample(null)); });
+    const exit = pending(420, 0); assert.equal(exit.length, 6);
+    await act(async () => { probe!.update(sample({ ...form, name: 'Ben' })); });
+    await act(async () => { probe!.update(sample({ ...form, name: 'David', identifier: '+12025550102' })); });
+    assert.match(text(), /Studio Anna/, 'outgoing content survives until the last strip closes');
+    await act(async () => { exit.slice(0, -1).forEach(item => item.finish()); });
+    assert.match(text(), /Studio Anna/);
+    await act(async () => { exit.at(-1)!.finish(); });
+    assert.match(text(), /David/); assert.doesNotMatch(text(), /Ben|Studio Anna/);
+    await measure(); await finish(650, 1);
+    await act(async () => { probe!.update(sample(null)); });
+    await finish(420, 0);
+    assert.equal(card(), undefined);
+    assert.equal(probe!.root.findAll(node => node.props.testID === 'contact-form-modal').length, 1, 'backdrop remains until its exit fade finishes');
+    await finish(220, 0);
+    assert.equal(probe!.root.findAll(node => node.props.testID === 'contact-form-modal').length, 0);
+
+    await act(async () => { probe!.update(sample(form)); }); await measure();
+    await act(async () => { probe!.unmount(); }); probe = undefined;
+    await act(async () => { h.n.finishAnimation?.(); });
+    assert.ok(h.n.loops.every(loop => loop.stopped), 'unmount stops contour and breathing loops');
+  } finally { if (probe) await act(async () => { probe!.unmount(); }); await h.close(); }
+});
+
+test('contact form dismissal under Reduce Motion uses the same short fade and cancels an unfinished entrance', async () => {
+  const h = await mount(false);
+  let probe: ReactTestRenderer | undefined;
+  try {
+    await act(async () => { h.n.reducedMotion = true; for (const handler of h.n.motionHandlers) handler(true); });
+    h.n.holdAnimation = true;
+    const sample = (form: import('../src/contactForm').ContactForm | null) => React.createElement(h.components.ContactFormModal, {
+      form, bottomClearance: 180, contentInsets: h.n.insets,
+    });
+    await act(async () => { probe = create(sample({ turnId: 'reduced', operation: 'rename', name: 'David', identifier: '+12025550102', status: 'editing' })); });
+    const card = probe!.root.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'contact-form-card')[0]!;
+    await act(async () => { card.props.onLayout({ nativeEvent: { layout: { width: 358, height: 300 } } }); });
+    assert.equal(probe!.root.findAll(node => node.props.testID?.startsWith('contact-form-strip-')).length, 0);
+    assert.equal(h.n.animations.some(animation => [650, 420, 10000, 2000].includes(animation.duration)), false);
+    const entrance = h.n.pendingAnimations.filter(item => item.active() && item.config.duration === 80 && item.config.toValue === 1);
+    await act(async () => { probe!.update(sample(null)); });
+    await act(async () => { entrance.forEach(item => item.finish()); });
+    await act(async () => { h.n.pendingAnimations.filter(item => item.active() && item.config.duration === 80 && item.config.toValue === 0).forEach(item => item.finish()); });
+    await act(async () => { h.n.finishAnimation?.(); });
+    assert.equal(probe!.root.findAll(node => node.props.testID === 'contact-form-modal').length, 0);
+  } finally { if (probe) await act(async () => { probe!.unmount(); }); await h.close(); }
+});
+
+test('contact form fills across voice turns, stays passive, and fences stale, replayed and background events', async () => {
+  const h = await mount(true, true, true);
+  try {
+    await h.wait(() => !!h.n.nativePCM);
+    const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
+    const accept = async (id: string) => {
+      const turn: Turn = { id, sessionId: 'assistant', userId: 'user', generation: h.n.turns.length + 1,
+        userText: 'Save this contact.', assistantText: null, status: 'running', clientTurnId: `client-${id}`, context: stream.context as any };
+      h.n.turns.push(turn);
+      await act(async () => {
+        h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: turn.clientTurnId });
+        h.n.frame({ type: 'turn.accepted', turn });
+      });
+      return turn;
+    };
+    const first = await accept('contact-first');
+    const reportedForm = () => (h.n.frames.filter(frame => frame.type === 'voice.context').at(-1)?.context as import('../src/types').ClientContext | undefined)?.contactForm;
+    const update = async (turnId: string, fields: Record<string, unknown>, replayed = false) => {
+      await act(async () => { await h.n.event({ id: 'contact-event', type: 'agent.contact_form', createdAt: new Date().toISOString(),
+        payload: { turnId, operation: 'create', name: 'Anna', identifier: null, status: 'editing', ...fields } }, 0, replayed); });
+    };
+    await update(first.id, {});
+    assert.equal(h.mia.contactForm?.name, 'Anna'); assert.equal(h.mia.contactForm?.identifier, null);
+    assert.deepEqual(reportedForm(), h.mia.contactForm,
+      'live voice context reports the current form for the next user utterance');
+    const modal = h.tree.findAll(node => node.props.testID === 'contact-form-modal')[0]!;
+    assert.equal(modal.props.pointerEvents, 'none');
+    assert.equal(modal.findAll(node => node.type === 'TextInput' as any).length, 0, 'agent form does not open a keyboard');
+    const interaction = h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'agent-interaction-layer')[0]!;
+    assert.match(interaction.props.accessibilityLabel, /Name: Anna/);
+    assert.equal(h.n.nativeStarts, 1, 'presentation preserves the native voice graph');
+
+    const second = await accept('contact-second');
+    await update(second.id, { identifier: '+1 202 555 0101' });
+    assert.equal(h.mia.contactForm?.identifier, '+1 202 555 0101');
+    assert.equal(reportedForm()?.identifier, '+1 202 555 0101');
+    await update(first.id, { name: 'Stale' });
+    await update(second.id, { name: 'Replayed' }, true);
+    assert.equal(h.mia.contactForm?.name, 'Anna');
+    await update(second.id, { name: null, identifier: '@ben' });
+    assert.equal(h.mia.contactForm?.name, null, 'a replacement snapshot clears the previous person');
+    await update(second.id, { name: 'Ben', identifier: '@ben', status: 'saved' });
+    assert.equal(h.mia.contactForm?.status, 'saved');
+    await act(async () => { await h.n.event({ id: 'interrupted', type: 'assistant.interrupted', createdAt: new Date().toISOString(), payload: { turnId: second.id } }, 0); });
+    assert.equal(h.mia.contactForm?.status, 'saved', 'a committed save stays truthful after interruption');
+
+    const third = await accept('contact-third');
+    await update(third.id, { status: 'saving' });
+    await act(async () => { await h.n.event({ id: 'failed', type: 'agent.tool_completed', createdAt: new Date().toISOString(), payload: { turnId: third.id, tool: 'add_contact', success: false } }, 0); });
+    assert.equal(h.mia.contactForm?.status, 'failed');
+    await update(third.id, { status: 'dismissed' }); assert.equal(h.mia.contactForm, null);
+    assert.equal(reportedForm(), null, 'dismissal explicitly clears the reported form');
+    await update(third.id, {});
+    await act(async () => { h.n.appState('background'); });
+    assert.equal(h.mia.contactForm, null);
+    await update(third.id, {}); assert.equal(h.mia.contactForm, null);
+    await act(async () => { h.n.appState('active'); });
+    await update(third.id, {});
+    await act(async () => { await h.mia.saveAiMode(false); });
+    assert.equal(h.mia.contactForm, null);
+    await update(third.id, {}); assert.equal(h.mia.contactForm, null);
+  } finally { await h.close(); }
+});
 
 test('lower hold sends the original note on release without a question and preserves the agent mute choice', async () => {
   for (const native of [false, true]) for (const muted of [false, true]) {
@@ -1338,7 +1493,7 @@ test('agent actions cannot preview, discard or send a local voice note, even wit
 test('recording delivery resolves its captured recipient even after the visible chat changes', async () => {
   const h = await mount(true);
   try {
-    h.n.savedChats.push({ ...chat, id: 'ben', recipient: { id: 'ben-user', displayName: 'Ben', username: 'ben' } });
+    h.n.savedChats.push({ ...chat, id: 'ben', recipient: { id: 'ben-user', displayName: 'Ben', phoneNumber: '+12025550102' } });
     await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.startRecording(); await h.mia.finishRecording(); });
     const recorded = (h.n.frames.filter(f => f.type === 'voice.context' && (f.context as any)?.voiceNote).at(-1)!.context as any).voiceNote;
     assert.equal(recorded.recipientId, 'recipient'); assert.equal(recorded.chatId, undefined);
@@ -1446,7 +1601,7 @@ test('ai_mode starts one global conversation, speaks automatically and keeps lis
     assert.equal(h.mia.tab, 'chats');
     await h.say(); await h.wait(() => h.n.playbacks === 1);
     assert.equal(h.mia.voicePhase, 'speaking'); assert.equal(h.n.captures, 1);
-    assert.deepEqual(h.n.turns[0]?.context, { route: '/chats', revision: 0, navigationSessionId: h.n.turns[0]!.context!.navigationSessionId, voice: { enabled: true, microphoneMuted: false, revision: 1 } });
+    assert.deepEqual(h.n.turns[0]?.context, { route: '/chats', revision: 0, navigationSessionId: h.n.turns[0]!.context!.navigationSessionId, contactForm: null, voice: { enabled: true, microphoneMuted: false, revision: 1 } });
     await act(async () => { h.n.playback!(); });
     await h.wait(() => h.n.captures === 2);
     await act(async () => { await h.mia.navigate('people'); });
@@ -1776,17 +1931,26 @@ test('voice activation requires Settings confirmation; exit requires a five-seco
       await h.wait(() => !!h.n.capture);
       assert.equal(overlay().props.accessibilityState.checked, true);
       const exit = overlay;
+      const progress = () => h.tree.findAll(node => node.type === 'View' as any && node.props.testID === 'agent-exit-progress');
       await act(async () => { overlay().props.onAccessibilityEscape(); });
       assert.equal(h.mia.aiMode, true); assert.ok(h.n.announcements.length >= 1);
       const aborted = pressGesture(overlay().props);
       await act(async () => { aborted.begin(); });
-      await act(async () => { await new Promise(resolve => setTimeout(resolve, 700)); aborted.release(); });
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 700)); });
+      assert.equal(progress().length, 1, 'upper hold shows the circular countdown');
+      assert.ok(h.n.animations.some(config => config.duration === 5000 && config.toValue === 1 && config.useNativeDriver === true));
+      await act(async () => { aborted.release(); });
+      assert.equal(progress().length, 0, 'release removes the countdown');
       aborted.dispose();
       assert.equal(h.mia.aiMode, true, 'the previous short hold must not exit');
       assert.equal(h.mia.microphoneMuted, false, 'release must not become a mic tap');
       assert.equal(h.n.vibrations, 0);
       const backgroundHold = pressGesture(exit().props);
-      await act(async () => { backgroundHold.begin(); h.n.appState('background'); });
+      await act(async () => { backgroundHold.begin(); });
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 600)); });
+      assert.equal(progress().length, 1);
+      await act(async () => { h.n.appState('background'); });
+      assert.equal(progress().length, 0, 'backgrounding cancels the countdown');
       backgroundHold.dispose();
       await act(async () => { h.n.appState('active'); });
       await h.wait(() => !!h.n.capture);
@@ -1794,6 +1958,7 @@ test('voice activation requires Settings confirmation; exit requires a five-seco
       await act(async () => { fullHold.begin(); });
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 4800)); });
       assert.equal(h.mia.aiMode, true, 'less than five seconds must preserve mode');
+      assert.equal(progress().length, 1, 'a fresh hold shows a fresh countdown');
       assert.equal(h.n.vibrations, 0);
       await act(async () => { await new Promise(resolve => setTimeout(resolve, 300)); });
       await h.wait(() => h.n.capture === null);
@@ -1985,8 +2150,9 @@ test('mute while waiting for ASR ready preserves the request and resumes without
 });
 
 test('native mute preserves pending work and playback; Stop reply preserves mode and restarts only recognition', async () => {
-  const h = await mount(true, false, true);
+  const h = await mount(true, true, true);
   try {
+    const core = () => h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'MiaCore')[0]!;
     await h.wait(() => !!h.n.nativePCM);
     const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
     const turn: Turn = { id: 'mute-work', sessionId: 'assistant', userId: 'user', generation: 1, userText: 'Explain messages',
@@ -1996,14 +2162,17 @@ test('native mute preserves pending work and playback; Stop reply preserves mode
     const stops = h.n.nativeStops, stopRequests = h.n.requests.filter(r => r.path.endsWith('/stop')).length;
     await act(async () => { await h.mia.toggleMicrophone(); });
     assert.equal(h.mia.voicePhase, 'thinking'); assert.equal(turn.status, 'running');
+    assert.equal(core().props.phase, 'thinking'); assert.equal(core().props.microphoneMuted, true);
     assert.equal(h.n.requests.filter(r => r.path.endsWith('/stop')).length, stopRequests);
     turn.status = 'completed'; turn.assistantText = 'I can help with messages.';
     await h.wait(() => !!h.n.playback);
     assert.equal(h.mia.voicePhase, 'speaking'); assert.equal(h.mia.microphoneMuted, true);
+    assert.equal(core().props.phase, 'speaking'); assert.equal(core().props.microphoneMuted, true);
     const packets = h.n.pcmPackets; await act(async () => { h.n.nativePCM!(new Uint8Array(3840)); });
     assert.equal(h.n.pcmPackets, packets); assert.equal(h.n.nativeStops, stops);
     await act(async () => { await h.mia.toggleMicrophone(); });
     assert.ok(h.n.playback, 'unmuting does not cancel the reply');
+    assert.equal(core().props.phase, 'speaking'); assert.equal(core().props.microphoneMuted, false);
     const inputRevision = (h.n.frames.filter(f => f.type === 'voice.mute').at(-1)!.revision as number);
     await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId,
       inputRevision: inputRevision - 2, clientTurnId: 'queued-before-mute' }); });
@@ -2249,7 +2418,7 @@ test('People submits a formatted phone number, presents the result and adds the 
   const h = await mount(false, true);
   try {
     await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Contacts')[0]!.props.onPress(); });
-    const input = h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Find by phone number or username')[0]!;
+    const input = h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Find by phone number')[0]!;
     await act(async () => { input.props.onChangeText('+1 (202) 555-0101'); });
     await h.wait(() => h.n.requests.some(request => request.path.startsWith('/v1/users?query=')));
     assert.ok(h.n.requests.some(request => request.path === `/v1/users?query=${encodeURIComponent('+1 (202) 555-0101')}`));
@@ -2260,10 +2429,144 @@ test('People submits a formatted phone number, presents the result and adds the 
     await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Back')[0]!.props.onPress(); });
     assert.equal(h.mia.tab, 'people', 'back returns to Contacts, where this conversation was opened');
     await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Contacts')[0]!.props.onPress(); });
-    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Anna, @anna')[0]!.props.onPress(); });
+    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Anna, +12025550101')[0]!.props.onPress(); });
     await h.wait(() => h.mia.activeChatId === 'anna');
     assert.equal(h.n.requests.filter(request => request.path === '/v1/contacts' && request.method === 'POST').length, 1, 'opening a saved contact does not add it again');
     assert.equal(h.n.captures, 0, 'searching contacts must not activate the voice assistant');
+  } finally { await h.close(); }
+});
+
+test('phone search shows an existing saved label and opens it without saving over the contact', async () => {
+  const h = await mount(false, true);
+  try {
+    h.n.savedContacts.push({ ...chat.recipient, contactId: 'contact-anna', name: 'Studio Anna' });
+    await act(async () => { await h.mia.refresh(); });
+    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Contacts')[0]!.props.onPress(); });
+    const input = h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Find by phone number')[0]!;
+    await act(async () => { input.props.onChangeText('+1 (202) 555-0101'); });
+    await h.wait(() => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Studio Anna, +12025550101').length === 2);
+    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Studio Anna, +12025550101')[0]!.props.onPress(); });
+    await h.wait(() => h.mia.activeChatId === 'anna');
+    assert.equal(h.n.requests.some(request => request.path === '/v1/contacts' && request.method === 'POST'), false);
+    assert.equal(h.mia.contacts[0]!.name, 'Studio Anna');
+  } finally { await h.close(); }
+});
+
+test('classic header opens contact details and saves the name once across contacts, chat and drafts', async () => {
+  const h = await mount(false, true);
+  const button = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
+  const field = () => h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Contact name')[0]!;
+  const modal = () => h.tree.findAll(node => node.type === 'Modal' as any)[0];
+  try {
+    h.n.savedContacts.push({ ...chat.recipient, contactId: 'contact-anna', name: 'Studio Anna' });
+    h.n.savedChats = [{ ...chat, recipient: { ...chat.recipient, displayName: 'Studio Anna' } }];
+    h.n.savedDrafts.push({ id: 'draft', recipientId: chat.recipient.id, recipient: chat.recipient, kind: 'text', text: 'Hello', mediaId: null, version: 1, state: 'editing', reviewedVersion: null, updatedAt: new Date().toISOString() });
+    await act(async () => { await h.mia.refresh(); await h.mia.navigate('chats', 'anna'); });
+    await act(async () => { button('Contact details for Studio Anna').props.onPress(); });
+    assert.ok(modal()); assert.equal(field().props.value, 'Studio Anna');
+    assert.equal(button('Save name').props.disabled, true);
+    assert.ok(h.tree.findAll(node => node.type === 'Text' as any && node.props.selectable && node.props.children === '+12025550101').length);
+    await act(async () => { field().props.onChangeText('   '); });
+    assert.equal(button('Save name').props.disabled, true);
+    await act(async () => { field().props.onChangeText('  Rehearsal Anna  '); });
+    h.n.holdContactSave = true;
+    const save = button('Save name').props.onPress;
+    await act(async () => { save(); save(); });
+    await h.wait(() => !!h.n.releaseContactSave);
+    assert.equal(button('Save name').props.disabled, true);
+    await act(async () => { modal()!.props.onRequestClose(); }); assert.ok(modal(), 'keep saving feedback visible');
+    assert.equal(h.n.panResponders.at(-1)!.onMoveShouldSetPanResponderCapture!({}, { dx: 0, dy: 120, numberActiveTouches: 1 }), false, 'saving cannot be interrupted by a swipe');
+    await act(async () => { h.n.releaseContactSave!(); }); await h.wait(() => !modal());
+    const mutations = h.n.requests.filter(request => request.path === '/v1/contacts/contact-anna' && request.method === 'PATCH');
+    assert.equal(mutations.length, 1); assert.deepEqual(mutations[0]!.body, { name: 'Rehearsal Anna' });
+    assert.equal(h.mia.contacts[0]!.name, 'Rehearsal Anna');
+    assert.equal(h.mia.chats[0]!.recipient.displayName, 'Rehearsal Anna');
+    assert.equal(h.mia.chats[0]!.recipient.phoneNumber, '+12025550101');
+    assert.equal(h.mia.drafts[0]!.recipient!.displayName, 'Rehearsal Anna');
+    assert.ok(button('Contact details for Rehearsal Anna'));
+    await act(async () => { button('Contact details for Rehearsal Anna').props.onPress(); });
+    assert.equal(field().props.value, 'Rehearsal Anna');
+    await act(async () => { field().props.onChangeText('Discard this edit'); button('Cancel').props.onPress(); });
+    assert.equal(modal(), undefined); assert.equal(h.mia.contacts[0]!.name, 'Rehearsal Anna');
+  } finally { h.n.releaseContactSave?.(); await h.close(); }
+});
+
+test('classic contact details retain unsaved edits after a save failure and can save an unsaved person', async () => {
+  const h = await mount(false, true);
+  const button = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
+  const field = () => h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Contact name')[0]!;
+  const modal = () => h.tree.findAll(node => node.type === 'Modal' as any)[0];
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    await act(async () => { button('Contact details for Anna').props.onPress(); });
+    await act(async () => { field().props.onChangeText('Studio Anna'); });
+    h.n.failContactSave = true;
+    await act(async () => { button('Save contact').props.onPress(); });
+    await h.wait(() => h.tree.findAll(node => node.type === 'View' as any && node.props.accessibilityLiveRegion === 'assertive').length > 0);
+    assert.ok(modal()); assert.equal(field().props.value, 'Studio Anna'); assert.equal(h.mia.contacts.length, 0);
+    h.n.failContactSave = false;
+    await act(async () => { button('Save contact').props.onPress(); }); await h.wait(() => !modal());
+    assert.equal(h.mia.contacts[0]!.name, 'Studio Anna');
+    assert.equal(h.mia.chats[0]!.recipient.displayName, 'Studio Anna');
+    assert.equal(h.n.requests.filter(request => request.method === 'PATCH' && request.path.startsWith('/v1/contacts/')).length, 0);
+    await act(async () => { button('Contact details for Studio Anna').props.onPress(); });
+    await act(async () => { await h.mia.navigateBack(); }); assert.equal(modal(), undefined, 'navigation dismisses the contact editor');
+    await act(async () => { await h.mia.navigate('chats', 'anna'); }); assert.equal(modal(), undefined);
+    await act(async () => { await h.mia.saveAiMode(true); });
+    const target = h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'conversation-contact')[0]!;
+    assert.equal(target.props.disabled, true); assert.equal(target.props.onPress, undefined);
+    assert.equal(modal(), undefined, 'agent mode never opens the manual editor');
+  } finally { await h.close(); }
+});
+
+test('contact details have no scroll and dismiss only on a deliberate downward swipe', async () => {
+  const h = await mount(false, true);
+  const button = (label: string) => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === label)[0]!;
+  const modal = () => h.tree.findAll(node => node.type === 'Modal' as any)[0];
+  const field = () => h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Contact name')[0]!;
+  const movement = (dx: number, dy: number, vy = 0, touches = 1) => ({ dx, dy, vy, numberActiveTouches: touches });
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    await act(async () => { button('Contact details for Anna').props.onPress(); });
+    assert.equal(modal()!.findAll(node => node.type === 'ScrollView' as any).length, 0);
+    assert.equal(h.tree.findAll(node => node.props.testID === 'contact-details-drag-handle').length, 1);
+    await act(async () => { field().props.onChangeText('Unsaved name'); });
+    const pan = h.n.panResponders.at(-1)!;
+    for (const gesture of [movement(30, 15), movement(0, -120), movement(0, 120, 0, 2), movement(0, 5)]) {
+      assert.equal(pan.onMoveShouldSetPanResponderCapture!({}, gesture), false);
+    }
+    assert.equal(pan.onMoveShouldSetPanResponderCapture!({}, movement(0, 40)), true);
+    await act(async () => { pan.onPanResponderGrant!(); pan.onPanResponderMove!({}, movement(0, 40)); });
+    const card = h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'contact-details')[0]!;
+    assert.equal(card.props.style[1].transform[0].translateY.value, 40, 'sheet follows the finger');
+    await act(async () => { pan.onPanResponderRelease!({}, movement(0, 40)); });
+    assert.ok(modal()); assert.equal(field().props.value, 'Unsaved name', 'a short drag preserves the edit');
+    await act(async () => { pan.onPanResponderGrant!(); pan.onPanResponderMove!({}, movement(0, 120)); pan.onPanResponderTerminate!(); pan.onPanResponderRelease!({}, movement(0, 120)); });
+    assert.ok(modal(), 'an interrupted gesture cannot close the sheet');
+    await act(async () => { pan.onPanResponderGrant!(); pan.onPanResponderMove!({}, movement(0, 120, 0, 2)); pan.onPanResponderRelease!({}, movement(0, 120)); });
+    assert.ok(modal(), 'multi-touch cancels the drag');
+    await act(async () => { pan.onPanResponderGrant!(); pan.onPanResponderMove!({}, movement(0, 120)); pan.onPanResponderRelease!({}, movement(0, 120)); });
+    assert.equal(modal(), undefined);
+    assert.equal(h.n.requests.some(request => request.method === 'PATCH' || request.path === '/v1/contacts' && request.method === 'POST'), false);
+    await act(async () => { button('Contact details for Anna').props.onPress(); });
+    assert.equal(field().props.value, 'Anna', 'dismissal leaves the contact unchanged');
+    const flick = h.n.panResponders.at(-1)!;
+    await act(async () => { flick.onPanResponderGrant!(); flick.onPanResponderRelease!({}, movement(0, 30, 1)); });
+    assert.equal(modal(), undefined, 'a quick downward flick dismisses the sheet');
+  } finally { await h.close(); }
+});
+
+test('contact details compact their content for the keyboard without introducing a scroll view', async () => {
+  const h = await mount(false, true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    await act(async () => { h.tree.findAll(node => node.props.testID === 'conversation-contact')[0]!.props.onPress(); });
+    await act(async () => { h.tree.findAll(node => node.props.testID === 'contact-details-viewport')[0]!.props.onLayout({ nativeEvent: { layout: { height: 320 } } }); });
+    const modal = h.tree.findAll(node => node.type === 'Modal' as any)[0]!;
+    assert.equal(modal.findAll(node => node.type === 'ScrollView' as any).length, 0);
+    assert.equal(modal.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Contact name').length, 1);
+    assert.equal(modal.findAll(node => node.type === 'Pressable' as any && ['Save contact', 'Cancel'].includes(node.props.accessibilityLabel)).length, 2);
+    assert.equal(modal.findAll(node => node.type === 'Text' as any && node.props.children === 'This name is only for your contacts.').length, 0);
   } finally { await h.close(); }
 });
 
@@ -2284,10 +2587,10 @@ test('Contacts and Chats retain their actions and row height; chat back swipe re
     h.n.savedContacts.push({ ...chat.recipient, contactId: 'contact-anna', name: 'Anna' });
     await act(async () => { await h.mia.refresh(); button('Contacts').props.onPress(); });
     assert.ok(header('Contacts'));
-    const contactRow = flatten(button('Anna, @anna').props.style({ pressed: false }));
+    const contactRow = flatten(button('Anna, +12025550101').props.style({ pressed: false }));
     for (const key of ['minHeight', 'paddingVertical', 'paddingHorizontal', 'gap']) assert.equal(contactRow[key], chatRow[key]);
     assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Saved contacts').length, 0, 'normal contacts retain the simple ungrouped list');
-    await act(async () => { button('Anna, @anna').props.onPress(); });
+    await act(async () => { button('Anna, +12025550101').props.onPress(); });
     await h.wait(() => h.mia.activeChatId === 'anna');
     const back = h.n.backGesture!;
     await act(async () => { back.onPanResponderGrant!(); back.onPanResponderRelease!(null, { dx: 130, vx: .2 }); });
@@ -2391,7 +2694,7 @@ test('shared search stays full width and clears local chat filtering with reserv
 
 test('People debounces input, aborts superseded searches, and clears results without stale replies or errors', async t => {
   const h = await mount(false, true);
-  const field = () => h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Find by phone number or username')[0]!;
+  const field = () => h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Find by phone number')[0]!;
   const type = async (value: string) => act(async () => { field().props.onChangeText(value); });
   const tick = async (ms: number) => act(async () => { t.mock.timers.tick(ms); });
   try {
@@ -2399,33 +2702,33 @@ test('People debounces input, aborts superseded searches, and clears results wit
     t.mock.timers.enable({ apis: ['setTimeout'] }); h.n.holdPeopleSearch = true;
     await type('a'); await tick(400);
     assert.equal(h.n.peopleSearches.length, 0);
-    await type('an'); await tick(200); await type('ann'); await tick(200); await type('anna'); await tick(299);
+    await type('an'); await tick(200); await type('ann'); await tick(200); await type('+12025550101'); await tick(299);
     assert.equal(h.n.peopleSearches.length, 0);
-    await tick(1); assert.equal(h.n.peopleSearches.length, 1); assert.equal(h.n.peopleSearches[0]!.query, 'anna');
+    await tick(1); assert.equal(h.n.peopleSearches.length, 1); assert.equal(h.n.peopleSearches[0]!.query, '+12025550101');
     assert.equal(field().props.accessibilityState.busy, true);
     const style = Object.assign({}, ...field().props.style.filter(Boolean));
     assert.ok(style.paddingRight >= 72, 'reserve both spinner and clear button space');
-    await type('bob'); assert.equal(h.n.peopleSearches[0]!.signal.aborted, true);
-    await act(async () => { h.n.peopleSearches[0]!.resolve(Response.json([{ id: 'old', username: 'anna', displayName: 'Old result' }])); });
+    await type('+12025550102'); assert.equal(h.n.peopleSearches[0]!.signal.aborted, true);
+    await act(async () => { h.n.peopleSearches[0]!.resolve(Response.json([{ id: 'old', phoneNumber: '+12025550101', displayName: 'Old result' }])); });
     assert.equal(h.tree.findAll(node => node.props.accessibilityLabel === 'Add Old result and open chat').length, 0);
     await tick(300); assert.equal(h.n.peopleSearches.length, 2);
-    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Clear find by phone number or username')[0]!.props.onPress(); });
+    await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Clear find by phone number')[0]!.props.onPress(); });
     assert.equal(h.n.peopleSearches[1]!.signal.aborted, true); assert.equal(field().props.value, '');
     await act(async () => { h.n.peopleSearches[1]!.reject(new Error('Aborted old request')); });
     assert.equal(h.mia.error, ''); assert.equal(field().props.accessibilityState.busy, false);
     await tick(500); assert.equal(h.n.peopleSearches.length, 2, 'clearing must not schedule an empty request');
-    await type('carol'); await tick(300);
-    await act(async () => { h.n.peopleSearches[2]!.resolve(Response.json([{ id: 'new', username: 'carol', displayName: 'Carol' }])); });
+    await type('+12025550103'); await tick(300);
+    await act(async () => { h.n.peopleSearches[2]!.resolve(Response.json([{ id: 'new', phoneNumber: '+12025550103', displayName: 'Carol' }])); });
     assert.ok(h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Add Carol and open chat').length);
-    await type(' carol '); await tick(500); assert.equal(h.n.peopleSearches.length, 3, 'surrounding whitespace does not trigger duplicate requests or clear matching results');
-    await type('dave'); await tick(300);
+    await type(' +12025550103 '); await tick(500); assert.equal(h.n.peopleSearches.length, 3, 'surrounding whitespace does not trigger duplicate requests or clear matching results');
+    await type('+12025550104'); await tick(300);
     await act(async () => { h.n.peopleSearches[3]!.reject(new Error('Current network error')); });
     assert.ok(h.mia.error); assert.equal(field().props.accessibilityState.busy, false);
-    await type('pending');
+    await type('+12025550105');
     await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Chats')[0]!.props.onPress(); });
     await tick(500); assert.equal(h.n.peopleSearches.length, 4, 'leaving the screen cancels a pending debounce');
     await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Contacts')[0]!.props.onPress(); });
-    await type('leaving'); await tick(300); assert.equal(h.n.peopleSearches.length, 5);
+    await type('+12025550106'); await tick(300); assert.equal(h.n.peopleSearches.length, 5);
     await act(async () => { h.tree.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityLabel === 'Chats')[0]!.props.onPress(); });
     assert.equal(h.n.peopleSearches[4]!.signal.aborted, true, 'leaving also aborts an in-flight request');
     const error = h.mia.error;
@@ -2681,6 +2984,33 @@ test('the inline composer owns the home-indicator inset during recording, retain
     await act(async () => { await h.mia.discardRecording(); await h.mia.navigate('chats', 'anna'); });
     assert.equal(style(composer().props.style).paddingBottom, 34);
   } finally { await h.close(); }
+});
+
+test('empty conversations preserve the native list inversion correction and layout callback in both modes', async () => {
+  for (const agent of [false, true]) {
+    const h = await mount(agent, true);
+    let emptyRenderer: ReactTestRenderer | undefined;
+    try {
+      await act(async () => { await h.mia.navigate('chats', 'anna'); });
+      const list = h.tree.findAll(node => node.type === 'FlatList' as any)[0]!;
+      assert.equal(list.props.inverted, true); assert.equal(list.props.data.length, 0);
+      const empty = list.props.ListEmptyComponent as React.ReactElement<any>;
+      let measured = false;
+      // VirtualizedList clones the empty slot with a counter-transform and
+      // onLayout. Unlike message rows, it does not add a native View wrapper.
+      const nativeSlot = React.cloneElement(empty, { style: [{ transform: [{ scaleY: -1 }] }, empty.props.style], onLayout: () => { measured = true; } });
+      await act(async () => { emptyRenderer = create(React.createElement(h.components.UiProvider, { agent }, nativeSlot)); });
+      const view = emptyRenderer!.root.findAll(node => node.type === 'View' as any)[0]!;
+      const style = Object.assign({}, ...view.props.style.flat(Infinity).filter(Boolean));
+      const orientation = (style.transform ?? []).reduce((scale: number, transform: { scaleY?: number }) => scale * (transform.scaleY ?? 1), -1);
+      assert.equal(orientation, 1, 'the placeholder must appear upright inside the inverted list');
+      view.props.onLayout({ nativeEvent: { layout: { width: 390, height: 400 } } });
+      assert.equal(measured, true, 'the list must receive the actual empty-state layout');
+    } finally {
+      if (emptyRenderer) await act(async () => { emptyRenderer!.unmount(); });
+      await h.close();
+    }
+  }
 });
 
 test('chat entry starts at the latest message and restores a native initial offset only within the current app session', async () => {
@@ -2955,9 +3285,19 @@ test('classic recording preserves the focused input, keyboard and fixed button g
   const input = () => h.tree.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Message Anna')[0]!;
   const action = () => h.tree.findAll(node => node.type === 'Pressable' as any && node.props.testID === 'composer-action')[0]!;
   const flatten = (value: any): any => Array.isArray(value) ? Object.assign({}, ...value.filter(Boolean).map(flatten)) : value ?? {};
+  const assertKeyboardOwner = (focused: ReturnType<typeof input>) => {
+    assert.equal(input(), focused, 'keep the same native first responder mounted');
+    assert.notEqual(input().props.pointerEvents, 'none', 'never disable native interaction on the focused input');
+    assert.notEqual(input().props.editable, false, 'keep the native input editable');
+    assert.notEqual(input().props.showSoftInputOnFocus, false);
+    assert.equal(flatten(input().props.style).opacity ?? 1, 1, 'keep the native input visible beneath the recording overlay');
+    assert.notEqual(flatten(input().props.style).display, 'none');
+    assert.equal(h.tree.findAll(node => node.props.testID === 'message-composer-area')[0]!.props.style[1].paddingBottom, 8, 'retain the open-keyboard layout');
+  };
   try {
     await act(async () => { await h.mia.navigate('chats', 'anna'); h.n.keyboardHandlers.get('keyboardWillShow')!(); });
     const focused = input(); const dismissals = h.n.keyboardDismissals;
+    assertKeyboardOwner(focused);
     const stops = h.n.requests.filter(request => request.path.endsWith('/stop')).length;
     const geometry = flatten(action().props.style({ pressed: false }));
     h.n.holdSend = true;
@@ -2965,16 +3305,19 @@ test('classic recording preserves the focused input, keyboard and fixed button g
     await act(async () => { gesture!.begin(); }); await h.wait(() => h.mia.audioState === 'recording');
     assert.equal(h.n.noteStarts, 1, 'one hold starts one recorder');
     assert.equal(h.n.requests.filter(request => request.path.endsWith('/stop')).length, stops, 'classic capture does not wait for a remote assistant stop');
-    assert.equal(input(), focused, 'the native input must not be unmounted when recording UI appears');
+    assertKeyboardOwner(focused);
+    assert.equal(input().props.caretHidden, true);
+    const overlay = h.tree.findAll(node => node.props.testID === 'composer-recording-status')[0]!;
+    assert.ok(flatten(overlay.props.style).backgroundColor, 'an opaque overlay hides the composer without hiding its native input');
     assert.equal(h.n.keyboardDismissals, dismissals);
     const activeGeometry = flatten(action().props.style({ pressed: true }));
     for (const key of ['width', 'height', 'borderRadius']) assert.equal(activeGeometry[key], geometry[key]);
     assert.equal(h.tree.findAll(node => node.props.testID === 'composer-recording-stop').length, 1);
     await act(async () => { gesture!.release(); }); await h.wait(() => !!h.n.releaseSend);
-    assert.equal(input(), focused); assert.equal(action().props.disabled, true);
+    assertKeyboardOwner(focused); assert.equal(action().props.disabled, true);
     await act(async () => { h.n.releaseSend!(); }); await h.wait(() => h.mia.voiceNoteStage === 'sent');
-    assert.equal(input(), focused); assert.equal(h.n.keyboardDismissals, dismissals);
-    assert.equal(flatten(input().props.style).opacity, 1);
+    assertKeyboardOwner(focused); assert.equal(h.n.keyboardDismissals, dismissals);
+    assert.equal(input().props.caretHidden, false);
   } finally { h.n.releaseSend?.(); gesture?.dispose(); await h.close(); }
 });
 

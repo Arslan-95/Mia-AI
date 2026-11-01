@@ -6,9 +6,10 @@ const passive = { pointerEvents: 'none' as const, accessible: false, accessibili
 export type ShutterPhase = 'enter' | 'shown' | 'exit';
 
 /** Reveal clipped full-size copies, then give the shown card a small native idle scale. */
-export function ShutterCard({ children, width, maximumHeight, phase, reduced, style, onLayout, onEntered, onExited }: {
+export function ShutterCard({ children, width, maximumHeight, phase, reduced, style, onLayout, onEntered, onExited, testIDPrefix = 'message-reference' }: {
   children: React.ReactNode; width: number; maximumHeight: number; phase: ShutterPhase; reduced: boolean; style: StyleProp<ViewStyle>;
   onLayout(event: LayoutChangeEvent): void; onEntered(): void; onExited(): void;
+  testIDPrefix?: string;
 }) {
   const [height, setHeight] = useState(0);
   const bands = useRef(Array.from({ length: strips }, () => new Animated.Value(0))).current;
@@ -64,8 +65,8 @@ export function ShutterCard({ children, width, maximumHeight, phase, reduced, st
       { rotate: orbit.interpolate({ inputRange: path.stops, outputRange: path.angle }) },
     ] }]} />
   </View>}</>;
-  return <Animated.View {...passive} testID="message-reference-shutter" style={{ width, transform: [{ scale: breathing }] }}>
-    <Animated.View {...passive} testID="message-reference-card" style={[style, { width, opacity: phase === 'shown' ? 1 : reduced ? opacity : 0 }]} onLayout={event => {
+  return <Animated.View {...passive} testID={`${testIDPrefix}-shutter`} style={{ width, transform: [{ scale: breathing }] }}>
+    <Animated.View {...passive} testID={`${testIDPrefix}-card`} style={[style, { width, opacity: phase === 'shown' ? 1 : reduced ? opacity : 0 }]} onLayout={event => {
       const next = event.nativeEvent.layout.height;
       if (next > 0) setHeight(previous => previous === next ? previous : next);
       onLayout(event);
@@ -73,7 +74,7 @@ export function ShutterCard({ children, width, maximumHeight, phase, reduced, st
     {!reduced && phase !== 'shown' && height > 0 && bands.map((value, index) => {
       const top = height * index / strips;
       const bottom = height * (index + 1) / strips;
-      return <Animated.View key={index} {...passive} testID={`message-reference-strip-${index}`} style={[styles.strip, {
+      return <Animated.View key={index} {...passive} testID={`${testIDPrefix}-strip-${index}`} style={[styles.strip, {
         top, width, height: bottom - top, opacity: value,
         transform: [{ translateX: value.interpolate({ inputRange: [0, 1], outputRange: [(index % 2 ? 1 : -1) * 30, 0] }) }],
       }]}>

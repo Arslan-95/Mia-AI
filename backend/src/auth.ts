@@ -1,14 +1,14 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Config } from './config.js';
 import type { Database, Sql } from './db/database.js';
-import { AppError, isDatabaseError, notFound } from './errors.js';
+import { AppError, notFound } from './errors.js';
 
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 const OTP_DURATION_MS = 5 * 60 * 1000;
-export type User = { id: string; phoneNumber: string; username: string; displayName: string; profileComplete: boolean };
+export type User = { id: string; phoneNumber: string; displayName: string; profileComplete: boolean };
 type AuthSession = { user: User; token: string; expiresAt: Date };
 type Challenge = { id: string; phoneNumber: string; codeHash: string; attempts: number; expired: boolean; consumed: boolean };
-const columns = 'id,phone_number AS "phoneNumber",username,display_name AS "displayName",profile_complete AS "profileComplete"';
+const columns = 'id,phone_number AS "phoneNumber",display_name AS "displayName",profile_complete AS "profileComplete"';
 const unauthorized = () => new AppError(401, 'UNAUTHORIZED', 'Authentication is required.');
 const invalidCode = () => new AppError(401, 'INVALID_OTP', 'The code is incorrect, expired, or already used. Request a new code if needed.');
 
@@ -53,9 +53,9 @@ export class AuthService {
         return { error: challenge.attempts + 1 >= 5
           ? new AppError(429, 'OTP_LOCKED', 'Too many incorrect attempts. Request a new code.') : invalidCode() };
       }
-      const [user] = await sql.query<User>(`INSERT INTO users(id,phone_number,username,display_name)
-        VALUES ($1,$2,$3,'New friend') ON CONFLICT(phone_number) DO UPDATE SET phone_number = EXCLUDED.phone_number
-        RETURNING ${columns}`, [randomUUID(), challenge.phoneNumber, `mia_${randomBytes(8).toString('hex')}`]);
+      const [user] = await sql.query<User>(`INSERT INTO users(id,phone_number,display_name)
+        VALUES ($1,$2,'New friend') ON CONFLICT(phone_number) DO UPDATE SET phone_number = EXCLUDED.phone_number
+        RETURNING ${columns}`, [randomUUID(), challenge.phoneNumber]);
       if (!user) throw new Error('Account creation failed');
       await sql.query('UPDATE otp_challenges SET consumed_at = now() WHERE id = $1', [challengeId]);
       return { session: await this.createSession(user, sql) };
@@ -64,22 +64,17 @@ export class AuthService {
     return result.session;
   }
 
-  async updateProfile(userId: string, username: string, displayName: string): Promise<User> {
-    try {
-      const [user] = await this.db.query<User>(`UPDATE users SET username = $2,display_name = $3,profile_complete = true
-        WHERE id = $1 AND phone_number IS NOT NULL RETURNING ${columns}`, [userId, username.toLowerCase(), displayName]);
-      if (!user) throw notFound();
-      return user;
-    } catch (error) {
-      if (isDatabaseError(error, '23505')) throw new AppError(409, 'USERNAME_TAKEN', 'That username is already taken. Choose another one.');
-      throw error;
-    }
+  async updateProfile(userId: string, displayName: string): Promise<User> {
+    const [user] = await this.db.query<User>(`UPDATE users SET display_name = $2,profile_complete = true
+      WHERE id = $1 AND phone_number IS NOT NULL RETURNING ${columns}`, [userId, displayName]);
+    if (!user) throw notFound();
+    return user;
   }
 
   async authenticate(header?: string): Promise<User> {
     const token = header?.match(/^Bearer ([A-Za-z0-9_-]{43})$/)?.[1];
     if (!token) throw unauthorized();
-    const [user] = await this.db.query<User>(`SELECT u.id,u.phone_number AS "phoneNumber",u.username,
+    const [user] = await this.db.query<User>(`SELECT u.id,u.phone_number AS "phoneNumber",
       u.display_name AS "displayName",u.profile_complete AS "profileComplete"
       FROM auth_sessions s JOIN users u ON u.id = s.user_id
       WHERE s.token_hash = $1 AND s.expires_at > now() AND u.phone_number IS NOT NULL`, [this.tokenHash(token)]);

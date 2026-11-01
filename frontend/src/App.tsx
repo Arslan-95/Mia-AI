@@ -7,6 +7,7 @@ import { Chats } from './screens/Chats';
 import { VoiceMode } from './screens/AssistantOrb';
 import { AgentInteraction } from './screens/AgentInteraction';
 import { MessageReferenceCard } from './screens/MessageReferenceCard';
+import { ContactFormModal } from './screens/ContactFormModal';
 import { ChatTransitionOverlay, useChatTransition } from './screens/ChatTransition';
 import { MessageDrafts } from './screens/MessageDrafts';
 import { ConversationStatus } from './screens/ConversationStatus';
@@ -35,6 +36,7 @@ function Application() {
   const [agentHolding, setAgentHolding] = useState(false);
   const [recordingGesture, setRecordingGesture] = useState<RecordingGesture>({ active: false, cancelReady: false });
   const recordingProgress = useRef(new Animated.Value(0)).current;
+  const exitProgress = useRef(new Animated.Value(0)).current;
   const voiceMode = !!(mia.aiMode && mia.session?.user.profileComplete && !mia.booting);
   const ui = { colors: voiceMode ? agentColors : colors, s: voiceMode ? agentStyles : s };
   const chatOpen = mia.tab === 'chats' && mia.chats.some(chat => chat.id === mia.activeChatId);
@@ -76,9 +78,10 @@ function Application() {
         const measured = event.nativeEvent.layout.height;
         if (Number.isFinite(measured) && measured > 0) setAgentOverlayHeight(previous => previous === measured ? previous : measured);
       }}>
-      <VoiceMode mia={mia} bottomInset={insets.bottom} holding={agentHolding} elapsed={elapsed} recordingGesture={recordingGesture} recordingProgress={recordingProgress} />
+      <VoiceMode mia={mia} bottomInset={insets.bottom} holding={agentHolding} exitProgress={exitProgress} elapsed={elapsed} recordingGesture={recordingGesture} recordingProgress={recordingProgress} />
     </View>}
-    {voiceMode && <AgentInteraction mia={mia} onHoldingChange={setAgentHolding} onRecordingGestureChange={setRecordingGesture} recordingProgress={recordingProgress} />}
+    {voiceMode && <ContactFormModal form={mia.contactForm} contentInsets={insets} bottomClearance={agentFooterClearance} />}
+    {voiceMode && <AgentInteraction mia={mia} onHoldingChange={setAgentHolding} exitProgress={exitProgress} onRecordingGestureChange={setRecordingGesture} recordingProgress={recordingProgress} />}
     </View>
     <ChatTransitionOverlay opacity={transition.opacity} transitioning={transition.transitioning} />
   </View></UiProvider>;

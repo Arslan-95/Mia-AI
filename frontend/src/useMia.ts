@@ -10,6 +10,7 @@ import { Realtime, type Frame } from './realtime';
 import { PresentationLease, isLiveAction, mergeMessages } from './coordination';
 import { DeviceActionError, deviceActionFailure, speechFailure, type DeviceActionStage } from './deviceActionFeedback';
 import { ChatScrollPositions } from './chatScrollPositions';
+import { contactFormSnapshot, type ContactForm } from './contactForm';
 import { Engine } from './audio/engine';
 import { DuplexAudio } from './audio/duplex';
 import { PcmPlayback } from './audio/pcmPlayback';
@@ -84,6 +85,19 @@ export function useMia() {
   const [assistantSession, setAssistantSession] = useState<AssistantSession | null>(null); const [turns, setTurns] = useState<Turn[]>([]);
   const [audioState, setAudioState] = useState<'idle' | 'recording' | 'loading' | 'playing'>('idle');
   const [messageReference, setMessageReference] = useState<MessageReference | null>(null);
+  const [contactForm, setContactFormState] = useState<ContactForm | null>(null);
+  const currentContactForm = useRef<ContactForm | null>(null);
+  function setContactForm(value: ContactForm | null | ((previous: ContactForm | null) => ContactForm | null)) {
+    const next = typeof value === 'function' ? value(currentContactForm.current) : value;
+    currentContactForm.current = next; setContactFormState(next);
+  }
+  useEffect(() => { publishVoiceState(); }, [contactForm]);
+  useEffect(() => {
+    if (contactForm?.status !== 'saved') return;
+    const timer = setTimeout(() => setContactForm(current => current === contactForm ? null : current), 7000);
+    return () => clearTimeout(timer);
+  }, [contactForm]);
+  useEffect(() => { if (!aiMode || !inForeground) setContactForm(null); }, [aiMode, inForeground]);
   const reference = useRef<MessageReference | null>(null);
   const referenceEpoch = useRef(0);
   const referencePresentation = useRef<{ revision: number; resolve(): void; reject(reason: unknown): void } | null>(null);
@@ -157,7 +171,7 @@ export function useMia() {
   const navigationSessionId = useRef(Crypto.randomUUID()).current;
   const [chatScrollPositions] = useState(() => new ChatScrollPositions());
   function clientSnapshot(): ClientContext {
-    return { ...navigation.snapshot(), navigationSessionId, ...(referenceIdentity() ? { reference: referenceIdentity() } : {}), ...(localVoiceNote.current ? { voiceNote: localVoiceNote.current } : {}), voice: { enabled: aiModeRef.current, microphoneMuted: microphoneIntent.current, revision: voiceControlRevision.current } };
+    return { ...navigation.snapshot(), navigationSessionId, contactForm: currentContactForm.current ? { ...currentContactForm.current } : null, ...(referenceIdentity() ? { reference: referenceIdentity() } : {}), ...(localVoiceNote.current ? { voiceNote: localVoiceNote.current } : {}), voice: { enabled: aiModeRef.current, microphoneMuted: microphoneIntent.current, revision: voiceControlRevision.current } };
   }
   function publishVoiceState() { socket.current?.send({ type: 'voice.context', context: clientSnapshot() }); }
   function commandInputSuspended() {
@@ -202,6 +216,7 @@ export function useMia() {
     if (foreground.current) voiceCache?.prefetch(items.flatMap(item => item.kind === 'voice' && item.mediaId ? [item.mediaId] : []), true);
   }
   async function clearSession() {
+    setContactForm(null);
     voiceCache?.dispose(); mediaLoad.current?.abort();
     heldRecording.current?.controller.abort(); heldRecording.current = null;
     localVoiceNote.current = null; recordDestination.current = null; uploadedVoiceNote.current = null;
@@ -295,6 +310,7 @@ export function useMia() {
     }, frame => handlers.current.onFrame(frame), status => {
       if (cancelled) return;
       setRealtimeReady(status === 'Connected');
+      if (status !== 'Connected') setContactForm(null);
       if (status === 'Connected') {
         // Refresh one current snapshot instead of issuing REST requests for
         // every historical event replayed after a reconnect.
@@ -401,6 +417,7 @@ export function useMia() {
     state.current = { ...state.current, tab: next, activeChatId: chatId };
   }
   function setView(next: Tab, chatId: string | null = null) {
+    setContactForm(null);
     navigationDirection.current = 'forward';
     navigation.move(viewRoute(next, chatId)); presentView(next, chatId);
   }
@@ -433,6 +450,7 @@ export function useMia() {
     };
     const valid = () => { try { assertValid(); return true; } catch { return false; } };
     const presentSource = async (chatId: string, messageId: string, focus?: { start: number; end: number }, mediaId?: string) => {
+      setContactForm(null);
       const operation = referenceEpoch.current;
       const [chat, source] = await Promise.all([
         api.request<Chat>(`/v1/chats/${chatId}`), api.request<Message>(`/v1/chats/${chatId}/messages/${messageId}`),
@@ -565,6 +583,20 @@ export function useMia() {
   handlers.current.onEvent = async (event, connectedAt, replayed) => {
     if (replayed) return;
     const p = event.payload;
+    if (event.type === 'agent.contact_form' && aiModeRef.current && foreground.current && lease.owns(p.turnId) && Date.parse(event.createdAt) >= connectedAt) {
+      const form = contactFormSnapshot(p);
+      if (form !== undefined) {
+        if (form) clearReference();
+        setContactForm(form);
+      }
+    }
+    if (['assistant.interrupted', 'assistant.failed'].includes(event.type)) {
+      setContactForm(current => current && current.turnId === p.turnId && current.status !== 'saved'
+        ? { ...current, status: event.type === 'assistant.failed' ? 'failed' : 'interrupted' } : current);
+    }
+    if (event.type === 'agent.tool_completed' && ['add_contact', 'rename_contact'].includes(String(p.tool)) && p.success === false) {
+      setContactForm(current => current && current.turnId === p.turnId && current.status !== 'saved' ? { ...current, status: 'failed' } : current);
+    }
     if (event.type === 'message.created') {
       const message = p as unknown as Message;
       if (message.senderId === state.current.session?.user.id) {
@@ -713,12 +745,12 @@ export function useMia() {
     const result = await api.request<Session>('/v1/auth/otp/verify', 'POST', { challengeId, code });
     await sessionStorage.write(result); setSession(result);
   }
-  async function completeProfile(username: string, displayName: string) {
+  async function completeProfile(displayName: string) {
     if (!session) return;
     const epoch = authEpoch.current; identityRevision.current++;
     setBusy(true); setError('');
     try {
-      const user = await api.request<User>('/v1/me', 'PATCH', { username, displayName });
+      const user = await api.request<User>('/v1/me', 'PATCH', { displayName });
       if (epoch !== authEpoch.current) return;
       const updated = { ...session, user }; await sessionStorage.write(updated); setSession(updated);
     } catch (reason) { fail(reason); } finally { setBusy(false); }
@@ -803,6 +835,21 @@ export function useMia() {
     if (add) await api.request('/v1/contacts', 'POST', { userId: profile.id });
     const chat = await api.request<{ id: string }>('/v1/chats', 'POST', { recipientId: profile.id });
     await refresh(); await navigate('chats', chat.id);
+  }
+  async function saveContactName(profile: Profile, name: string) {
+    const epoch = authEpoch.current;
+    const existing = contacts.find(contact => contact.id === profile.id);
+    const saved = existing
+      ? await api.request<Contact>(`/v1/contacts/${existing.contactId}`, 'PATCH', { name: name.trim() })
+      : await api.request<Contact>('/v1/contacts', 'POST', { userId: profile.id, name: name.trim() });
+    if (epoch !== authEpoch.current) return;
+    setContacts(previous => [...previous.filter(contact => contact.id !== saved.id), saved].sort((a, b) => a.name.localeCompare(b.name)));
+    setChats(previous => previous.map(chat => chat.recipient.id === saved.id
+      ? { ...chat, recipient: { ...chat.recipient, displayName: saved.name } } : chat));
+    setDrafts(previous => previous.map(draft => draft.recipientId === saved.id && draft.recipient
+      ? { ...draft, recipient: { ...draft.recipient, displayName: saved.name } } : draft));
+    // The name is committed even if refreshing another list fails afterwards.
+    await refresh().catch(fail);
   }
   function sendPending(item: PendingMessage, throwOnError = false): Promise<void> {
     const existing = pendingSends.get(item.clientMessageId);
@@ -1299,7 +1346,7 @@ export function useMia() {
     });
     return () => { cancelled = true; void conversation.stop(); };
   }, [voiceSessionEnabled, session?.token, session?.user.profileComplete, assistantSession?.id, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, inForeground, suspendLegacyAudio, voiceRevision, voiceFault, voiceRecoverable, realtimeReady]);
-  return { messageReference, originalPlayback, referencePresented, referenceDismissalRevision: referencePresentation.current?.revision, booting, session, aiMode, microphoneMuted, toggleMicrophone, stopAssistantReply, voiceLevel, voicePhase, voiceFault, error, errorRevision, setError, scrollRequests, busy, tab, capabilities, chats, contacts, drafts, messages, chatScrollPositions, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, recordingRecipient: recordDestination.current, voiceNoteStage, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, navigateBack, startChat, sendText, sendPending, draftAction, interrupt, playMedia, toggleMediaPlayback, startRecording, beginHeldRecording, endHeldRecording, finishRecording, useRecording, discardRecording, preview, stopAudio,
+  return { contactForm, messageReference, originalPlayback, referencePresented, referenceDismissalRevision: referencePresentation.current?.revision, booting, session, aiMode, microphoneMuted, toggleMicrophone, stopAssistantReply, voiceLevel, voicePhase, voiceFault, error, errorRevision, setError, scrollRequests, busy, tab, capabilities, chats, contacts, drafts, messages, chatScrollPositions, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, recordingRecipient: recordDestination.current, voiceNoteStage, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, navigateBack, startChat, saveContactName, sendText, sendPending, draftAction, interrupt, playMedia, toggleMediaPlayback, startRecording, beginHeldRecording, endHeldRecording, finishRecording, useRecording, discardRecording, preview, stopAudio,
     backView: routeView(navigation.backRoute()), navigationDirection: navigationDirection.current, navigationRevision: navigation.snapshot().revision,
     prefetchVoiceMessages,
     setComposer: (text: string) => { if (activeChatId) setComposers(previous => ({ ...previous, [activeChatId]: text })); },

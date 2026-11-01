@@ -5,7 +5,7 @@ import { AssistantControl } from '../src/assistantControl';
 import type { Session } from '../src/types';
 
 const identity: Session = { token: 'test-session', expiresAt: '2099-01-01T00:00:00Z',
-  user: { id: 'owner', username: 'owner', displayName: 'Owner', phoneNumber: '+15550000000', profileComplete: true } };
+  user: { id: 'owner', displayName: 'Owner', phoneNumber: '+15550000000', profileComplete: true } };
 
 test('Stop Mia uses authenticated HTTP without any WebSocket and validates the server acknowledgement', async () => {
   const original = globalThis.fetch;

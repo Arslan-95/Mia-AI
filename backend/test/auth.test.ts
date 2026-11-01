@@ -13,8 +13,9 @@ test('phone OTP creates one account, onboards the profile and returns to it on l
   assert.equal(first.user.phoneNumber, '+15550100001');
   assert.equal(first.user.profileComplete, false);
   assert.equal('email' in first.user, false);
+  assert.equal('username' in first.user, false);
   const headers = { authorization: `Bearer ${first.token}` };
-  const profile = await app.inject({ method: 'PATCH', url: '/v1/me', headers, payload: { username: 'anna', displayName: 'Anna' } });
+  const profile = await app.inject({ method: 'PATCH', url: '/v1/me', headers, payload: { displayName: 'Anna' } });
   assert.equal(profile.statusCode, 200, profile.body);
   assert.equal(profile.json().profileComplete, true);
   await app.inject({ method: 'POST', url: '/v1/auth/logout', headers });
@@ -28,8 +29,10 @@ test('phone OTP creates one account, onboards the profile and returns to it on l
   assert.equal(oldRoute.statusCode, 404);
   const other = await phoneSignIn(app, '+15550100002');
   const duplicate = await app.inject({ method: 'PATCH', url: '/v1/me', headers: { authorization: `Bearer ${other.token}` },
-    payload: { username: 'anna', displayName: 'Other Anna' } });
-  assert.equal(duplicate.statusCode, 409);
+    payload: { displayName: 'Anna' } });
+  assert.equal(duplicate.statusCode, 200, 'display names are not unique identities');
+  assert.equal(duplicate.json().phoneNumber, '+15550100002');
+  assert.equal('username' in duplicate.json(), false);
 });
 
 test('OTP failures persist, lock the challenge, expire, and cannot replay after success or resend', async (t) => {

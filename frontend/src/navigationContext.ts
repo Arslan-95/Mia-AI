@@ -17,6 +17,7 @@ export function sameContext(left: ClientContext | null, right: ClientContext | n
   const a = left?.reference, b = right?.reference;
   // JSONB can reorder object keys. Identity is the values, including the exact
   // source revision/excerpt; voice state has its own control-revision guard.
+  // Contact form updates do not navigate or invalidate same-turn actions.
   return left?.navigationSessionId === right?.navigationSessionId && left?.route === right?.route && left?.revision === right?.revision && left?.previousRoute === right?.previousRoute
     && left?.voiceNote?.id === right?.voiceNote?.id && left?.voiceNote?.recipientId === right?.voiceNote?.recipientId && left?.voiceNote?.durationMs === right?.voiceNote?.durationMs
     && a?.chatId === b?.chatId && a?.messageId === b?.messageId && a?.revision === b?.revision

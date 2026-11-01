@@ -39,35 +39,34 @@ type Scenario = { name: string; request: string; saved?: boolean; existingChat?:
 const scenarios: Scenario[] = [
   { name: 'actual-request-from-home', request: "So I'd like to send message to Ben Demo", saved: true, existingChat: true, open: true },
   { name: 'new-chat-with-supplied-content', request: "Could you let Ben Demo know I'll be ten minutes late?", saved: true, open: true, compose: true },
-  { name: 'registered-unsaved-person', request: "Tell @USERNAME I'll be ten minutes late.", open: true, compose: true },
+  { name: 'registered-unsaved-person', request: "Tell PHONE I'll be ten minutes late.", open: true, compose: true },
   { name: 'already-in-target-chat', request: 'I want to send Ben Demo a message.', saved: true, existingChat: true, inChat: true },
   { name: 'recipient-survives-content-followup', request: 'I need to say something to Ben Demo.', saved: true, open: true, followUp: "Tell him I'll be ten minutes late.", compose: true },
   { name: 'ambiguous-person', request: "Tell Ben Demo I'll be ten minutes late.", saved: true, ambiguous: true },
-  { name: 'save-by-username', request: 'Please keep @USERNAME in my contacts as Studio Ben.', label: 'Studio Ben' },
+  { name: 'save-by-number', request: 'Please keep PHONE in my contacts as Studio Ben.', label: 'Studio Ben' },
   { name: 'rename-saved-contact', request: "Could you change Ben Demo's saved contact name to Rehearsal Ben?", saved: true, label: 'Rehearsal Ben' },
   { name: 'rename-person-in-current-chat', request: "I'd rather call this contact Studio.", saved: true, existingChat: true, inChat: true, label: 'Studio' },
   { name: 'ambiguous-rename', request: 'Rename Ben Demo to Work.', saved: true, ambiguous: true },
   { name: 'save-by-full-phone', request: 'Save the person at +1 202 555 0101 as Venue.', phone: true, label: 'Venue' },
   { name: 'unknown-person-needs-identity', request: 'Save someone named Priya in my contacts.' },
   { name: 'hypothetical-is-not-navigation', request: "If I wanted to tell Ben Demo I'm late, would you open his chat? Just explain the process; don't do anything.", saved: true },
-  { name: 'save-and-compose', request: "Save @USERNAME as Studio Ben and tell him I'll be ten minutes late.", label: 'Studio Ben', open: true, compose: true },
+  { name: 'save-and-compose', request: "Save PHONE as Studio Ben and tell him I'll be ten minutes late.", label: 'Studio Ben', open: true, compose: true },
   { name: 'approve-after-inferred-open', request: "Tell Ben Demo I'll be ten minutes late.", saved: true, open: true, compose: true, followUp: 'Yes, send it.', approve: true },
   { name: 'contact-lookup-only', request: 'Is Ben Demo in my saved contacts?', saved: true },
 ];
 try {
   const fixtures = [];
   for (const [index, scenario] of scenarios.filter(item => !process.argv.includes('--approval-only') || item.approve).entries()) {
-    const owner = randomUUID(), target = randomUUID(), other = randomUUID(), username = `miaqa_guest_${index}`;
-    for (const [id, handle, name] of [[owner, `miaqa_owner_${index}`, 'Owner'], [target, username, 'Ben Demo'], [other, `miaqa_other_${index}`, 'Ben Demo']]) await db.query(
-      "INSERT INTO users(id,email,username,display_name,password_hash,profile_complete) VALUES ($1,$2,$3,$4,'unused',true)", [id, `${id}@example.test`, handle, name]);
-    if (scenario.phone) await db.query('UPDATE users SET phone_number=$2 WHERE id=$1', [target, '+12025550101']);
+    const owner = randomUUID(), target = randomUUID(), other = randomUUID(), phoneNumber = `+1202555${String(index * 3 + 101).padStart(4, '0')}`;
+    for (const [id, number, name] of [[owner, `+1202555${String(index * 3 + 100).padStart(4, '0')}`, 'Owner'], [target, phoneNumber, 'Ben Demo'], [other, `+1202555${String(index * 3 + 102).padStart(4, '0')}`, 'Ben Demo']]) await db.query(
+      "INSERT INTO users(id,phone_number,display_name,profile_complete) VALUES ($1,$2,$3,true)", [id, number, name]);
     if (scenario.saved) await messaging.addContact(owner, target, 'Ben Demo');
     if (scenario.ambiguous) await messaging.addContact(owner, other, 'Ben Demo');
     const initial = await messaging.contacts(owner);
     const chat = scenario.existingChat ? await messaging.createDirectChat(owner, target) : null;
     const context: ClientContext = { route: scenario.inChat ? `/chat/${chat!.id}` : '/mia', revision: 1, navigationSessionId: randomUUID() };
     screens.set(owner, context);
-    fixtures.push({ scenario, owner, target, username, initial, context, session: await runtime.state.session(owner) });
+    fixtures.push({ scenario, owner, target, phoneNumber, initial, context, session: await runtime.state.session(owner) });
   }
   runtime.start();
   for (const f of fixtures) {
@@ -80,7 +79,7 @@ try {
       if (current.status !== 'completed') issues.push(`turn ${current.status}`);
       turns.push(current); return current;
     };
-    let current = await run(f.scenario.request.replaceAll('USERNAME', f.username));
+    let current = await run(f.scenario.request.replaceAll('PHONE', f.phoneNumber).replace('+1 202 555 0101', f.phoneNumber));
     if (f.scenario.followUp) current = await run(f.scenario.followUp);
     const contacts = await messaging.contacts(f.owner), drafts = await messaging.drafts(f.owner), chats = await messaging.chats(f.owner);
     const actions = await db.query<{ kind: string; state: string; payload: { chatId?: string } }>('SELECT kind,state,payload FROM device_actions WHERE user_id=$1 ORDER BY sequence', [f.owner]);
@@ -105,7 +104,7 @@ try {
       if (!actual || actual.id !== initial.id || actual.name !== (initial.id === f.target && f.scenario.label ? f.scenario.label : initial.name)) issues.push('unrelated or wrong contact changed');
     }
     const profile = await messaging.profile(f.target);
-    if (profile.username !== f.username || profile.displayName !== 'Ben Demo') issues.push('account profile changed');
+    if (profile.phoneNumber !== f.phoneNumber || profile.displayName !== 'Ben Demo') issues.push('account profile changed');
     const result = { scenario: f.scenario.name, passed: issues.length === 0, reply: current.assistantText, actions: actions.map(action => action.kind), issues };
     results.push(result); console.info(JSON.stringify(result));
   }

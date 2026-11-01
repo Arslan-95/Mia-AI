@@ -1,11 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AccessibilityInfo, Animated, Easing, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { Animated, Easing, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import type { Mia } from '../useMia';
 import type { VoicePhase } from '../voiceConversation';
 import { Icon, agentColors as colors } from '../ui';
 import { agentDockGeometry, type RecordingGesture } from '../voiceNoteGesture';
 import { AgentRecordingAura } from './AgentRecordingAura';
+import { AgentExitProgress } from './AgentExitProgress';
 import { ConversationStatus } from './ConversationStatus';
+import { useReducedMotion } from '../motion';
+import { useOrbBlend, useOrbPresence, useOrbRotation } from './orbMotion';
 
 const labels: Record<VoicePhase, string> = {
   off: 'Ready when you are', waiting: 'Connecting', listening: 'Listening to you',
@@ -26,69 +29,58 @@ function voiceStatus(mia: Mia): { phase: VoicePhase; status: string } {
 }
 
 /** Layered native shapes keep the core sharp at every size, without image assets. */
-export function MiaCore({ phase = 'off', compact = false, level = 0, diameter, error = false, recording = false }: { phase?: VoicePhase; compact?: boolean; level?: number; diameter?: number; error?: boolean; recording?: boolean }) {
-  const warmth = useRef(new Animated.Value(0)).current;
-  const energy = useRef(new Animated.Value(0)).current;
+export function MiaCore({ phase = 'off', compact = false, level = 0, diameter, error = false, recording = false, microphoneMuted = false }: { phase?: VoicePhase; compact?: boolean; level?: number; diameter?: number; error?: boolean; recording?: boolean; microphoneMuted?: boolean }) {
+  const reduceMotion = useReducedMotion();
+  const paused = phase === 'paused';
+  const speaking = phase === 'speaking';
+  const still = paused || phase === 'error';
+  const warmth = useOrbBlend(error || phase === 'error' ? .48 : 0, reduceMotion);
+  const energy = useOrbBlend(reduceMotion || still ? 0 : Math.min(1, Math.max(0, level)), reduceMotion, 90);
+  // Input mute stays visible while output is speaking, thinking or connecting.
+  const standby = useOrbBlend(paused || microphoneMuted ? 1 : 0, reduceMotion);
+  const speech = useOrbBlend(speaking ? 1 : 0, reduceMotion);
+  const rotation = useOrbRotation(still ? 0 : 1 / (phase === 'thinking' ? 4200 : 16000), reduceMotion);
+  const connection = useOrbRotation(phase === 'waiting' ? -1 / 1800 : 0, reduceMotion);
+  const connecting = useOrbPresence(phase === 'waiting', reduceMotion);
+  const microphone = useOrbPresence(recording, reduceMotion);
   const pulse = useRef(new Animated.Value(0)).current;
-  const rotation = useRef(new Animated.Value(0)).current;
-  const connection = useRef(new Animated.Value(0)).current;
-  const [reduceMotion, setReduceMotion] = useState(false);
-  useEffect(() => { const animation = Animated.timing(warmth, { toValue: error ? .48 : 0, duration: reduceMotion ? 0 : 400, useNativeDriver: true }); animation.start(); return () => animation.stop(); }, [error, warmth, reduceMotion]);
   useEffect(() => {
-    const animation = Animated.timing(energy, { toValue: reduceMotion ? 0 : Math.min(1, Math.max(0, level)), duration: 90, useNativeDriver: true });
-    animation.start(); return () => animation.stop();
-  }, [level, energy, reduceMotion]);
-  useEffect(() => {
-    let mounted = true;
-    void AccessibilityInfo.isReduceMotionEnabled().then(value => { if (mounted) setReduceMotion(value); });
-    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
-    return () => { mounted = false; subscription.remove(); };
-  }, []);
-  useEffect(() => {
-    pulse.setValue(0); rotation.setValue(0);
-    if (reduceMotion || phase === 'paused' || phase === 'error') return;
-    const speaking = phase === 'speaking';
+    if (reduceMotion || still) {
+      const settle = Animated.timing(pulse, { toValue: 0, duration: reduceMotion ? 0 : 400, easing: Easing.inOut(Easing.sin), useNativeDriver: true, isInteraction: false });
+      settle.start();
+      return () => settle.stop();
+    }
     const breathing = Animated.loop(Animated.sequence(
       (speaking ? [1, .25, .8, 0] : [1, 0]).map(toValue => Animated.timing(pulse, {
         toValue, duration: speaking ? 260 : phase === 'listening' ? 1300 : 2100,
-        easing: Easing.inOut(Easing.sin), useNativeDriver: true,
+        easing: Easing.inOut(Easing.sin), useNativeDriver: true, isInteraction: false,
       })),
-    ));
-    const orbit = Animated.loop(Animated.timing(rotation, { toValue: 1, duration: phase === 'thinking' ? 4200 : 16000, easing: Easing.linear, useNativeDriver: true }));
-    breathing.start(); orbit.start();
-    return () => { breathing.stop(); orbit.stop(); };
-  }, [phase, reduceMotion, pulse, rotation]);
-  useEffect(() => {
-    connection.setValue(0);
-    if (phase !== 'waiting' || reduceMotion) return;
-    const animation = Animated.loop(Animated.timing(connection, { toValue: 1, duration: 1800, easing: Easing.linear, useNativeDriver: true }));
-    animation.start();
-    return () => animation.stop();
-  }, [phase, reduceMotion, connection]);
+    ), { resetBeforeIteration: false });
+    breathing.start();
+    return () => breathing.stop();
+  }, [phase, speaking, still, reduceMotion, pulse]);
   const size = diameter ?? (compact ? 48 : 192);
-  const paused = phase === 'paused';
-  const speaking = phase === 'speaking';
   return <View accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants" pointerEvents="none" style={{ width: size * 1.42, height: size * 1.42, alignItems: 'center', justifyContent: 'center' }}>
-    <Animated.View style={[orb.halo, { width: size * 1.24, height: size * 1.24, borderRadius: size, opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [paused ? .08 : .2, .46] }), transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, speaking ? 1.14 : 1.05] }) }] }]} />
+    <Animated.View style={[orb.halo, { width: size * 1.24, height: size * 1.24, borderRadius: size, opacity: Animated.add(standby.interpolate({ inputRange: [0, 1], outputRange: [.2, .08] }), pulse.interpolate({ inputRange: [0, 1], outputRange: [0, .26] })), transform: [{ scale: Animated.add(1, Animated.multiply(pulse, speech.interpolate({ inputRange: [0, 1], outputRange: [.05, .14] }))) }] }]} />
     <Animated.View style={[orb.outerOrbit, { width: size * 1.34, height: size * 1.34, borderRadius: size, transform: [{ rotate: rotation.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }] }]}><View style={[orb.satellite, { top: '12%', right: '12%' }]} /></Animated.View>
-    {phase === 'waiting' && <Animated.View testID="mia-connecting-orbit" style={{ position: 'absolute', width: size * 1.13, height: size * 1.13, borderRadius: size, borderWidth: 2, borderColor: '#9471F720', borderTopColor: '#DAC7FF', borderRightColor: '#AA81E990', transform: [{ rotate: connection.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '-360deg'] }) }] }} />}
-    <Animated.View style={[orb.sphere, { width: size, height: size, borderRadius: size / 2, backgroundColor: paused ? '#322B49' : '#49258B', opacity: paused ? .65 : 1, transform: [{ scale: Animated.add(pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.025] }), energy.interpolate({ inputRange: [0, 1], outputRange: [0, .13] })) }] }]}>
-      <View style={[orb.lowerLight, { width: size * .94, height: size * .8, borderRadius: size, backgroundColor: speaking ? '#D5A2EA' : '#6E87E5' }]} />
+    {connecting.visible && <Animated.View testID="mia-connecting-orbit" style={{ position: 'absolute', width: size * 1.13, height: size * 1.13, borderRadius: size, borderWidth: 2, borderColor: '#9471F720', borderTopColor: '#DAC7FF', borderRightColor: '#AA81E990', opacity: connecting.opacity, transform: [{ rotate: connection.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }] }} />}
+    <Animated.View style={[orb.sphere, { width: size, height: size, borderRadius: size / 2, backgroundColor: standby.interpolate({ inputRange: [0, 1], outputRange: ['#49258B', '#322B49'] }), opacity: standby.interpolate({ inputRange: [0, 1], outputRange: [1, .65] }), transform: [{ scale: Animated.add(pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.025] }), energy.interpolate({ inputRange: [0, 1], outputRange: [0, .13] })) }] }]}>
+      <Animated.View style={[orb.lowerLight, { width: size * .94, height: size * .8, borderRadius: size, backgroundColor: speech.interpolate({ inputRange: [0, 1], outputRange: ['#6E87E5', '#D5A2EA'] }) }]} />
       <Animated.View style={[orb.flow, { width: size * 1.14, height: size * .65, borderRadius: size, transform: [{ rotate: rotation.interpolate({ inputRange: [0, 1], outputRange: ['-35deg', '325deg'] }) }] }]} />
       <View style={[orb.innerLight, { width: size * .82, height: size * .7, borderRadius: size }]} />
       <View style={[orb.reflection, { width: size * .56, height: size * .24, borderRadius: size }]} />
       <View style={[orb.sphereContour, { borderRadius: size, inset: size * .07 }]} />
       <View style={[orb.seed, { width: size * .22, height: size * .22, borderRadius: size }]} />
       <Animated.View testID="mia-error-tint" style={{ position: 'absolute', inset: 0, backgroundColor: '#AA426E', opacity: warmth, borderRadius: size / 2 }} />
-      {recording && <View testID="mia-recording-microphone" style={{ position: 'absolute', inset: 0, alignItems: 'center', justifyContent: 'center' }}><Icon name="mic" size={size * .34} color="#F2E6FF" /></View>}
+      {microphone.visible && <Animated.View style={{ position: 'absolute', inset: 0, opacity: microphone.opacity, transform: [{ scale: microphone.opacity.interpolate({ inputRange: [0, 1], outputRange: [.85, 1] }) }] }}><View testID="mia-recording-microphone" style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}><Icon name="mic" size={size * .34} color="#F2E6FF" /></View></Animated.View>}
     </Animated.View>
   </View>;
 }
 
 /** The dock stays visible while the full-screen interaction layer owns gestures. */
-export function VoiceMode({ mia, bottomInset = 0, elapsed = 0, recordingGesture, recordingProgress }: {
+export function VoiceMode({ mia, bottomInset = 0, holding = false, exitProgress, elapsed = 0, recordingGesture, recordingProgress }: {
   mia: Mia; bottomInset?: number; holding?: boolean; elapsed?: number;
-  recordingGesture: RecordingGesture; recordingProgress: Animated.Value;
+  recordingGesture: RecordingGesture; recordingProgress: Animated.Value; exitProgress?: Animated.Value;
 }) {
   const [errorWarmth, setErrorWarmth] = useState(false);
   useEffect(() => {
@@ -106,6 +98,9 @@ export function VoiceMode({ mia, bottomInset = 0, elapsed = 0, recordingGesture,
   const cancelling = active && recordingGesture.cancelReady;
   const sent = mia.voiceNoteStage === 'sent';
   const discarded = mia.voiceNoteStage === 'discarded';
+  const reduced = useReducedMotion();
+  const sentResult = useOrbPresence(sent, reduced);
+  const discardedResult = useOrbPresence(discarded, reduced);
   const draft = chat ? mia.drafts.find(item => item.recipientId === chat.recipient.id) : undefined;
   const showTimer = active || sending || !!mia.recording;
   const { diameter, radius, centreY, headroom, bodyHeight } = agentDockGeometry(height, fontScale, bottomInset, active, showTimer);
@@ -116,10 +111,11 @@ export function VoiceMode({ mia, bottomInset = 0, elapsed = 0, recordingGesture,
     <View testID="agent-dock" style={[orb.dock, { marginTop: headroom, height: bodyHeight }]}>
       <View pointerEvents="none" style={[orb.rails, { top: centreY }]}><View style={orb.rail} /><View style={{ width: diameter * 1.6 }} /><View style={orb.rail} /></View>
       <View style={[orb.coreControl, { top: centreY - radius, width: radius * 2, height: radius * 2 }]}><AgentRecordingAura active={active} cancelReady={cancelling} progress={recordingProgress} diameter={diameter} radius={radius}>
-        <MiaCore phase={sending ? 'thinking' : active ? 'listening' : phase} diameter={diameter} level={active || phase === 'paused' ? 0 : mia.voiceLevel} error={errorWarmth} recording={recording} />
+        <MiaCore phase={sending ? 'thinking' : active ? 'listening' : phase} microphoneMuted={mia.microphoneMuted} diameter={diameter} level={active || phase === 'paused' ? 0 : mia.voiceLevel} error={errorWarmth} recording={recording} />
       </AgentRecordingAura>
-      {sent && <View testID="agent-recording-sent" style={orb.resultSymbol}><Icon name="checkmark" size={24} color="#EADFFF" /></View>}
-      {discarded && <View style={orb.resultSymbol}><Icon name="trash-outline" size={22} color={colors.red} /></View>}
+      {holding && exitProgress && <AgentExitProgress progress={exitProgress} diameter={diameter} />}
+      {sentResult.visible && <Animated.View testID="agent-recording-sent" style={[orb.resultSymbol, { opacity: sentResult.opacity, transform: [{ scale: sentResult.opacity.interpolate({ inputRange: [0, 1], outputRange: [.85, 1] }) }] }]}><Icon name="checkmark" size={24} color="#EADFFF" /></Animated.View>}
+      {discardedResult.visible && <Animated.View testID="agent-recording-discarded" style={[orb.resultSymbol, { opacity: discardedResult.opacity, transform: [{ scale: discardedResult.opacity.interpolate({ inputRange: [0, 1], outputRange: [.85, 1] }) }] }]}><Icon name="trash-outline" size={22} color={colors.red} /></Animated.View>}
       {showTimer && <Text testID="agent-recording-timer" style={[orb.recordingTime, { bottom: radius - diameter / 2 - 24 }, cancelling && orb.cancelText]}>{`${Math.floor((recording ? elapsed : (mia.recording?.durationMs ?? 0) / 1000) / 60)}:${String(Math.floor(recording ? elapsed : (mia.recording?.durationMs ?? 0) / 1000) % 60).padStart(2, '0')}`}{recording ? ' / 2:00' : ''}</Text>}
       </View>
     </View>

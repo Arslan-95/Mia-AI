@@ -69,9 +69,10 @@ export function ChatComposer({ mia, chatId, recipient, bottomInset }: {
     <View style={[styles.composer, { backgroundColor: colors.paper, borderColor: cancelReady ? colors.red : colors.line }]}>
       <View style={[styles.inputArea, showStatus && { minHeight: Math.max(44, Math.ceil(44 * fontScale)) }]}>
         <TextInput accessibilityLabel={`Message ${recipient}`} placeholder="Message…" placeholderTextColor={colors.muted} keyboardAppearance="dark" selectionColor={colors.accentLight} multiline maxLength={8000} value={composer} onChangeText={mia.setComposer}
-          pointerEvents={showStatus ? 'none' : 'auto'} accessibilityElementsHidden={showStatus} importantForAccessibility={showStatus ? 'no-hide-descendants' : 'auto'}
-          style={[styles.input, { color: colors.ink, opacity: showStatus ? 0 : 1 }]} />
-        {showStatus && <View testID="composer-recording-status" accessibilityLiveRegion="polite" style={styles.recordingInfo}>
+          caretHidden={showStatus} accessibilityElementsHidden={showStatus} importantForAccessibility={showStatus ? 'no-hide-descendants' : 'auto'}
+          style={[styles.input, { color: colors.ink }]} />
+        {/* Keep the native first responder visible/enabled so iOS retains its keyboard. */}
+        {showStatus && <View testID="composer-recording-status" accessibilityLiveRegion="polite" style={[styles.recordingInfo, { backgroundColor: colors.paper, borderRadius: 22 }]}>
           {retained && !sending && !active && <Button quiet iconOnly label="Discard recording" icon="close" onPress={() => void mia.discardRecording().catch(mia.fail)} style={styles.discard} />}
           <View style={[styles.dot, { backgroundColor: cancelReady ? colors.red : colors.accentLight }]} />
           <Text testID="composer-recording-time" style={[styles.time, { color: colors.ink }]}>{time}</Text>
