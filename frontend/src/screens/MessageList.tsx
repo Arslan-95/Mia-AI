@@ -5,12 +5,12 @@ import type { Message } from '../types';
 import { agentColors, classicColors, useUi } from '../ui';
 
 type Props = Omit<FlatListProps<Message>, 'data' | 'inverted' | 'contentOffset' | 'onScroll' | 'maintainVisibleContentPosition'> & {
-  userId: string; chatId: string; positions: ChatScrollPositions; data: readonly Message[]; scrollRequest?: string;
+  userId: string; chatId: string; positions: ChatScrollPositions; data: readonly Message[]; scrollRequest?: string; passive?: boolean;
 };
 
 // Keyed by account/chat at the call site: this is a native initial offset,
 // not a scrollToEnd after the history has appeared on screen.
-export function MessageList({ userId, chatId, positions, data, scrollRequest, ...props }: Props) {
+export function MessageList({ userId, chatId, positions, data, scrollRequest, passive = false, ...props }: Props) {
   const list = useRef<FlatList<Message>>(null);
   const followOutgoing = useRef(false);
   const { agent } = useUi();
@@ -21,11 +21,11 @@ export function MessageList({ userId, chatId, positions, data, scrollRequest, ..
   const restored = useRef(offset.y === 0);
   const visibleData = initialData ?? data;
   useEffect(() => {
-    if (!scrollRequest || !positions.consumeScrollRequest(userId, chatId, scrollRequest)) return;
+    if (passive || !scrollRequest || !positions.consumeScrollRequest(userId, chatId, scrollRequest)) return;
     followOutgoing.current = true; restored.current = true; setInitialData(undefined);
     positions.save(userId, chatId, initial.generation, 0, data);
     list.current?.scrollToOffset({ offset: 0, animated: true });
-  }, [scrollRequest]);
+  }, [scrollRequest, passive]);
   const dayStarts = useMemo(() => new Set(visibleData.filter((message, index) =>
     new Date(message.createdAt).toDateString() !== (visibleData[index + 1] ? new Date(visibleData[index + 1]!.createdAt).toDateString() : null)
   ).map(message => message.id)), [visibleData]);
@@ -37,6 +37,7 @@ export function MessageList({ userId, chatId, positions, data, scrollRequest, ..
     maintainVisibleContentPosition={{ minIndexForVisible: 0, autoscrollToTopThreshold: 70 }}
     onScrollBeginDrag={() => { restored.current = true; followOutgoing.current = false; }}
     onScroll={event => {
+      if (passive) return;
       const y = Math.max(0, event.nativeEvent.contentOffset.y);
       // Ignore mount/layout events until the requested offset is installed;
       // a deliberate drag always takes precedence over restoration.

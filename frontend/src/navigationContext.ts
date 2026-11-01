@@ -26,6 +26,7 @@ export class NavigationContext {
   private current: ClientContext = { route: '/chats', revision: 0 };
   private history: string[] = [];
   snapshot(): ClientContext { return { ...this.current }; }
+  backRoute() { return this.history.at(-1) ?? '/chats'; }
   move(route: string) {
     if (route !== this.current.route) {
       if (route.startsWith('/chat/')) this.history.push(this.current.route);

@@ -39,10 +39,14 @@ test('back returns to the screen that opened the chat and root tabs replace the 
   navigation.move(viewRoute('people'));
   navigation.move(viewRoute('chats', 'anna'));
   const entered = navigation.snapshot();
+  assert.equal(navigation.backRoute(), '/contacts');
+  assert.deepEqual(navigation.snapshot(), entered, 'previewing back does not change navigation ownership');
   assert.equal(navigation.back().route, '/contacts');
   assert.ok(navigation.snapshot().revision > entered.revision);
   navigation.move('/chat/anna'); navigation.move('/chat/bob');
+  assert.equal(navigation.backRoute(), '/chat/anna');
   assert.equal(navigation.back().route, '/chat/anna');
+  assert.equal(navigation.backRoute(), '/contacts', 'preview follows the remaining stack after popping a chat');
   assert.equal(navigation.back().route, '/contacts');
   navigation.move('/settings'); navigation.move('/chats'); navigation.move('/chat/anna');
   assert.equal(navigation.back().route, '/chats');

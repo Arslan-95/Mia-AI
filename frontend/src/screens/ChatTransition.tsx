@@ -9,7 +9,7 @@ type Route = Pick<Mia, 'tab' | 'activeChatId'> & { userId?: string };
 export function useChatTransition(mia: Mia) {
   const reduced = useReducedMotion();
   const userId = mia.session?.user.id;
-  const { tab, activeChatId } = mia;
+  const { tab, activeChatId, navigationDirection } = mia;
   const [shown, setShown] = useState<Route>({ tab, activeChatId, userId });
   const current = useRef(shown);
   const opacity = useRef(new Animated.Value(0)).current;
@@ -24,7 +24,7 @@ export function useChatTransition(mia: Mia) {
     const next = { tab, activeChatId, userId };
     const previous = current.current;
     const commit = () => { current.current = next; setShown(next); };
-    const betweenChats = previous.userId === userId && !!userId
+    const betweenChats = navigationDirection !== 'back' && previous.userId === userId && !!userId
       && previous.tab === 'chats' && tab === 'chats'
       && !!previous.activeChatId && !!activeChatId && previous.activeChatId !== activeChatId;
 
@@ -43,7 +43,7 @@ export function useChatTransition(mia: Mia) {
       });
     }
     return () => { generation.current++; animation.current?.stop(); };
-  }, [tab, activeChatId, userId, reduced, opacity]);
+  }, [tab, activeChatId, userId, navigationDirection, reduced, opacity]);
 
   // This effect runs after the destination has committed beneath the opaque
   // overlay, so its header, messages and footer appear together on the reveal.

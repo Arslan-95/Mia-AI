@@ -41,7 +41,7 @@ const sources: Record<string, string> = {
     export const Animated = { add: () => 0, Value: class { constructor(value) { this.value = value; } setValue(value) { this.value = value; } stopAnimation() {} interpolate() { return 0; } }, View: 'AnimatedView', loop: child => {
       const loop = { child, started: false, stopped: false }; n.loops.push(loop);
       return { start() { loop.started = true; }, stop() { loop.stopped = true; } };
-    }, sequence: children => ({ ...animation(), children }), timing: (value, config) => { n.animations.push(config); return animation(config, value); }, spring: animation };
+    }, sequence: children => ({ ...animation(), children }), timing: (value, config) => { n.animations.push(config); return animation(config, value); }, spring: (value, config) => animation(config, value) };
     export const ActivityIndicator='ActivityIndicator', KeyboardAvoidingView='KeyboardAvoidingView', Pressable='Pressable', Modal='Modal', StatusBar='StatusBar', Text='Text', View='View', ScrollView='ScrollView', TextInput='TextInput', FlatList='FlatList', Switch='Switch';
     export const StyleSheet = { create: value => value };
     export const Linking = { openSettings: async () => {} };
@@ -2339,6 +2339,72 @@ test('edge swipe returns from chat, preserves input, and restores the inset-awar
   } finally { await h.close(); }
 });
 
+test('back swipe reveals its real origin and dock beneath the chat, retaining it until cancellation settles', async () => {
+  const h = await mount(false, true);
+  const destination = () => h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'chat-back-destination')[0];
+  const screen = () => h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'chat-screen')[0]!;
+  const flatten = (value: any): any => Array.isArray(value) ? Object.assign({}, ...value.filter(Boolean).map(flatten)) : value ?? {};
+  try {
+    for (const origin of ['chats', 'people'] as const) {
+      await act(async () => { await h.mia.navigate(origin); await h.mia.navigate('chats', 'anna'); });
+      assert.equal(destination(), undefined, 'inactive back pages do not mount duplicate controls or effects');
+      h.n.holdAnimation = true;
+      const back = h.n.backGesture!;
+      await act(async () => { back.onPanResponderGrant!(); back.onPanResponderMove!(null, { dx: 45 }); });
+      const preview = destination()!;
+      assert.equal(h.mia.activeChatId, 'anna', 'dragging previews without committing navigation');
+      assert.equal(preview.props.pointerEvents, 'none');
+      assert.equal(preview.props.importantForAccessibility, 'no-hide-descendants');
+      assert.equal(preview.findAll(node => node.type === 'Text' as any && node.props.accessibilityRole === 'header' && node.props.children === (origin === 'people' ? 'Contacts' : 'Chats')).length, 1);
+      const tabs = preview.findAll(node => node.type === 'Pressable' as any && node.props.accessibilityRole === 'tab');
+      assert.equal(tabs.length, 3, 'the previous page includes its bottom navigation');
+      assert.equal(tabs.find(node => node.props.accessibilityLabel === (origin === 'people' ? 'Contacts' : 'Chats'))!.props.accessibilityState.selected, true);
+      assert.equal(flatten(screen().props.style).transform[0].translateX.value, 45);
+      assert.equal(flatten(preview.props.style).position, 'absolute');
+      assert.equal(flatten(screen().parent!.props.style).overflow, 'hidden');
+      await act(async () => { back.onPanResponderRelease!(null, { dx: 45, vx: 0 }); });
+      assert.ok(destination(), 'keep the destination visible while the cancelled drag springs back');
+      await act(async () => { h.n.finishAnimation!(); });
+      assert.equal(destination(), undefined);
+      assert.equal(h.mia.activeChatId, 'anna');
+      await act(async () => { back.onPanResponderGrant!(); back.onPanResponderMove!(null, { dx: 150 }); back.onPanResponderRelease!(null, { dx: 150, vx: .2 }); });
+      assert.ok(destination());
+      await act(async () => { h.n.finishAnimation!(); });
+      assert.equal(h.mia.tab, origin); assert.equal(h.mia.activeChatId, null);
+      assert.equal(destination(), undefined);
+      h.n.holdAnimation = false;
+    }
+  } finally { await h.close(); }
+});
+
+test('back swipe can reveal the previous conversation without changing its saved scroll position or starting a blackout', async () => {
+  const h = await mount(false, true);
+  const destination = () => h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'chat-back-destination')[0];
+  try {
+    h.n.savedChats.push({ ...chat, id: 'ben', recipient: { ...chat.recipient, id: 'ben', displayName: 'Ben' } });
+    await act(async () => { await h.mia.refresh(); await h.mia.navigate('chats', 'anna'); });
+    const positions = h.mia.chatScrollPositions;
+    positions.save('user', 'anna', positions.read('user', 'anna').generation, 240, []);
+    await act(async () => { await h.mia.navigate('chats', 'ben'); });
+    h.n.holdAnimation = true;
+    const animationsBefore = h.n.animations.filter(item => item.duration === 220).length;
+    const back = h.n.backGesture!;
+    await act(async () => { back.onPanResponderGrant!(); back.onPanResponderMove!(null, { dx: 140 }); });
+    const preview = destination()!;
+    assert.equal(preview.findAll(node => node.type === 'TextInput' as any && node.props.accessibilityLabel === 'Message Anna').length, 1);
+    const list = preview.findAll(node => node.type === 'FlatList' as any)[0]!;
+    assert.deepEqual(list.props.contentOffset, { x: 0, y: 240 });
+    assert.equal(list.props.scrollEnabled, false);
+    await act(async () => { list.props.onScrollBeginDrag(); list.props.onScroll({ nativeEvent: { contentOffset: { y: 0 } } }); });
+    assert.equal(positions.read('user', 'anna').offset, 240, 'preview layout cannot overwrite the actual conversation position');
+    await act(async () => { back.onPanResponderRelease!(null, { dx: 140, vx: .2 }); });
+    await act(async () => { h.n.finishAnimation!(); });
+    assert.equal(h.mia.activeChatId, 'anna');
+    assert.equal(h.n.animations.filter(item => item.duration === 220).length, animationsBefore, 'back uses the interactive slide instead of a second black transition');
+    assert.equal(destination(), undefined);
+  } finally { await h.close(); }
+});
+
 test('chat switching covers the outgoing chat before swapping and reveals the entire destination together', async () => {
   for (const mode of [false, true]) {
     const h = await mount(mode, true, mode);
@@ -2397,6 +2463,25 @@ test('rapid chat switches discard stale transitions and Reduce Motion clears an 
     await act(async () => { h.n.finishAnimation?.(); await h.mia.navigate('chats', 'anna'); });
     assert.equal(h.mia.activeChatId, 'anna');
     assert.equal(overlay().props.pointerEvents, 'none');
+  } finally { await h.close(); }
+});
+
+test('a pending back swipe cannot pop a newer navigation while its destination is still covered', async () => {
+  const h = await mount(false, true);
+  try {
+    h.n.savedChats.push({ ...chat, id: 'ben', recipient: { ...chat.recipient, id: 'ben', displayName: 'Ben' } });
+    await act(async () => { await h.mia.refresh(); await h.mia.navigate('chats', 'anna'); });
+    h.n.holdAnimation = true;
+    const back = h.n.backGesture!;
+    await act(async () => { back.onPanResponderGrant!(); back.onPanResponderRelease!(null, { dx: 140, vx: .2 }); });
+    const stale = h.n.pendingAnimations.find(item => item.active() && item.config.duration === 180)!;
+    await act(async () => { await h.mia.navigate('chats', 'ben'); });
+    assert.equal(h.mia.activeChatId, 'anna', 'the outgoing chat still renders until full black');
+    assert.equal(stale.active(), false, 'logical navigation cancels the swipe before the visual route changes');
+    await act(async () => { stale.finish(); });
+    assert.equal(h.mia.backView.chatId, 'anna', 'the newer navigation stack has not been popped');
+    await act(async () => { h.n.pendingAnimations.find(item => item.active() && item.config.duration === 220)!.finish(); });
+    assert.equal(h.mia.activeChatId, 'ben');
   } finally { await h.close(); }
 });
 

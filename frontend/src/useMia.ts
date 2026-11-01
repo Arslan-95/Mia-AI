@@ -149,6 +149,7 @@ export function useMia() {
   const lease = useRef(new PresentationLease()).current; const audio = useRef<Engine | null>(null); if (!audio.current) audio.current = new Engine();
   const assistantControl = useRef(new AssistantControl()).current;
   const navigation = useRef(new NavigationContext()).current;
+  const navigationDirection = useRef<'forward' | 'back'>('forward');
   const navigationSessionId = useRef(Crypto.randomUUID()).current;
   const [chatScrollPositions] = useState(() => new ChatScrollPositions());
   function clientSnapshot(): ClientContext {
@@ -374,6 +375,7 @@ export function useMia() {
     state.current = { ...state.current, tab: next, activeChatId: chatId };
   }
   function setView(next: Tab, chatId: string | null = null) {
+    navigationDirection.current = 'forward';
     navigation.move(viewRoute(next, chatId)); presentView(next, chatId);
   }
   async function navigate(next: Tab, chatId: string | null = null) {
@@ -385,6 +387,7 @@ export function useMia() {
     if (state.current.tab !== 'chats' || !state.current.activeChatId) return;
     const stopped = interrupt(duplex.available && aiModeRef.current);
     const { view, chatId } = routeView(navigation.back().route);
+    navigationDirection.current = 'back';
     presentView(view, chatId);
     await stopped.catch(fail);
     if (chatId) await loadMessages(chatId).catch(fail);
@@ -1244,6 +1247,7 @@ export function useMia() {
     return () => { cancelled = true; void conversation.stop(); };
   }, [voiceSessionEnabled, session?.token, session?.user.profileComplete, assistantSession?.id, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, inForeground, suspendLegacyAudio, voiceRevision, voiceFault, voiceRecoverable, realtimeReady]);
   return { messageReference, originalPlayback, referencePresented, referenceDismissalRevision: referencePresentation.current?.revision, booting, session, aiMode, microphoneMuted, toggleMicrophone, stopAssistantReply, voiceLevel, voicePhase, voiceFault, error, errorRevision, setError, scrollRequests, busy, tab, capabilities, chats, contacts, drafts, messages, chatScrollPositions, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, recordingRecipient: recordDestination.current, voiceNoteStage, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, navigateBack, startChat, sendText, sendPending, draftAction, interrupt, playMedia, toggleMediaPlayback, startRecording, beginHeldRecording, endHeldRecording, finishRecording, useRecording, discardRecording, preview, stopAudio,
+    backView: routeView(navigation.backRoute()), navigationDirection: navigationDirection.current, navigationRevision: navigation.snapshot().revision,
     setComposer: (text: string) => { if (activeChatId) setComposers(previous => ({ ...previous, [activeChatId]: text })); },
   };
 }

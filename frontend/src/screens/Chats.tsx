@@ -10,7 +10,9 @@ import { MessageList } from './MessageList';
 import { ChatComposer } from './ChatComposer';
 import { ChatsHeader, ConversationHeader } from './ConversationHeaders';
 
-export function Chats({ mia, bottomInset, overlayInset = 0 }: { mia: Mia; bottomInset: number; overlayInset?: number }) {
+export function Chats({ mia, bottomInset, overlayInset = 0, preview = false, renderBackScreen }: {
+  mia: Mia; bottomInset: number; overlayInset?: number; preview?: boolean; renderBackScreen?(): React.ReactNode;
+}) {
   const { agent, colors, s } = useUi();
   const c = agent ? agentStyles : classicStyles;
   const { width, fontScale } = useWindowDimensions();
@@ -19,8 +21,8 @@ export function Chats({ mia, bottomInset, overlayInset = 0 }: { mia: Mia; bottom
   const heading = useRef<Text>(null);
   const [query, setQuery] = useState('');
   useEffect(() => {
-    if (chat && !mia.aiMode) { const node = findNodeHandle(heading.current); if (node) AccessibilityInfo.setAccessibilityFocus(node); }
-  }, [chat?.id]);
+    if (chat && !mia.aiMode && !preview) { const node = findNodeHandle(heading.current); if (node) AccessibilityInfo.setAccessibilityFocus(node); }
+  }, [chat?.id, preview]);
   const searchQuery = query.trim().toLowerCase();
   const matchingChats = mia.chats.filter(item => `${item.recipient.displayName} ${item.recipient.username}`.toLowerCase().includes(searchQuery));
   if (!chat) return <View style={{ flex: 1 }}><Reveal style={{ flex: 1 }}><ScrollView contentContainerStyle={[c.content, { paddingHorizontal: width < 375 ? 16 : 20, paddingBottom: 20 + overlayInset }]} keyboardShouldPersistTaps="handled">
@@ -38,9 +40,9 @@ export function Chats({ mia, bottomInset, overlayInset = 0 }: { mia: Mia; bottom
 
   const messages = mia.messages[chat.id] ?? [];
   const drafts = mia.drafts.filter(draft => draft.recipientId === chat.recipient.id);
-  return <ChatBackGesture chatId={chat.id} enabled={!mia.aiMode} onBack={() => void mia.navigateBack()}>
+  const conversation = <>
     <ConversationHeader name={chat.recipient.displayName} username={chat.recipient.username} headingRef={heading} onBack={() => void mia.navigateBack()} />
-    <MessageList key={`${mia.session!.user.id}/${chat.id}`} userId={mia.session!.user.id} chatId={chat.id} positions={mia.chatScrollPositions} scrollRequest={mia.scrollRequests[chat.id]}
+    <MessageList key={`${mia.session!.user.id}/${chat.id}`} userId={mia.session!.user.id} chatId={chat.id} positions={mia.chatScrollPositions} scrollRequest={mia.scrollRequests[chat.id]} passive={preview} scrollEnabled={!preview}
       data={messages} keyExtractor={item => item.id} contentContainerStyle={[c.messages, overlayInset > 0 && { paddingTop: 16 + overlayInset }]} ItemSeparatorComponent={() => <View style={c.messageGap} />} keyboardShouldPersistTaps="handled" scrollEventThrottle={32}
       ListFooterComponent={mia.hasOlder[chat.id] ? <Button quiet label="Load earlier messages" onPress={() => void mia.loadMessages(chat.id, messages[messages.length - 1]?.id).catch(mia.fail)} /> : null}
       ListEmptyComponent={<Empty title="Say something" text="A message or a voice note. It starts here." />}
@@ -56,7 +58,9 @@ export function Chats({ mia, bottomInset, overlayInset = 0 }: { mia: Mia; bottom
       </View>} />
     {!mia.aiMode && <View style={{ paddingHorizontal: 16, paddingTop: 8 }}><ConversationStatus error={mia.error} draft={drafts[0]} recipient={chat.recipient.displayName} onDismiss={() => mia.setError('')} onOpenDraft={() => void mia.navigate('drafts')} /></View>}
     {!mia.aiMode && <ChatComposer key={chat.id} mia={mia} chatId={chat.id} recipient={chat.recipient.displayName} bottomInset={bottomInset} />}
-  </ChatBackGesture>;
+  </>;
+  return preview ? <View style={{ flex: 1, backgroundColor: colors.background }}>{conversation}</View>
+    : <ChatBackGesture chatId={chat.id} navigationRevision={mia.navigationRevision} enabled={!mia.aiMode} onBack={() => void mia.navigateBack()} renderBackScreen={renderBackScreen}>{conversation}</ChatBackGesture>;
 }
 
 function createStyles(colors: typeof agentColors, agent: boolean) { return StyleSheet.create({

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Animated, Keyboard, KeyboardAvoidingView, Pressable, ScrollView, StatusBar, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useMia, type Tab } from './useMia';
+import { useMia, type Mia, type Tab } from './useMia';
 import { Auth, CompleteProfile } from './screens/Auth';
 import { Chats } from './screens/Chats';
 import { VoiceMode } from './screens/AssistantOrb';
@@ -66,15 +66,7 @@ function Application() {
         {mia.booting ? <View testID="app-startup" style={app.loading}><ActivityIndicator accessibilityLabel="Opening Mia" color={ui.colors.muted} /></View>
           : !mia.session ? <Auth mia={mia} />
           : !mia.session.user.profileComplete ? <CompleteProfile mia={mia} />
-          : <View style={app.fill}>
-            <View style={app.fill}>{mia.tab === 'people' ? <People mia={mia} overlayInset={agentFooterClearance} /> : mia.tab === 'settings' ? <Settings mia={mia} overlayInset={agentFooterClearance} /> : mia.tab === 'drafts' ? <ScrollView contentContainerStyle={[ui.s.content, { paddingBottom: 20 + agentFooterClearance }]} keyboardShouldPersistTaps="handled"><ScreenHeader title="Saved messages" />{mia.drafts.length ? voiceMode ? <Text style={ui.s.small}>{mia.drafts.length} saved {mia.drafts.length === 1 ? 'message' : 'messages'}. Ask Mia to review or open a saved message.</Text> : <MessageDrafts mia={mia} drafts={mia.drafts} /> : <Empty icon="bookmark-outline" title="All clear" text="Messages you prepare with Mia appear here for review." />}</ScrollView> : <Chats mia={mia} bottomInset={voiceMode ? 0 : bottomInset} overlayInset={agentFooterClearance} />}</View>
-            {!voiceMode && !chatOpen && !!mia.error && <View style={{ paddingHorizontal: 16 }}><ConversationStatus error={mia.error} onDismiss={() => mia.setError('')} /></View>}
-            {!voiceMode && !chatOpen && <View style={[app.dock, { paddingBottom: Math.max(bottomInset, 12) }]}>
-              <Nav item={tabs[0]!} selected={mia.tab === 'people'} onPress={() => void mia.navigate('people')} count={0} />
-              <Nav item={tabs[1]!} selected={mia.tab === 'chats' || mia.tab === 'drafts'} onPress={() => void mia.navigate('chats')} count={mia.chats.reduce((sum, chat) => sum + chat.unreadCount, 0)} />
-              <Nav item={tabs[2]!} selected={mia.tab === 'settings'} onPress={() => void mia.navigate('settings')} count={0} />
-            </View>}
-          </View>}
+          : <Workspace mia={mia} bottomInset={bottomInset} overlayInset={agentFooterClearance} />}
       </KeyboardAvoidingView>
     </SafeAreaView>
     {voiceMode && chatOpen && <MessageReferenceCard key={mia.activeChatId} source={mia.messageReference?.chatId === mia.activeChatId ? mia.messageReference : null} userId={mia.session!.user.id} playback={mia.originalPlayback} bottomClearance={agentFooterClearance} contentInsets={insets} dismissalRevision={mia.referenceDismissalRevision} onPresented={mia.referencePresented} />}
@@ -90,6 +82,25 @@ function Application() {
     </View>
     <ChatTransitionOverlay opacity={transition.opacity} transitioning={transition.transitioning} />
   </View></UiProvider>;
+}
+
+/** The same complete page is used for the active route and the back-swipe destination. */
+function Workspace({ mia, bottomInset, overlayInset, preview = false }: {
+  mia: Mia; bottomInset: number; overlayInset: number; preview?: boolean;
+}) {
+  const ui = useUi();
+  const voiceMode = mia.aiMode;
+  const chatOpen = mia.tab === 'chats' && mia.chats.some(chat => chat.id === mia.activeChatId);
+  return <View style={app.fill}>
+    <View style={app.fill}>{mia.tab === 'people' ? <People mia={mia} overlayInset={overlayInset} /> : mia.tab === 'settings' ? <Settings mia={mia} overlayInset={overlayInset} /> : mia.tab === 'drafts' ? <ScrollView contentContainerStyle={[ui.s.content, { paddingBottom: 20 + overlayInset }]} keyboardShouldPersistTaps="handled"><ScreenHeader title="Saved messages" />{mia.drafts.length ? voiceMode ? <Text style={ui.s.small}>{mia.drafts.length} saved {mia.drafts.length === 1 ? 'message' : 'messages'}. Ask Mia to review or open a saved message.</Text> : <MessageDrafts mia={mia} drafts={mia.drafts} /> : <Empty icon="bookmark-outline" title="All clear" text="Messages you prepare with Mia appear here for review." />}</ScrollView> : <Chats mia={mia} bottomInset={voiceMode ? 0 : bottomInset} overlayInset={overlayInset} preview={preview}
+      renderBackScreen={() => <Workspace mia={{ ...mia, tab: mia.backView.view, activeChatId: mia.backView.chatId }} bottomInset={bottomInset} overlayInset={overlayInset} preview />} />}</View>
+    {!voiceMode && !chatOpen && !!mia.error && <View style={{ paddingHorizontal: 16 }}><ConversationStatus error={mia.error} onDismiss={() => mia.setError('')} /></View>}
+    {!voiceMode && !chatOpen && <View style={[app.dock, { paddingBottom: Math.max(bottomInset, 12) }]}>
+      <Nav item={tabs[0]!} selected={mia.tab === 'people'} onPress={() => void mia.navigate('people')} count={0} />
+      <Nav item={tabs[1]!} selected={mia.tab === 'chats' || mia.tab === 'drafts'} onPress={() => void mia.navigate('chats')} count={mia.chats.reduce((sum, chat) => sum + chat.unreadCount, 0)} />
+      <Nav item={tabs[2]!} selected={mia.tab === 'settings'} onPress={() => void mia.navigate('settings')} count={0} />
+    </View>}
+  </View>;
 }
 
 function Nav({ item, selected, onPress, count }: { item: typeof tabs[number]; selected: boolean; onPress: () => void; count: number }) {
