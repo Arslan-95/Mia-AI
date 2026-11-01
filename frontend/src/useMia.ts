@@ -13,6 +13,8 @@ import { ChatScrollPositions } from './chatScrollPositions';
 import { Engine } from './audio/engine';
 import { DuplexAudio } from './audio/duplex';
 import { PcmPlayback } from './audio/pcmPlayback';
+import { VoiceMediaCache } from './audio/mediaCache';
+import { FileVoiceMediaStore } from './audio/mediaStore';
 import { diagnoseVoiceNote } from './voiceNoteDiagnostics';
 import { concatBytes } from './audio/wav';
 import { pcmLevel } from './audio/level';
@@ -64,6 +66,7 @@ export function useMia() {
   const nativePCM = useRef<{ parts: Uint8Array[]; bytes: number }>({ parts: [], bytes: 0 });
   const nativeRecording = useRef(false);
   const nativeMedia = useRef<AbortController | null>(null);
+  const mediaLoad = useRef<AbortController | null>(null);
   const aiModeRef = useRef(false);
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const [errorRevision, setErrorRevision] = useState(0);
@@ -183,7 +186,23 @@ export function useMia() {
     setScrollRequests(previous => previous[chatId] === key ? previous : { ...previous, [chatId]: key });
   }
   const api = useMemo(() => new Api(address, session, () => { void clearSession(); }), [address, session]);
+  const voiceCache = useMemo(() => session ? new VoiceMediaCache(new FileVoiceMediaStore(address, session.user.id), {
+    baseUrl: address, token: session.token, onUnauthorized: () => { void clearSession(); },
+  }) : null, [session?.user.id]);
+  if (voiceCache && session) voiceCache.updateToken(session.token);
+  useEffect(() => { voiceCache?.activate(); return () => voiceCache?.dispose(); }, [voiceCache]);
+  useEffect(() => {
+    voiceCache?.setPrefetchEnabled(inForeground);
+    if (!inForeground || !session?.user.profileComplete) return;
+    const recent = tab === 'chats' && activeChatId ? (messages[activeChatId] ?? []).slice(0, 30) : [];
+    voiceCache?.prefetch(recent.flatMap(item => item.kind === 'voice' && item.mediaId ? [item.mediaId] : []));
+    voiceCache?.prefetch(chats.slice(0, 30).flatMap(item => item.lastMessage?.kind === 'voice' && item.lastMessage.mediaId ? [item.lastMessage.mediaId] : []));
+  }, [voiceCache, inForeground, session?.user.profileComplete, tab, activeChatId, messages[activeChatId ?? ''], chats]);
+  function prefetchVoiceMessages(items: readonly Message[]) {
+    if (foreground.current) voiceCache?.prefetch(items.flatMap(item => item.kind === 'voice' && item.mediaId ? [item.mediaId] : []), true);
+  }
   async function clearSession() {
+    voiceCache?.dispose(); mediaLoad.current?.abort();
     heldRecording.current?.controller.abort(); heldRecording.current = null;
     localVoiceNote.current = null; recordDestination.current = null; uploadedVoiceNote.current = null;
     clearReference(); seenActions.current.clear();
@@ -342,6 +361,7 @@ export function useMia() {
     }
     const stopEpoch = originalAudioEpoch.current;
     setMediaPaused(false);
+    mediaLoad.current?.abort(); mediaLoad.current = null;
     nativeMedia.current?.abort(); nativeMedia.current = null;
     if (nativeRecording.current) { nativeRecording.current = false; duplex.cancelRecording(); }
     const previousOperation = originalOperation.current; originalOperation.current = null;
@@ -555,6 +575,7 @@ export function useMia() {
         requestChatBottom(message.chatId, message.clientMessageId ?? message.id);
       }
       setMessages(previous => ({ ...previous, [message.chatId]: mergeMessages(previous[message.chatId] ?? [], [message]) }));
+      if (!replayed && foreground.current && message.kind === 'voice' && message.mediaId) voiceCache?.prefetch([message.mediaId]);
       await refresh();
       if (foreground.current && state.current.tab === 'chats' && state.current.activeChatId === message.chatId) await api.request(`/v1/chats/${message.chatId}/read`, 'POST', { messageId: message.id });
     } else if (event.type === 'chat.read' || event.type.startsWith('draft.') || event.type === 'contact.updated') await refresh();
@@ -896,6 +917,8 @@ export function useMia() {
     originalMediaActive.current = true;
     setMediaPaused(false);
     setOriginalPlayback({ mediaId, operationId, state: 'preparing', positionMs: 0 });
+    let cached: Awaited<ReturnType<VoiceMediaCache['acquire']>> | undefined;
+    let load: AbortController | undefined;
     try {
       if (!onStarted) { setManualAudio(true); if (!duplex.available || !aiModeRef.current) await Promise.all([conversation.stop(), stopNativeVoice()]); }
       if (originalAudioEpoch.current !== operation) throw new CancelledError();
@@ -903,6 +926,10 @@ export function useMia() {
       if (originalAudioEpoch.current !== operation || !allowed() || !foreground.current) throw new CancelledError();
       originalOperation.current = operationId;
       setAudioState('playing');
+      if (!voiceCache) throw new CancelledError();
+      load = mediaLoad.current = new AbortController();
+      cached = await voiceCache.acquire(mediaId, load.signal);
+      if (originalAudioEpoch.current !== operation || !allowed() || !foreground.current) throw new CancelledError();
       const progress = (progress: import('./audio/types').PlaybackProgress) => {
         if (originalOperation.current !== operationId || !allowed()) return;
         setOriginalPlayback(previous => previous?.operationId === operationId ? { ...previous,
@@ -915,17 +942,19 @@ export function useMia() {
         setOriginalPlayback(value => value?.operationId === operationId ? { ...value, state: 'playing' } : value); onStarted?.();
       };
       if (aiModeRef.current) {
-        await playPcmMedia(`${address}/v1/media/${mediaId}`, { Authorization: `Bearer ${session!.token}` }, started, progress,
+        await playPcmMedia(cached.uri, undefined, started, progress,
           player => { mediaControls.current = { mediaId, operationId, pause: () => player.pause(), resume: () => player.resume() }; }, onStarted ? 175000 : undefined);
       } else {
         mediaControls.current = { mediaId, operationId, pause: () => audio.current!.pausePlayback(), resume: () => audio.current!.resumePlayback() };
-        await audio.current!.play(`${address}/v1/media/${mediaId}`, { Authorization: `Bearer ${session!.token}` }, started, progress);
+        await audio.current!.play(cached.uri, undefined, started, progress);
       }
       if (originalOperation.current === operationId) setOriginalPlayback(value => value?.operationId === operationId ? { ...value, state: 'finished', positionMs: value.durationMs ?? value.positionMs } : value);
     } catch (reason) {
       setOriginalPlayback(value => value?.operationId === operationId ? { ...value, state: reason instanceof CancelledError ? 'stopped' : 'failed' } : value);
       throw reason;
     } finally {
+      cached?.release();
+      if (mediaLoad.current === load) mediaLoad.current = null;
       if (mediaPreparation.current?.operation === operation) mediaPreparation.current = null;
       if (mediaControls.current?.operationId === operationId) mediaControls.current = null;
       if (originalAudioEpoch.current === operation) {
@@ -1105,6 +1134,7 @@ export function useMia() {
         const media = uploadedVoiceNote.current?.recording === value ? { id: uploadedVoiceNote.current.mediaId } : await uploadRecording(value);
         if (!current()) throw new CancelledError();
         uploadedVoiceNote.current = { recording: value, mediaId: media.id };
+        try { voiceCache?.remember(media.id, value.uri); } catch { /* Cache failure cannot prevent sending the original recording. */ }
         await sendPending({ chatId: destination.id, content: { kind: 'voice', mediaId: media.id }, clientMessageId: note?.id ?? Crypto.randomUUID(), status: 'sending' }, true);
         if (!current()) throw new CancelledError();
         // Cache-file cleanup cannot undo a server-confirmed delivery.
@@ -1271,6 +1301,7 @@ export function useMia() {
   }, [voiceSessionEnabled, session?.token, session?.user.profileComplete, assistantSession?.id, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, inForeground, suspendLegacyAudio, voiceRevision, voiceFault, voiceRecoverable, realtimeReady]);
   return { messageReference, originalPlayback, referencePresented, referenceDismissalRevision: referencePresentation.current?.revision, booting, session, aiMode, microphoneMuted, toggleMicrophone, stopAssistantReply, voiceLevel, voicePhase, voiceFault, error, errorRevision, setError, scrollRequests, busy, tab, capabilities, chats, contacts, drafts, messages, chatScrollPositions, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, recordingRecipient: recordDestination.current, voiceNoteStage, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, navigateBack, startChat, sendText, sendPending, draftAction, interrupt, playMedia, toggleMediaPlayback, startRecording, beginHeldRecording, endHeldRecording, finishRecording, useRecording, discardRecording, preview, stopAudio,
     backView: routeView(navigation.backRoute()), navigationDirection: navigationDirection.current, navigationRevision: navigation.snapshot().revision,
+    prefetchVoiceMessages,
     setComposer: (text: string) => { if (activeChatId) setComposers(previous => ({ ...previous, [activeChatId]: text })); },
   };
 }

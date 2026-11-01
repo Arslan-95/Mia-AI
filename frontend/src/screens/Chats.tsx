@@ -43,7 +43,7 @@ export function Chats({ mia, bottomInset, overlayInset = 0, preview = false, ren
   const conversation = <>
     <ConversationHeader name={chat.recipient.displayName} username={chat.recipient.username} headingRef={heading} onBack={() => void mia.navigateBack()} />
     <MessageList key={`${mia.session!.user.id}/${chat.id}`} userId={mia.session!.user.id} chatId={chat.id} positions={mia.chatScrollPositions} scrollRequest={mia.scrollRequests[chat.id]} passive={preview} scrollEnabled={!preview}
-      data={messages} keyExtractor={item => item.id} contentContainerStyle={[c.messages, overlayInset > 0 && { paddingTop: 16 + overlayInset }]} ItemSeparatorComponent={() => <View style={c.messageGap} />} keyboardShouldPersistTaps="handled" scrollEventThrottle={32}
+      data={messages} onVisibleMessages={mia.prefetchVoiceMessages} keyExtractor={item => item.id} contentContainerStyle={[c.messages, overlayInset > 0 && { paddingTop: 16 + overlayInset }]} ItemSeparatorComponent={() => <View style={c.messageGap} />} keyboardShouldPersistTaps="handled" scrollEventThrottle={32}
       ListFooterComponent={mia.hasOlder[chat.id] ? <Button quiet label="Load earlier messages" onPress={() => void mia.loadMessages(chat.id, messages[messages.length - 1]?.id).catch(mia.fail)} /> : null}
       ListEmptyComponent={<Empty title="Say something" text="A message or a voice note. It starts here." />}
       renderItem={({ item }) => {

@@ -10,6 +10,7 @@ import type { Recording, PlaybackProgress } from '../src/audio/types';
 import type { Frame } from '../src/realtime';
 import type { Contact, Draft, Message, MessageReference, ServerEvent, Turn } from '../src/types';
 import { pressGesture } from './pressability';
+import { pcmWav } from '../src/audio/wav';
 
 // Run the real hook, API and conversation loop. Only OS audio, secure storage
 // and the socket transport are substituted, so React lifecycle races execute.
@@ -62,6 +63,19 @@ const sources: Record<string, string> = {
       if (n.holdStartup) await new Promise(resolve => { n.releaseStartupSession = resolve; });
       return n.session;
     }, write: async value => { n.session = value; } };`,
+  './audio/mediaStore': `import { pcmWav } from '${root}/src/audio/wav';
+    const n = globalThis.__miaNative;
+    export class FileVoiceMediaStore {
+      constructor(server, user) { this.prefix = server + '/' + user + '/'; }
+      key(id) { return this.prefix + id; }
+      entries() { return [...n.cachedVoices].filter(([key]) => key.startsWith(this.prefix)).map(([, item]) => item); }
+      lookup(id) { return n.cachedVoices.get(this.key(id)) ?? null; }
+      async read(id) { return this.lookup(id).bytes; }
+      write(id, bytes, usedAt) { const item = { id, uri: 'file:///cached/' + encodeURIComponent(this.key(id)) + '.wav', size: bytes.length, usedAt, bytes }; n.cachedVoices.set(this.key(id), item); return item; }
+      copy(id, sourceUri, usedAt) { n.cacheImports.push({ id, sourceUri }); return this.write(id, pcmWav(new Uint8Array(n.noteDuration * 48)), usedAt); }
+      touch(id, usedAt) { if (this.lookup(id)) this.lookup(id).usedAt = usedAt; }
+      remove(id) { n.cachedVoices.delete(this.key(id)); }
+    }`,
   './audio/engine': `import { CancelledError, UserFacingError } from '${root}/src/errors';
     const n = globalThis.__miaNative;
     export class Engine {
@@ -87,10 +101,11 @@ const sources: Record<string, string> = {
       async playPcm() { n.playbacks++; await new Promise(resolve => { n.playback = resolve; }); }
       async pausePlayback() { n.playerPaused = true; if (n.holdPlayerPause) await new Promise(resolve => { n.releasePlayerPause = resolve; }); }
       resumePlayback() { n.playerPaused = false; }
-      async play(_, __, started, progress) { n.playbackProgress = progress; started?.(); await this.playPcm(); }
+      async play(uri, headers, started, progress) { n.playedUris.push(uri); n.playbackProgress = progress; started?.(); await this.playPcm(); }
       async disposeRecording(recording) { if (n.failRecordingCleanup) throw new Error('Cache cleanup failed'); n.deleted.push(recording.uri); }
       async savePcm(pcm) { n.savedPcm = pcm; return { uri: 'file:///note.wav', durationMs: pcm.length / 48 }; }
       async readPcm(uri, headers, signal) {
+        n.pcmUris.push(uri);
         if (n.holdMediaRead) await new Promise(resolve => { n.releaseMediaRead = resolve; });
         if (signal?.aborted) throw new CancelledError(); return new Uint8Array(480000);
       }
@@ -144,7 +159,7 @@ const bundle = build({
   bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react'],
   define: { 'process.env.EXPO_PUBLIC_API_URL': JSON.stringify('http://mia.test') },
   plugins: [{ name: 'native-test', setup(build) {
-    build.onResolve({ filter: /^(react-native|react-native-safe-area-context|@expo\/vector-icons\/Ionicons|expo-crypto|\.\/storage|\.\/audio\/engine|\.\.\/\.\.\/modules\/mia-voice|\.\/realtime)$/ }, args => ({ path: args.path, namespace: 'native-test' }));
+    build.onResolve({ filter: /^(react-native|react-native-safe-area-context|@expo\/vector-icons\/Ionicons|expo-crypto|\.\/storage|\.\/audio\/engine|\.\/audio\/mediaStore|\.\.\/\.\.\/modules\/mia-voice|\.\/realtime)$/ }, args => ({ path: args.path, namespace: 'native-test' }));
     build.onLoad({ filter: /.*/, namespace: 'native-test' }, args => ({ contents: sources[args.path], resolveDir: root }));
   } }],
 });
@@ -551,6 +566,8 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     holdContacts: false, contactsHeld: false, releaseContacts: null as (() => void) | null,
     history: [] as Message[],
     referenceSources: [] as Message[],
+    cachedVoices: new Map<string, { id: string; uri: string; size: number; usedAt: number; bytes: Uint8Array }>(),
+    cacheImports: [] as { id: string; sourceUri: string }[], playedUris: [] as string[], pcmUris: [] as string[],
     savedChats: [chat],
     holdPeopleSearch: false,
     failPreferences: false,
@@ -567,6 +584,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     if (n.offline) throw new Error('Network unavailable');
     const response = (body: unknown) => Response.json(body);
     if (path === '/v1/me') return response(session.user);
+    if (path.startsWith('/v1/media/')) return new Response(pcmWav(new Uint8Array(480000)), { headers: { 'Content-Type': 'audio/wav' } });
     if (path === '/v1/auth/logout') return response({});
     if (path === '/health/ready') {
       if (n.holdHealth) {
@@ -1126,6 +1144,77 @@ test('stopping classic playback during preparation prevents a late player from s
     assert.equal(h.n.playbacks, 0); assert.equal(h.mia.originalPlayback?.state, 'stopped');
     assert.equal(h.mia.audioState, 'idle');
   } finally { h.n.releaseNativeStop?.(); await h.close(); }
+});
+
+test('opening a chat preloads voice notes and classic and Mia playback reuse the same offline cached file', async () => {
+  const h = await mount(false, true, true);
+  const downloads = () => h.n.requests.filter(request => request.path.startsWith('/v1/media/'));
+  try {
+    h.n.history = [{ id: 'cached-message', chatId: 'anna', senderId: 'recipient', kind: 'voice', text: null, mediaId: 'shared-original', durationMs: 10000, createdAt: new Date().toISOString() }];
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    await h.wait(() => h.n.cachedVoices.size === 1);
+    assert.equal(downloads().length, 1, 'prefetch happens before pressing Play');
+    h.n.offline = true;
+    let classic!: Promise<void>;
+    await act(async () => { classic = h.mia.playMedia('shared-original'); }); await h.wait(() => !!h.n.playback);
+    const uri = h.n.playedUris.at(-1)!; assert.ok(uri.startsWith('file:///cached/'));
+    await act(async () => { h.n.playback!(); await classic; });
+    h.n.offline = false;
+    await act(async () => { await h.mia.saveAiMode(true); }); await h.wait(() => !!h.n.nativePCM);
+    h.n.offline = true;
+    let agent!: Promise<void>;
+    await act(async () => { agent = h.mia.playMedia('shared-original'); }); await h.wait(() => !!h.n.playback);
+    assert.equal(h.n.pcmUris.at(-1), uri, 'Mia decodes the same local original WAV');
+    await act(async () => { h.n.playback!(); await agent; });
+    assert.equal(downloads().length, 1);
+  } finally { h.n.offline = false; await h.close(); }
+});
+
+test('visible older messages and newly received voice notes download ahead of playback', async () => {
+  const h = await mount(false, true);
+  try {
+    h.n.history = Array.from({ length: 36 }, (_, index): Message => ({ id: `message-${index}`, chatId: 'anna', senderId: 'recipient', kind: index === 35 ? 'voice' : 'text', text: index === 35 ? null : 'Text', mediaId: index === 35 ? 'old-original' : null, createdAt: new Date(Date.now() - index * 1000).toISOString() }));
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    assert.equal(h.n.cachedVoices.size, 0, 'do not fetch the entire older conversation eagerly');
+    const list = h.tree.findAll(node => node.type === 'FlatList' as any)[0]!;
+    await act(async () => { list.props.onViewableItemsChanged({ viewableItems: [{ item: h.n.history[35], index: 35, key: 'message-35', isViewable: true }] }); });
+    await h.wait(() => h.n.cachedVoices.size === 1);
+    const incoming: Message = { id: 'new-voice', chatId: 'anna', senderId: 'recipient', kind: 'voice', text: null, mediaId: 'new-original', createdAt: new Date().toISOString() };
+    await act(async () => { await h.n.event({ id: 'new-event', type: 'message.created', payload: incoming, createdAt: incoming.createdAt }, 0); });
+    await h.wait(() => h.n.cachedVoices.size === 2);
+    assert.equal(h.n.playbacks, 0, 'downloading never starts audio by itself');
+  } finally { await h.close(); }
+});
+
+test('a sent voice note enters the cache before its temporary original is deleted and never downloads back', async () => {
+  const h = await mount(false, true);
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); await h.mia.startRecording(); await h.mia.finishRecording(); await h.mia.useRecording(); });
+    assert.deepEqual(h.n.cacheImports, [{ id: 'media', sourceUri: 'file:///note.wav' }]);
+    assert.ok(h.n.deleted.includes('file:///note.wav'));
+    h.n.offline = true;
+    let playback!: Promise<void>;
+    await act(async () => { playback = h.mia.playMedia('media'); }); await h.wait(() => !!h.n.playback);
+    await act(async () => { h.n.playback!(); await playback; });
+    assert.equal(h.n.requests.filter(request => request.path.startsWith('/v1/media/')).length, 0);
+  } finally { h.n.offline = false; await h.close(); }
+});
+
+test('cached voice startup does not flash a loading spinner while a genuine wait still shows progress', async t => {
+  const h = await mount(false, true); let row: ReactTestRenderer | undefined;
+  const message: Message = { id: 'voice', chatId: 'anna', senderId: 'user', kind: 'voice', text: null, mediaId: 'voice', durationMs: 1000, createdAt: new Date().toISOString() };
+  const sample = (state: 'preparing' | 'playing', operationId: string) => React.createElement(h.components.VoiceNoteBubble, { message, playback: { mediaId: 'voice', operationId, state }, onToggle() {} });
+  const spinner = () => row!.root.findAll(node => node.type === 'ActivityIndicator' as any);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    await act(async () => { row = create(sample('preparing', 'cached')); });
+    await act(async () => { t.mock.timers.tick(100); }); assert.equal(spinner().length, 0);
+    await act(async () => { row!.update(sample('playing', 'cached')); t.mock.timers.tick(100); });
+    assert.equal(spinner().length, 0, 'a local startup never displays a transient download indicator');
+    await act(async () => { row!.update(sample('preparing', 'network')); });
+    await act(async () => { t.mock.timers.tick(180); }); assert.equal(spinner().length, 1);
+    await act(async () => { row!.update(sample('playing', 'network')); }); assert.equal(spinner().length, 0);
+  } finally { if (row) await act(async () => { row!.unmount(); }); t.mock.timers.reset(); await h.close(); }
 });
 
 test('classic voice messages show inline play and pause with real duration and never open a bottom player', async () => {

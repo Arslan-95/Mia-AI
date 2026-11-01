@@ -1,16 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { FlatList, StyleSheet, Text, View, type FlatListProps } from 'react-native';
+import { FlatList, StyleSheet, Text, View, type FlatListProps, type ViewToken } from 'react-native';
 import type { ChatScrollPositions } from '../chatScrollPositions';
 import type { Message } from '../types';
 import { agentColors, classicColors, useUi } from '../ui';
 
 type Props = Omit<FlatListProps<Message>, 'data' | 'inverted' | 'contentOffset' | 'onScroll' | 'maintainVisibleContentPosition'> & {
   userId: string; chatId: string; positions: ChatScrollPositions; data: readonly Message[]; scrollRequest?: string; passive?: boolean;
+  onVisibleMessages?(items: readonly Message[]): void;
 };
 
 // Keyed by account/chat at the call site: this is a native initial offset,
 // not a scrollToEnd after the history has appeared on screen.
-export function MessageList({ userId, chatId, positions, data, scrollRequest, passive = false, ...props }: Props) {
+export function MessageList({ userId, chatId, positions, data, scrollRequest, passive = false, onVisibleMessages, ...props }: Props) {
   const list = useRef<FlatList<Message>>(null);
   const followOutgoing = useRef(false);
   const { agent } = useUi();
@@ -20,6 +21,11 @@ export function MessageList({ userId, chatId, positions, data, scrollRequest, pa
   const offset = useRef({ x: 0, y: initial.offset ?? 0 }).current;
   const restored = useRef(offset.y === 0);
   const visibleData = initialData ?? data;
+  const visibility = useRef({ passive, onVisibleMessages }); visibility.current = { passive, onVisibleMessages };
+  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 20 }).current;
+  const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: ViewToken<Message>[] }) => {
+    if (!visibility.current.passive) visibility.current.onVisibleMessages?.(viewableItems.filter(item => item.isViewable).map(item => item.item));
+  }).current;
   useEffect(() => {
     if (passive || !scrollRequest || !positions.consumeScrollRequest(userId, chatId, scrollRequest)) return;
     followOutgoing.current = true; restored.current = true; setInitialData(undefined);
@@ -29,7 +35,7 @@ export function MessageList({ userId, chatId, positions, data, scrollRequest, pa
   const dayStarts = useMemo(() => new Set(visibleData.filter((message, index) =>
     new Date(message.createdAt).toDateString() !== (visibleData[index + 1] ? new Date(visibleData[index + 1]!.createdAt).toDateString() : null)
   ).map(message => message.id)), [visibleData]);
-  return <FlatList {...props} ref={list} data={visibleData} inverted contentOffset={offset}
+  return <FlatList {...props} ref={list} data={visibleData} inverted contentOffset={offset} viewabilityConfig={viewabilityConfig} onViewableItemsChanged={onViewableItemsChanged}
     renderItem={info => <View>
       {dayStarts.has(info.item.id) && <View style={p.day}><Text style={p.dayLabel}>{new Date(info.item.createdAt).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}</Text></View>}
       {props.renderItem?.(info)}
