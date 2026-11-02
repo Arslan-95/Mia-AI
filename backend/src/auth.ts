@@ -2,7 +2,6 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import type { Config } from './config.js';
 import type { Database, Sql } from './db/database.js';
 import { AppError, notFound } from './errors.js';
-import { firebasePhoneVerifier, type FirebasePhoneVerifier } from './firebase-auth.js';
 
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 const OTP_DURATION_MS = 5 * 60 * 1000;
@@ -15,19 +14,13 @@ const invalidCode = () => new AppError(401, 'INVALID_OTP', 'The code is incorrec
 
 export class AuthService {
   private readonly revocations = new Map<string, Set<() => void>>();
-  private readonly verifyFirebase?: FirebasePhoneVerifier;
-  constructor(private readonly db: Database, private readonly config: Pick<Config, 'environment' | 'developmentOtpCode' | 'testPhoneOtps' | 'firebaseProjectId'>,
-    verifier?: FirebasePhoneVerifier) {
-    if (config.firebaseProjectId) this.verifyFirebase = verifier ?? firebasePhoneVerifier(config.firebaseProjectId);
-  }
+  constructor(private readonly db: Database, private readonly config: Pick<Config, 'environment' | 'developmentOtpCode' | 'testPhoneOtps'>) {}
 
   get configured() {
-    return Boolean(this.verifyFirebase) || this.config.testPhoneOtps.size > 0 || (this.config.environment !== 'production' && Boolean(this.config.developmentOtpCode));
+    return this.config.testPhoneOtps.size > 0 || (this.config.environment !== 'production' && Boolean(this.config.developmentOtpCode));
   }
 
   private providerFor(phoneNumber: string) {
-    // Once Firebase is enabled, fixed codes must not bypass real verification.
-    if (this.verifyFirebase) throw this.unavailable();
     const testCode = this.config.testPhoneOtps.get(phoneNumber);
     if (testCode) return { code: testCode, delivery: 'test' as const };
     if (this.config.environment !== 'production' && this.config.developmentOtpCode) {
@@ -57,7 +50,6 @@ export class AuthService {
   }
 
   async verifyCode(challengeId: string, code: string): Promise<AuthSession> {
-    if (this.verifyFirebase) throw this.unavailable();
     if (!this.configured) throw this.unavailable();
     const result = await this.db.transaction<{ session: AuthSession } | { error: AppError }>(async (sql) => {
       const [challenge] = await sql.query<Challenge>(`SELECT id,phone_number AS "phoneNumber",code_hash AS "codeHash",attempts,
@@ -83,23 +75,6 @@ export class AuthService {
     });
     if ('error' in result) throw result.error;
     return result.session;
-  }
-
-  async signInWithFirebase(idToken: string): Promise<AuthSession> {
-    if (!this.verifyFirebase) throw this.unavailable();
-    const identity = await this.verifyFirebase(idToken);
-    if (!/^\+[1-9]\d{6,14}$/.test(identity.phoneNumber)) throw unauthorized();
-    return this.db.transaction(async sql => {
-      await sql.query('DELETE FROM firebase_sign_ins WHERE expires_at <= now()');
-      const consumed = await sql.query(`INSERT INTO firebase_sign_ins(token_hash,expires_at) VALUES ($1,$2)
-        ON CONFLICT DO NOTHING RETURNING token_hash`, [this.tokenHash(idToken), identity.expiresAt]);
-      if (!consumed.length) throw new AppError(401, 'INVALID_PHONE_CREDENTIAL', 'Request a new code and sign in again.');
-      const [user] = await sql.query<User>(`INSERT INTO users(id,phone_number,display_name)
-        VALUES ($1,$2,'New friend') ON CONFLICT(phone_number) DO UPDATE SET phone_number = EXCLUDED.phone_number
-        RETURNING ${columns}`, [randomUUID(), identity.phoneNumber]);
-      if (!user) throw new Error('Account creation failed');
-      return this.createSession(user, sql);
-    });
   }
 
   async updateProfile(userId: string, displayName: string): Promise<User> {

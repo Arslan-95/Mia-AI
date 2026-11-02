@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import type { Mia } from '../useMia';
 import type { OtpChallenge } from '../types';
 import { ApiError } from '../api';
@@ -9,6 +9,8 @@ import { isPossiblePhoneNumber } from 'libphonenumber-js/min';
 import { initialPhoneInput } from '../phoneNumberInput';
 import { PhoneNumberField } from './PhoneNumberField';
 
+const RESEND_COOLDOWN_MS = 2 * 60 * 1000;
+
 export function Auth({ mia }: { mia: Mia }) {
   const [phoneInput, setPhoneInput] = useState(initialPhoneInput);
   const [challenge, setChallenge] = useState<OtpChallenge | null>(null);
@@ -16,11 +18,12 @@ export function Auth({ mia }: { mia: Mia }) {
   const [locked, setLocked] = useState(false);
   const [pending, setPending] = useState<'request' | 'verify' | null>(null);
   const [now, setNow] = useState(Date.now());
+  const [resendAvailableAt, setResendAvailableAt] = useState(0);
   const requestEpoch = useRef(0);
   const phone = phoneInput.number;
   const validPhone = isPossiblePhoneNumber(phone);
   const remaining = challenge ? Math.max(0, Math.ceil((Date.parse(challenge.expiresAt) - now) / 1000)) : 0;
-  const resendRemaining = challenge?.resendAt ? Math.max(0, Math.ceil((Date.parse(challenge.resendAt) - now) / 1000)) : 0;
+  const resendDisabled = !!pending || now < resendAvailableAt;
 
   useEffect(() => {
     if (!challenge) return;
@@ -34,13 +37,15 @@ export function Auth({ mia }: { mia: Mia }) {
   }, []);
 
   async function requestCode() {
-    if (!validPhone || pending) return;
+    if (!validPhone || pending || (challenge && Date.now() < resendAvailableAt)) return;
     const epoch = ++requestEpoch.current;
     setPending('request'); mia.setError('');
     try {
       const next = await mia.requestOtp(phone);
       if (requestEpoch.current !== epoch) return;
-      setChallenge(next); setCode(''); setLocked(false); setNow(Date.now());
+      const requestedAt = Date.now();
+      setChallenge(next); setCode(''); setLocked(false); setNow(requestedAt);
+      setResendAvailableAt(requestedAt + RESEND_COOLDOWN_MS);
     } catch (reason) { if (requestEpoch.current === epoch) mia.fail(reason); }
     finally { if (requestEpoch.current === epoch) setPending(null); }
   }
@@ -55,7 +60,7 @@ export function Auth({ mia }: { mia: Mia }) {
 
   function changeNumber() {
     mia.cancelOtp();
-    requestEpoch.current++; setChallenge(null); setCode(''); setLocked(false); setPending(null); mia.setError('');
+    requestEpoch.current++; setChallenge(null); setCode(''); setLocked(false); setPending(null); setResendAvailableAt(0); mia.setError('');
   }
 
   return (
@@ -81,7 +86,7 @@ export function Auth({ mia }: { mia: Mia }) {
         {!challenge ? (
           <>
             <PhoneNumberField value={phoneInput} onChange={setPhoneInput} editable={!pending} />
-            <Text style={s.small}>We'll send you an SMS with a verification code.</Text>
+            <Text style={s.small}>Use your assigned sign-in code.</Text>
             {!!mia.error && <Notice error>{mia.error}</Notice>}
             <Button label="Continue" icon="arrow-forward" disabled={!validPhone} loading={pending === 'request'} onPress={() => void requestCode()} />
           </>
@@ -100,10 +105,23 @@ export function Auth({ mia }: { mia: Mia }) {
               editable={!pending && remaining > 0 && !locked}
               style={a.code}
             />
-            {locked ? <Notice>This verification session is locked. Request a new code to continue.</Notice> : remaining > 0 ? <Text style={s.small}>Verification expires in {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')}.</Text> : <Notice>This verification session has expired. Request a new code to continue.</Notice>}
+            <View style={a.verificationStatus}>
+              <Text style={[s.small, a.verificationTimer]}>{remaining > 0 ? `Verification expires in ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')}.` : 'Verification expired.'}</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Resend"
+                accessibilityState={{ disabled: resendDisabled, busy: pending === 'request' }}
+                disabled={resendDisabled}
+                hitSlop={10}
+                onPress={() => void requestCode()}
+                style={({ pressed }) => [(resendDisabled || pressed) && a.resendDimmed]}
+              >
+                <Text style={[s.small, a.resend]}>Resend</Text>
+              </Pressable>
+            </View>
+            {locked ? <Notice>This verification session is locked. Request a new code to continue.</Notice> : remaining <= 0 ? <Notice>This verification session has expired. Request a new code to continue.</Notice> : null}
             {!!mia.error && <Notice error>{mia.error}</Notice>}
             <Button label="Verify & continue" icon="checkmark-outline" loading={pending === 'verify'} disabled={!/^\d{6}$/.test(code) || remaining <= 0 || locked || pending === 'request'} onPress={() => void verifyCode()} />
-            <Button secondary label={resendRemaining > 0 ? `Resend code in ${resendRemaining}s` : 'Request a new code'} loading={pending === 'request'} disabled={pending === 'verify' || resendRemaining > 0} onPress={() => void requestCode()} />
             <Button quiet label="Use a different number" disabled={pending === 'verify'} onPress={changeNumber} />
           </>
         )}
@@ -148,4 +166,8 @@ const a = StyleSheet.create({
   form: { width: '100%', gap: 17, padding: 24, borderRadius: 26, backgroundColor: colors.paper, borderWidth: 1, borderColor: colors.line },
   centered: { textAlign: 'center' },
   code: { fontSize: 26, letterSpacing: 8, textAlign: 'center' },
+  verificationStatus: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  verificationTimer: { flexShrink: 1 },
+  resend: { color: colors.accentLight, textDecorationLine: 'underline' },
+  resendDimmed: { opacity: 0.4 },
 });

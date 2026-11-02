@@ -1,5 +1,4 @@
-# Build input rules are independent of Git so the local Firebase app config is
-# included in private EAS build uploads, without uploading server credentials.
+# Keep local credentials and unused provider configuration out of native builds.
 node_modules/
 dist/
 coverage/
@@ -17,7 +16,7 @@ firebase-adminsdk*.json
 *.p8
 *.p12
 *.mobileprovision
-!GoogleService-Info.plist
+GoogleService-Info.plist
 .secret.local
 .firebase/
 .firebaserc

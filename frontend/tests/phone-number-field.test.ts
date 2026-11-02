@@ -35,7 +35,7 @@ async function harness() {
     error: '', setError() {}, cancelOtp() {}, fail(reason: unknown) { throw reason; },
     async requestOtp(phone: string) {
       sent.push(phone);
-      return { challengeId: 'test-challenge', expiresAt: new Date(Date.now() + 300_000).toISOString(), delivery: 'firebase' };
+      return { challengeId: 'test-challenge', expiresAt: new Date(Date.now() + 300_000).toISOString(), delivery: 'test' };
     },
   } as unknown as Mia;
   let renderer!: ReactTestRenderer;
@@ -114,5 +114,38 @@ test('backspace can remove formatting and incomplete, cleared or oversized numbe
     assert.equal(h.button('Continue').props.disabled, true);
     await act(async () => h.button('Continue').props.onPress());
     assert.deepEqual(h.sent, []);
+  } finally { await h.close(); }
+});
+
+test('resend sits beside the verification timer and waits two minutes after each successful request', async t => {
+  let now = Date.now();
+  let tick!: () => void;
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(globalThis, 'setInterval', (callback: () => void) => { tick = callback; return 1 as any; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const h = await harness();
+  const resend = () => h.tree().findAllByType('Pressable' as any).find(node => node.props.accessibilityLabel === 'Resend')!;
+  const advance = async (milliseconds: number) => { now += milliseconds; await act(async () => tick()); };
+  try {
+    await h.type('+995555123456');
+    await act(async () => h.button('Continue').props.onPress());
+    assert.equal(h.button('Start again'), undefined);
+    assert.equal(resend().findByType('Text' as any).props.children, 'Resend');
+    assert.equal(resend().findByType('Text' as any).props.style[1].textDecorationLine, 'underline');
+    assert.ok(resend().parent!.findAllByType('Text' as any).some(node => String(node.props.children).startsWith('Verification expires in')));
+    assert.equal(resend().props.disabled, true);
+    await act(async () => resend().props.onPress());
+    assert.equal(h.sent.length, 1);
+    await advance(119_000);
+    assert.equal(resend().props.disabled, true);
+    await advance(1_000);
+    assert.equal(resend().props.disabled, false);
+    await act(async () => h.tree().findByType('Field' as any).props.onChangeText('123456'));
+    await act(async () => resend().props.onPress());
+    assert.equal(h.sent.length, 2);
+    assert.equal(h.tree().findByType('Field' as any).props.value, '');
+    assert.equal(resend().props.disabled, true);
+    await advance(120_000);
+    assert.equal(resend().props.disabled, false);
   } finally { await h.close(); }
 });

@@ -8,7 +8,6 @@ const messages: Record<string, string> = {
   OFFLINE: 'Unable to connect to Mia. Check your internet connection and try again.',
   UNAUTHORIZED: 'Please sign in again to continue.',
   INVALID_OTP: 'That code is incorrect or has expired. Try again or request a new code.',
-  INVALID_PHONE_CREDENTIAL: 'This verification has expired or was already used. Request a new code to sign in.',
   OTP_LOCKED: 'Too many incorrect attempts. Request a new code to continue.',
   OTP_RATE_LIMIT: 'Please wait a little before requesting another code.',
   INVALID_PHONE_NUMBER: 'Enter the full phone number with country code, for example +1 202 555 0101.',

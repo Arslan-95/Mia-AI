@@ -3,11 +3,10 @@ import { AccessibilityInfo, AppState, Vibration } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { Api, ApiError } from './api';
 import { PhoneSignIn } from './phoneAuth';
-import { SmsAttemptBudget } from './smsAttemptBudget';
 import { CancelledError, UserFacingError, VoiceCaptureUnavailable, userErrorMessage } from './errors';
 import { AssistantControl } from './assistantControl';
 import { NavigationContext, pageView, routeView, sameContext, viewRoute, type View } from './navigationContext';
-import { preferences, sessionStorage, smsAttemptStorage } from './storage';
+import { preferences, sessionStorage } from './storage';
 import { Realtime, type Frame } from './realtime';
 import { PresentationLease, isLiveAction, mergeMessages } from './coordination';
 import { DeviceActionError, deviceActionFailure, speechFailure, type DeviceActionStage } from './deviceActionFeedback';
@@ -29,8 +28,6 @@ import type { AssistantSession, Capabilities, Chat, ClientContext, Contact, Devi
 export type Tab = View;
 const address = (process.env.EXPO_PUBLIC_API_URL ?? '').trim().replace(/\/+$/, '');
 export function useMia() {
-  const phoneSignIn = useRef(new PhoneSignIn(async () => (await import('./phoneAuthNative')).nativePhoneAuth(), Date.now,
-    new SmsAttemptBudget(smsAttemptStorage))).current;
   const [booting, setBooting] = useState(true); const [session, setSession] = useState<Session | null>(null);
   const [aiMode, setAiMode] = useState(false);
   const [microphoneMuted, setMicrophoneMuted] = useState(false);
@@ -206,6 +203,7 @@ export function useMia() {
     setScrollRequests(previous => previous[chatId] === key ? previous : { ...previous, [chatId]: key });
   }
   const api = useMemo(() => new Api(address, session, () => { void clearSession(); }), [address, session]);
+  const phoneSignIn = useMemo(() => new PhoneSignIn(api), [api]);
   const voiceCache = useMemo(() => session ? new VoiceMediaCache(new FileVoiceMediaStore(address, session.user.id), {
     baseUrl: address, token: session.token, onUnauthorized: () => { void clearSession(); },
   }) : null, [session?.user.id]);
@@ -766,7 +764,7 @@ export function useMia() {
     return phoneSignIn.request(phoneNumber);
   }
   async function verifyOtp(challengeId: string, code: string) {
-    const result = await phoneSignIn.verify(challengeId, code, idToken => api.request<Session>('/v1/auth/firebase', 'POST', { idToken }));
+    const result = await phoneSignIn.verify(challengeId, code);
     await sessionStorage.write(result); setSession(result);
   }
   function cancelOtp() { phoneSignIn.cancel(); }

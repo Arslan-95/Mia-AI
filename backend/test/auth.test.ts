@@ -129,6 +129,32 @@ test('production HTTP sign-in only accepts each configured number with its own t
   assert.equal((await db.query('SELECT id FROM otp_challenges')).length, 3, 'unknown numbers create no challenge');
 });
 
+test('obsolete Firebase configuration cannot disable test arrays or restore provider token sign-in', async t => {
+  const phoneNumber = '+995555123456';
+  const context = await testApp({}, { NODE_ENV: 'production', FIREBASE_PROJECT_ID: 'old-firebase-project',
+    DEV_OTP_CODE: '', TEST_PHONE_NUMBERS: JSON.stringify([phoneNumber]), TEST_OTP_CODES: '["012345"]' });
+  t.after(() => context.close());
+  const request = () => context.app.inject({ method: 'POST', url: '/v1/auth/otp/request', payload: { phoneNumber } });
+  const first = await request();
+  assert.equal(first.statusCode, 202, first.body);
+  assert.equal(first.json().delivery, 'test');
+  assert.equal('code' in first.json(), false);
+  const login = async (id: string) => context.app.inject({ method: 'POST', url: '/v1/auth/otp/verify',
+    payload: { challengeId: id, code: '012345' } });
+  const session = await login(first.json().challengeId);
+  assert.equal(session.statusCode, 200, session.body);
+  const headers = { authorization: `Bearer ${session.json().token}` };
+  assert.equal((await context.app.inject({ method: 'POST', url: '/v1/auth/firebase', headers,
+    payload: { idToken: 'unused-provider-token' } })).statusCode, 404);
+  await context.app.inject({ method: 'PATCH', url: '/v1/me', headers, payload: { displayName: 'Existing account' } });
+  await context.app.inject({ method: 'POST', url: '/v1/auth/logout', headers });
+  const again = await login((await request()).json().challengeId);
+  assert.equal(again.statusCode, 200, again.body);
+  assert.equal(again.json().user.id, session.json().user.id);
+  assert.equal(again.json().user.displayName, 'Existing account');
+  assert.equal((await context.db.query('SELECT id FROM users')).length, 1);
+});
+
 test('production test OTPs retain request limits, lockouts, expiry and single-use challenges', async (t) => {
   const context = await testApp(); t.after(() => context.close());
   const number = '+12025550101';

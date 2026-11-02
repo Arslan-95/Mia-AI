@@ -20,18 +20,17 @@ import { registerRealtime } from './realtime.js';
 import { registerSpeechRoutes } from './routes/speech.js';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { FirebasePhoneVerifier } from './firebase-auth.js';
 
 declare module 'fastify' {
   interface FastifyRequest { user: User }
   interface FastifyContextConfig { public?: boolean }
 }
 
-export async function createApp(config: Config, db: Database, options: { provider?: ModelProvider; speech?: SpeechProvider; firebaseVerifier?: FirebasePhoneVerifier } = {}) {
+export async function createApp(config: Config, db: Database, options: { provider?: ModelProvider; speech?: SpeechProvider } = {}) {
   const app = Fastify({ bodyLimit: 32_768, requestTimeout: 30_000, routerOptions: { maxParamLength: 100 },
     logger: { level: config.logLevel, redact: ['req.headers.authorization', 'req.headers.cookie', 'res.headers["set-cookie"]'] },
     logController: new LogController({ disableRequestLogging: true }) });
-  const auth = new AuthService(db, config, options.firebaseVerifier);
+  const auth = new AuthService(db, config);
   const messaging = new MessagingService(db);
   const media = new MediaService(db, config.mediaDirectory);
   const provider = options.provider ?? new MetaResponsesProvider(config);

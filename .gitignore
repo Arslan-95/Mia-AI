@@ -19,8 +19,7 @@ firebase-adminsdk*.json
 *.p12
 *.mobileprovision
 
-# Keep the real Firebase project configuration local, even though its app key
-# is public by design. EAS includes it explicitly for native builds.
+# Keep old Firebase project configuration local; test sign-in no longer uses it.
 frontend/GoogleService-Info.plist
 .secret.local
 .firebase/
