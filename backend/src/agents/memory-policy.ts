@@ -21,7 +21,7 @@ export function createMemoryReviewer(provider: ModelProvider, turn: Turn, signal
   recentConversation: ModelItem[]): MemoryReviewer {
   return async change => {
     throwIfAborted(signal);
-    const response = await provider.respond({ instructions: MEMORY_REVIEW_PROMPT, signal, trace: { turnId: turn.id, agent: 'memory-review' },
+    const response = await provider.respond({ instructions: MEMORY_REVIEW_PROMPT, signal,
       input: [{ role: 'user', content: [{ type: 'input_text', text: JSON.stringify({
         currentUtterance: turn.userText, currentUiContext: turn.context,
         recentConversation: recentConversation.filter(item => item.role === 'user' || item.role === 'assistant').slice(-8), proposedChange: change,

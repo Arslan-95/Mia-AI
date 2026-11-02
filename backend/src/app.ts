@@ -33,13 +33,7 @@ export async function createApp(config: Config, db: Database, options: { provide
   const auth = new AuthService(db, config);
   const messaging = new MessagingService(db);
   const media = new MediaService(db, config.mediaDirectory);
-  const provider = options.provider ?? new MetaResponsesProvider(config, undefined, async diagnostic => {
-    app.log.info(diagnostic, 'Model request finished');
-    try {
-      await mkdir(resolve('.data'), { recursive: true });
-      await appendFile(resolve('.data/agent-metrics.ndjson'), JSON.stringify({ time: new Date().toISOString(), ...diagnostic }) + '\n');
-    } catch { app.log.warn({ code: 'AGENT_METRIC_WRITE_FAILED' }, 'Model metric could not be saved'); }
-  });
+  const provider = options.provider ?? new MetaResponsesProvider(config);
   const speech = options.speech ?? new CloudSpeechProvider(config, undefined, undefined, undefined, async diagnostic => {
     app.log.warn(diagnostic, 'Speech synthesis attempt failed');
     try {

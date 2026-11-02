@@ -42,10 +42,6 @@ try {
       const actions = await db.query<{ id: string; kind: string; payload: { chatId?: string; messageId?: string; narration?: string } }>(
         `SELECT id,kind,payload FROM device_actions WHERE turn_id=$1 AND state='pending' ORDER BY sequence`, [accepted.turn.id]);
       for (const action of actions) {
-        if (action.kind === 'speak_progress') {
-          await runtime.state.acknowledgeAction(owner, action.id, false, { code: 'ACTION_CANCELLED', stage: 'narration' });
-          continue;
-        }
         const source = action.kind === 'show_message';
         const notice = action.kind === 'announce_message_skip';
         const success = !(source && action.payload.messageId === sources[0]) && !(notice && noticeFails);

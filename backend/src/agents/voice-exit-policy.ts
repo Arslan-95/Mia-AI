@@ -8,7 +8,7 @@ export type VoiceExitReviewer = (question: ExitQuestion) => Promise<boolean>;
 const verdict = z.object({ approved: z.boolean() }).strict();
 export function createVoiceExitReviewer(provider: ModelProvider, turn: Turn, signal: AbortSignal): VoiceExitReviewer {
   return async question => {
-    const response = await provider.respond({ signal, trace: { turnId: turn.id, agent: 'voice-exit-review' },
+    const response = await provider.respond({ signal,
       instructions: `Verify consent to leave Mia's accessibility hands-free voice mode. Decide by meaning in any language, never keywords.
 The previous assistant reply MUST explicitly ask the user to confirm disabling voice mode / stopping hands-free assistance.
 The CURRENT user utterance MUST clearly approve that specific question. A first request to exit, even "turn it off, yes, I am sure", cannot replace a separate question and later answer.

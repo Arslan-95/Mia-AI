@@ -15,7 +15,6 @@
     "test:voice:live": "node --env-file-if-exists=.env --import tsx test/live-voice-controls.ts && node --env-file-if-exists=.env --import tsx test/live-voice-exit-policy.ts",
     "test:conversation:live": "node --env-file-if-exists=.env --import tsx test/live-conversation.ts",
     "test:progress:live": "node --env-file-if-exists=.env --import tsx test/live-progress-narration.ts",
-    "bench:context": "node --env-file-if-exists=.env --import tsx test/live-context-benchmark.ts",
     "test:approval:live": "node --env-file-if-exists=.env --import tsx test/live-send-approval.ts",
     "test:presentation:live": "node --env-file-if-exists=.env --import tsx test/live-message-presentation.ts",
     "test:delivery:live": "node --env-file-if-exists=.env --import tsx test/live-speech-delivery.ts",

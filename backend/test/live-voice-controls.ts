@@ -18,10 +18,6 @@ const timer = setInterval(() => {
     const pending = await db.query<{ id: string; kind: string; payload: { enabled?: boolean; muted?: boolean } }>(
       "SELECT id,kind,payload FROM device_actions WHERE user_id=$1 AND state='pending'", [owner]);
     for (const action of pending) {
-      if (action.kind === 'speak_progress') {
-        await runtime.state.acknowledgeAction(owner, action.id, false, { code: 'ACTION_CANCELLED', stage: 'narration' });
-        continue;
-      }
       if (action.kind === 'set_voice_mode') voice = { enabled: action.payload.enabled!, microphoneMuted: false, revision: voice.revision + 1 };
       else if (action.kind === 'set_microphone_muted') voice = { ...voice, microphoneMuted: action.payload.muted!, revision: voice.revision + 1 };
       else if (action.kind !== 'stop_audio') throw new Error('Unexpected device action: ' + action.kind);
@@ -38,12 +34,9 @@ try {
     const deadline = Date.now() + 95000;
     while (Date.now() < deadline) {
       const current = await runtime.state.turn(owner, session.id, turn.id);
-      if (current.status === 'failed') {
-        const [failure] = await db.query('SELECT error_code FROM assistant_turns WHERE id=$1', [turn.id]);
-        assert.fail(`${label}: ${JSON.stringify(failure)}`);
-      }
+      assert.notEqual(current.status, 'failed', label);
       if (current.status === 'completed') {
-        const actions = await db.query<{ kind: string }>("SELECT kind FROM device_actions WHERE turn_id=$1 AND kind<>'speak_progress'", [turn.id]);
+        const actions = await db.query<{ kind: string }>('SELECT kind FROM device_actions WHERE turn_id=$1', [turn.id]);
         const result = { label, reply: current.assistantText!, actions: actions.map(a => a.kind), voice: { ...voice } };
         results.push(result); console.info(JSON.stringify(result)); return result;
       }

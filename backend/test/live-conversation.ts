@@ -61,11 +61,6 @@ const timer = setInterval(() => {
       "SELECT id,user_id AS \"userId\",kind,payload FROM device_actions WHERE state='pending' ORDER BY sequence");
     for (const action of pending) {
       const screen = screens.get(action.userId)!;
-      if (action.kind === 'speak_progress') {
-        await runtime.state.acknowledgeAction(action.userId, action.id, false,
-          { code: 'ACTION_CANCELLED', stage: 'narration', context: structuredClone(screen) });
-        continue; // This harness simulates cards; real progress TTS has its own live test.
-      }
       if (action.kind === 'dismiss_message') delete screen.reference;
       else if (action.kind === 'show_message') {
         screen.route = `/chat/${action.payload.chatId}`;

@@ -58,9 +58,7 @@ export class AgentMemory {
       ORDER BY CASE WHEN m.contact_id IS NULL THEN 0 ELSE 1 END,m.updated_at DESC,m.id LIMIT 32`, [owner]);
     const forgotten = await this.db.query(`SELECT subject,key,source_turn_id AS "sourceTurnId" FROM assistant_forgotten_memories
       WHERE owner_id=$1 ORDER BY forgotten_at DESC LIMIT 128`, [owner]);
-    return { automatic: await this.automatic(owner), total: counts!.total,
-      memories: memories.map(({ id, contactId, kind, key, value, version, expiresAt, contact }) => ({ id, contactId, kind, key, value, version, expiresAt, contact })),
-      forgotten };
+    return { automatic: await this.automatic(owner), total: counts!.total, memories, forgotten };
   }
   async save(owner: string, turnId: string, raw: MemoryInput) {
     const input = memoryInput.parse(raw);

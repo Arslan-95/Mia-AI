@@ -16,12 +16,10 @@ import { assertSourceFocus } from './context.js';
 import { speechDeliverySchema, defaultSpeechDelivery } from '../speech/delivery.js';
 import { RECIPIENT_APPROVAL_RULE } from './prompts.js';
 import { publish } from '../events.js';
-import { recallConversation } from './conversation.js';
 
 export type AgentName = 'mia' | 'messaging' | 'contacts';
 export type Tool = { definition: FunctionDefinition; execute(input: unknown): Promise<unknown> };
 export type ToolContext = { db: Database; state: AssistantState; turn: Turn; signal: AbortSignal;
-  waitForNavigation?: boolean;
   reviewMemory?: MemoryReviewer;
   reviewVoiceExit?: VoiceExitReviewer;
   reviewDraftSend?: DraftSendReviewer;
@@ -74,18 +72,6 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
     }
     return { ...action, message: 'Device completion was not confirmed. Do not claim it displayed or played.' };
   };
-  const navigationAction = async (kind: string, payload: unknown) => {
-    const action = await state.action(turn, signal, kind, payload);
-    if (!context.waitForNavigation) return action;
-    const until = Date.now() + 8000;
-    while (Date.now() < until) {
-      signal.throwIfAborted();
-      const [current] = await db.query(`SELECT id,kind,payload,state,result FROM device_actions WHERE id=$1 AND user_id=$2`, [action.id, turn.userId]);
-      if (current?.state !== 'pending') return current;
-      await delay(40, undefined, { signal });
-    }
-    return action;
-  };
   const mutate = <T>(fn: (service: MessagingService, scoped: Database) => Promise<T>) =>
     state.mutate(turn, signal, (scoped) => fn(new MessagingService(scoped), scoped));
   const contactForm = (payload: Record<string, unknown>) => state.emit(turn, signal, 'agent.contact_form', payload);
@@ -109,21 +95,7 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       throw reason;
     }
   };
-  const reviewDraft = async (service: MessagingService, scoped: Database, draftId: string, version: number) => {
-    const draft = await service.reviewDraft(turn.userId, draftId, version, signal);
-    const [earlier] = await scoped.query(`SELECT r.turn_id FROM draft_reviews r JOIN assistant_turns t ON t.id=r.turn_id
-      WHERE r.draft_id=$1 AND r.version=$2 AND t.session_id=$3 AND t.status='completed' AND t.generation<$4`,
-    [draftId, version, turn.sessionId, turn.generation]);
-    if (!earlier) await scoped.query(`INSERT INTO draft_reviews(draft_id,version,turn_id) VALUES ($1,$2,$3)
-      ON CONFLICT(draft_id,version) DO UPDATE SET turn_id = EXCLUDED.turn_id`, [draftId, version, turn.id]);
-    return { draft, recipient: await service.profile(draft.recipientId), reviewedInEarlierTurn: Boolean(earlier),
-      requiresLaterUserApproval: !earlier,
-      approvalRule: earlier ? 'This exact version was already presented. Send only if the CURRENT user utterance approves it; do not ask them to confirm the same approval again.' : 'Present the exact recipient and content, then wait for a later user utterance to approve it.' };
-  };
   const tools = [
-    define('recall_conversation', 'Retrieve exact earlier dialogue for the current account/session when a history excerpt omits needed details; never grants new consent.',
-      z.object({ beforeGeneration: z.int().positive().nullable(), limit: z.int().min(1).max(6), narrationActionId: uuid.nullable().default(null) }).strict(),
-      ({ beforeGeneration, limit, narrationActionId }) => recallConversation(db, state, turn, beforeGeneration, limit, narrationActionId)),
     define('show_contact_form', 'Show or replace the passive contact form while collecting a requested new contact or saved name change. Supply a full snapshot of known fields; null means not yet known. Only show phone numbers supplied by the user or verified by contact tools. Never show a username. This does not save anything.',
       z.object({ operation: z.enum(['create', 'rename']), name: z.string().trim().min(1).max(80).nullable(),
         identifier: z.string().trim().min(1).max(100).nullable() }).strict(), async input => {
@@ -188,18 +160,6 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       versionedDraft, ({ draftId, version }) => mutate((service) => service.discardDraft(turn.userId, draftId, version, signal))),
   ];
   const coordinator = [
-    define('prepare_draft_for_review', 'Prepare an unsent draft and register this exact version for presentation in one transaction. Present its verified recipient and exact content naturally; wait for later user approval. Does not send.',
-      z.object({ recipientId: uuid, content: contentSchema }).strict(),
-      ({ recipientId, content }) => mutate(async (service, scoped) => {
-        const draft = await service.createDraft(turn.userId, recipientId, content, signal);
-        return reviewDraft(service, scoped, draft.id, draft.version);
-      })),
-    define('revise_draft_for_review', 'Update the selected unsent draft and register the new version for presentation atomically. Preserves its recipient and invalidates old approval. Present the new version and wait for later approval. Does not send.',
-      z.object({ draftId: uuid, version: z.int().positive(), content: contentSchema }).strict(),
-      ({ draftId, version, content }) => mutate(async (service, scoped) => {
-        const draft = await service.updateDraft(turn.userId, draftId, version, content, signal);
-        return reviewDraft(service, scoped, draft.id, draft.version);
-      })),
     define('set_speech_delivery', 'Choose restrained delivery for your final spoken reply by meaning and current conversation. Default is calm/steady/reserved; no call is needed for ordinary neutral replies or greetings. Use gentle for a delicate topic, light only for supported casual humor, unhurried when useful, and friendly only with evidence it suits this user. Use saved voice preferences as context, but current instructions take priority. Changes apply only to this turn; use memory tools for an actual enduring preference. No freeform voice prompts or exaggerated emotion. For individual show_message narration use that tool\'s delivery field instead.',
       speechDeliverySchema, delivery => state.setSpeechDelivery(turn, signal, delivery)),
     define('show_message', 'First check current clientContext.reference: if it already shows this exact chat/message and relevant excerpt, DO NOT call this tool again; keep that card and answer directly. Otherwise required before discussing a specific stored chat message unless the user explicitly requests no display. Use for last/first-message questions, reading, quoting, summarizing, interpreting and help replying; fetching data or opening a chat alone does not show its card. Opens the real chat and shows/replaces the exact source. Put THIS source\'s substantive answer or commentary in narration: the card appears before speech and the tool waits for speech completion. For multiple sources, show and narrate each sequentially before replacing it. Counts/navigation and proposed draft revisions need no arbitrary card. Wait for completed feedback; failure is not a confirmed display. focus uses exact UTF-16 source offsets, never replacement display text. Optional delivery controls only this narration; it is not a reason to replay a visible card.',
@@ -291,7 +251,17 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
     define('delegate_contacts', 'Ask the contacts specialist to resolve a person or manage a requested contact.',
       z.object({ goal: z.string().min(1).max(4000) }).strict(), ({ goal }) => context.delegate('contacts', goal)),
     define('review_draft', 'Present an unreviewed draft version and ask whether to send. If this unchanged version was already reviewed in a completed earlier turn and the current user approves it, call send_approved_draft directly instead.',
-      versionedDraft, ({ draftId, version }) => mutate((service, scoped) => reviewDraft(service, scoped, draftId, version))),
+      versionedDraft, ({ draftId, version }) => mutate(async (service, scoped) => {
+        const draft = await service.reviewDraft(turn.userId, draftId, version, signal);
+        const [earlier] = await scoped.query(`SELECT r.turn_id FROM draft_reviews r JOIN assistant_turns t ON t.id=r.turn_id
+          WHERE r.draft_id=$1 AND r.version=$2 AND t.session_id=$3 AND t.status='completed' AND t.generation<$4`,
+          [draftId, version, turn.sessionId, turn.generation]);
+        if (!earlier) await scoped.query(`INSERT INTO draft_reviews(draft_id,version,turn_id) VALUES ($1,$2,$3)
+          ON CONFLICT(draft_id,version) DO UPDATE SET turn_id = EXCLUDED.turn_id`, [draftId, version, turn.id]);
+        return { draft, recipient: await service.profile(draft.recipientId), reviewedInEarlierTurn: Boolean(earlier),
+          requiresLaterUserApproval: !earlier,
+          approvalRule: earlier ? 'This exact version was already presented. Send only if the CURRENT user utterance approves it; do not ask them to confirm the same approval again.' : 'Present the exact recipient and content, then wait for a later user utterance to approve it.' };
+      })),
     define('send_approved_draft', `Send the exact draft version only after its review in a completed EARLIER turn and CURRENT user approval. ${RECIPIENT_APPROVAL_RULE}`,
       versionedDraft, async ({ draftId, version }) => {
         const [review] = await db.query(`SELECT r.turn_id,t.created_at AS "reviewedAt",COALESCE((SELECT a.result->'context' FROM device_actions a
@@ -309,11 +279,11 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       }),
     define('open_page', 'Show the main chat list, contacts, saved drafts or settings on the phone. Navigation preserves voice mode and the current task. Pending means requested; check get_device_action before claiming the page opened.',
       z.object({ page: z.enum(['chats', 'contacts', 'drafts', 'settings']) }).strict(),
-      ({ page }) => navigationAction('open_page', { route: pageRoutes[page] })),
+      ({ page }) => state.action(turn, signal, 'open_page', { route: pageRoutes[page] })),
     define('open_chat', 'Open the verified recipient conversation, reusing its direct chat or creating one if absent. Use when the user wants to tell/write/ask/reply/send something to that person, even without an explicit navigation request, before asking for content or reviewing the proposal. Keep an already confirmed matching chat. This does not save a contact, send anything, select an old draft or discard drafts. Check device feedback before claiming it opened.',
       z.object({ recipientId: uuid }).strict(), async ({ recipientId }) => {
         const chat = await mutate(service => service.createDirectChat(turn.userId, recipientId));
-        return navigationAction('open_chat', { chatId: chat.id });
+        return state.action(turn, signal, 'open_chat', { chatId: chat.id });
       }),
     define('play_voice_message', 'Request playback of an authorized voice message on the phone. Pending means requested, not yet played.',
       z.object({ messageId: uuid }).strict(), async ({ messageId }) => {
@@ -327,7 +297,7 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       z.object({ recipientId: uuid }).strict(), async ({ recipientId }) => {
         await messaging.profile(recipientId);
         const chat = await mutate(service => service.createDirectChat(turn.userId, recipientId));
-        return navigationAction('open_chat', { chatId: chat.id });
+        return state.action(turn, signal, 'open_chat', { chatId: chat.id });
       }),
     define('get_device_action', 'Check whether a requested device action really completed, failed or is still pending.',
       z.object({ actionId: uuid }).strict(), async ({ actionId }) => {
