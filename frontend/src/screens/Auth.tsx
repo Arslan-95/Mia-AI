@@ -5,17 +5,20 @@ import type { OtpChallenge } from '../types';
 import { ApiError } from '../api';
 import { Button, Field, Notice, colors, s } from '../ui';
 import { MiaCore } from './AssistantOrb';
+import { isPossiblePhoneNumber } from 'libphonenumber-js/min';
+import { initialPhoneInput } from '../phoneNumberInput';
+import { PhoneNumberField } from './PhoneNumberField';
 
 export function Auth({ mia }: { mia: Mia }) {
-  const [phoneNumber, setPhoneNumber] = useState('');
+  const [phoneInput, setPhoneInput] = useState(initialPhoneInput);
   const [challenge, setChallenge] = useState<OtpChallenge | null>(null);
   const [code, setCode] = useState('');
   const [locked, setLocked] = useState(false);
   const [pending, setPending] = useState<'request' | 'verify' | null>(null);
   const [now, setNow] = useState(Date.now());
   const requestEpoch = useRef(0);
-  const phone = phoneNumber.trim().replace(/[\s()-]/g, '');
-  const validPhone = /^\+[1-9]\d{6,14}$/.test(phone);
+  const phone = phoneInput.number;
+  const validPhone = isPossiblePhoneNumber(phone);
   const remaining = challenge ? Math.max(0, Math.ceil((Date.parse(challenge.expiresAt) - now) / 1000)) : 0;
   const resendRemaining = challenge?.resendAt ? Math.max(0, Math.ceil((Date.parse(challenge.resendAt) - now) / 1000)) : 0;
 
@@ -77,18 +80,7 @@ export function Auth({ mia }: { mia: Mia }) {
         <Text accessibilityRole="header" style={s.sectionTitle}>{challenge ? 'Enter verification code' : 'Your phone number'}</Text>
         {!challenge ? (
           <>
-            <Field
-              label="Phone number with country code"
-              placeholder="+1 202 555 0123"
-              value={phoneNumber}
-              onChangeText={setPhoneNumber}
-              keyboardType="phone-pad"
-              textContentType="telephoneNumber"
-              autoComplete="tel"
-              autoCorrect={false}
-              maxLength={24}
-              editable={!pending}
-            />
+            <PhoneNumberField value={phoneInput} onChange={setPhoneInput} editable={!pending} />
             <Text style={s.small}>We'll send you an SMS with a verification code.</Text>
             {!!mia.error && <Notice error>{mia.error}</Notice>}
             <Button label="Continue" icon="arrow-forward" disabled={!validPhone} loading={pending === 'request'} onPress={() => void requestCode()} />
