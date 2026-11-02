@@ -17,7 +17,7 @@ import { conversationInput } from './conversation.js';
 import { defaultSpeechDelivery } from '../speech/delivery.js';
 import { readingProgress, reviewReadingReply } from './reading-recovery.js';
 
-type Budget = { calls: number; delegations: number };
+type Budget = { calls: number; delegations: number; narrations?: Set<string> };
 const prompts = { mia: COORDINATOR_PROMPT, messaging: MESSAGING_PROMPT, contacts: CONTACTS_PROMPT };
 
 export class AssistantRuntime {
@@ -172,6 +172,14 @@ export class AssistantRuntime {
           continue;
         }
         return response.text;
+      }
+      const narration = response.text.trim();
+      const narrations = budget.narrations ??= new Set();
+      const audibleAction = response.calls.some(call => ['show_message', 'announce_message_skip', 'play_audio', 'stop_audio', 'set_voice_mode', 'set_microphone_muted'].includes(call.name));
+      if (agent === 'mia' && turn.context?.voice?.enabled && !reading.needsNotice && !audibleAction
+        && narration && narration.length <= 280 && narrations.size < 3 && !narrations.has(narration)) {
+        narrations.add(narration);
+        await this.state.action(turn, signal, 'speak_progress', { narration, delivery: turn.speechDelivery ?? defaultSpeechDelivery });
       }
       input.push(...response.output);
       for (const call of response.calls) {

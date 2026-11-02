@@ -679,6 +679,109 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
   };
 }
 
+async function mountProgress() {
+  const h = await mount(true, false, true);
+  await h.wait(() => !!h.n.nativePCM);
+  await act(async () => { h.n.nativePCM!(new Uint8Array(4800)); });
+  const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
+  const turn: Turn = { id: 'progress-turn', sessionId: 'assistant', userId: 'user', generation: 1,
+    userText: 'Find Anna and prepare a message.', assistantText: null, status: 'running', clientTurnId: 'progress-client', context: stream.context as any };
+  h.n.turns.push(turn);
+  await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: turn.clientTurnId }); h.n.frame({ type: 'turn.accepted', turn }); });
+  const action = (id: string, kind = 'speak_progress', replayed = false) => act(async () => {
+    await h.n.event({ id, type: 'device.action_requested', createdAt: new Date().toISOString(), payload: {
+      actionId: id, sessionId: 'assistant', turnId: turn.id, kind, context: turn.context,
+      payload: kind === 'speak_progress' ? { narration: 'I will find her conversation.' } : { chatId: 'anna' },
+    } }, 0, replayed);
+  });
+  return { ...h, get mia() { return h.mia; }, turn, action };
+}
+
+test('progress speaks during the running task, navigation proceeds during playback, and final speech takes priority', async () => {
+  const h = await mountProgress();
+  try {
+    await h.action('progress-one'); await h.wait(() => h.n.playbacks === 1);
+    assert.equal(h.turn.status, 'running');
+    assert.equal(h.n.frames.filter(f => f.type === 'speech.request')[0]?.actionId, 'progress-one');
+    await h.action('open-during-progress', 'open_chat');
+    await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/open-during-progress/result'));
+    assert.equal(h.mia.activeChatId, 'anna'); assert.equal(h.mia.audioState, 'playing');
+    assert.equal(h.n.requests.some(r => r.path === '/v1/device-actions/progress-one/result'), false, 'opening the chat did not wait for or cancel the narration');
+    h.turn.status = 'completed'; h.turn.assistantText = 'Your draft is ready.';
+    await h.wait(() => h.n.playbacks === 2);
+    assert.equal(h.n.frames.filter(f => f.type === 'speech.request').at(-1)?.actionId, undefined);
+    const progressFeedback = h.n.requests.find(r => r.path === '/v1/device-actions/progress-one/result')!.body;
+    assert.equal(progressFeedback.success, false, 'interrupted progress is not recorded as heard');
+    assert.equal(h.mia.voiceFault, false); assert.equal(h.mia.error, '');
+    await act(async () => { h.n.playback!(); });
+    await h.wait(() => h.mia.voicePhase === 'listening');
+  } finally { await h.close(); }
+});
+
+test('optional progress failures preserve the task and confirmed narration is acknowledged only after playback', async () => {
+  const h = await mountProgress();
+  try {
+    h.n.failSpeech = true;
+    await h.action('failed-progress');
+    await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/failed-progress/result'));
+    assert.equal(h.mia.voiceFault, false); assert.equal(h.mia.error, ''); assert.equal(h.turn.status, 'running');
+    h.n.failSpeech = false;
+    await h.action('heard-progress'); await h.wait(() => h.n.playbacks === 1);
+    assert.equal(h.n.requests.some(r => r.path === '/v1/device-actions/heard-progress/result'), false);
+    await act(async () => { h.n.playback!(); });
+    await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/heard-progress/result'));
+    assert.equal(h.n.requests.find(r => r.path === '/v1/device-actions/heard-progress/result')!.body.success, true);
+    assert.equal(h.mia.voicePhase, 'thinking');
+    h.turn.status = 'completed'; h.turn.assistantText = 'Ready.';
+    await h.wait(() => h.n.playbacks === 2);
+    await act(async () => { h.n.playback!(); });
+  } finally { await h.close(); }
+});
+
+test('source narration preempts progress and cannot be interrupted by another optional update', async () => {
+  const h = await mountProgress();
+  try {
+    h.n.referenceSources.push({ id: 'source', chatId: 'anna', senderId: 'recipient', kind: 'text', text: 'Bring the blue notebook.', mediaId: null, createdAt: new Date().toISOString() });
+    await h.action('progress-before-source'); await h.wait(() => h.n.playbacks === 1);
+    await act(async () => { await h.n.event({ id: 'source-event', type: 'device.action_requested', createdAt: new Date().toISOString(), payload: {
+      actionId: 'source-action', sessionId: 'assistant', turnId: h.turn.id, kind: 'show_message', context: h.turn.context,
+      sequence: '22', payload: { chatId: 'anna', messageId: 'source', narration: 'Bring the blue notebook.' },
+    } }, 0); });
+    await h.wait(() => h.mia.messageReference?.messageId === 'source');
+    await act(async () => { h.mia.referencePresented(22); });
+    await h.wait(() => h.n.playbacks === 2);
+    await h.action('progress-during-source');
+    await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/progress-during-source/result'));
+    assert.equal(h.n.playbacks, 2); assert.equal(h.mia.audioState, 'playing');
+    assert.equal(h.n.frames.filter(f => f.type === 'speech.request').at(-1)?.actionId, 'source-action');
+    await act(async () => { h.n.playback!(); });
+    await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/source-action/result'));
+    assert.equal(h.n.requests.find(r => r.path === '/v1/device-actions/source-action/result')!.body.success, true);
+    assert.equal(h.mia.voiceFault, false);
+  } finally { await h.close(); }
+});
+
+test('progress is never replayed, cannot start after completion, and manual navigation cancels it', async () => {
+  const h = await mountProgress();
+  try {
+    await h.action('replayed-progress', 'speak_progress', true);
+    assert.equal(h.n.frames.filter(f => f.type === 'speech.request').length, 0);
+    await h.action('cancelled-progress'); await h.wait(() => h.n.playbacks === 1);
+    await act(async () => { await h.mia.navigate('people'); });
+    await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/cancelled-progress/result'));
+    await h.action('stale-progress');
+    assert.equal(h.n.frames.filter(f => f.type === 'speech.request').length, 1);
+    assert.equal(h.mia.audioState, 'idle'); assert.equal(h.mia.voiceFault, false);
+  } finally { await h.close(); }
+  const completed = await mountProgress();
+  try {
+    completed.turn.status = 'completed'; completed.turn.assistantText = 'Ready.';
+    await completed.action('completed-progress');
+    await completed.wait(() => completed.n.requests.some(r => r.path === '/v1/device-actions/completed-progress/result'));
+    assert.equal(completed.n.frames.filter(f => f.type === 'speech.request' && f.actionId === 'completed-progress').length, 0);
+  } finally { await completed.close(); }
+});
+
 test('contact forms reuse the message shutter, retain their exit snapshot and coalesce rapid reopen requests', async () => {
   const h = await mount(false);
   let probe: ReactTestRenderer | undefined;

@@ -174,8 +174,8 @@ export class AssistantState {
     if (kind === 'control_voice_note' || kind === 'record_voice')
       throw new AppError(409, 'CLIENT_CONTROLLED_RECORDING', 'Voice notes are recorded and sent directly by the client. Only navigate to the recipient chat.');
     return this.mutate(turn, signal, async (db) => {
-      const [count] = await db.query<{ count: number }>('SELECT count(*)::integer AS count FROM device_actions WHERE turn_id=$1', [turn.id]);
-      if ((count?.count ?? 0) >= 12) throw new AppError(422, 'ACTION_LIMIT', 'This turn reached its device action limit.');
+      const [count] = await db.query<{ count: number }>("SELECT count(*)::integer AS count FROM device_actions WHERE turn_id=$1 AND kind <> 'speak_progress'", [turn.id]);
+      if (kind !== 'speak_progress' && (count?.count ?? 0) >= 12) throw new AppError(422, 'ACTION_LIMIT', 'This turn reached its device action limit.');
       const extended = ['show_message','dismiss_message','play_audio','announce_message_skip'].includes(kind);
       const id = randomUUID();
       const [stored] = await db.query<{ sequence: string }>(`INSERT INTO device_actions(id,user_id,session_id,turn_id,generation,kind,payload,expires_at)
@@ -189,16 +189,19 @@ export class AssistantState {
   async actionSpeech(userId: string, sessionId: string, turnId: string, actionId: string) {
     const turn = await this.turn(userId, sessionId, turnId);
     const session = await this.requireSession(userId, sessionId);
-    const [action] = await this.db.query<{ payload: { narration?: string; delivery?: unknown }; state: string; current: boolean }>(`SELECT payload,state,expires_at>now() AS current FROM device_actions
-      WHERE id=$1 AND user_id=$2 AND session_id=$3 AND turn_id=$4 AND generation=$5 AND kind IN ('show_message','announce_message_skip')`,
+    const [action] = await this.db.query<{ kind: string; payload: { narration?: string; delivery?: unknown }; state: string; current: boolean }>(`SELECT kind,payload,state,expires_at>now() AS current FROM device_actions
+      WHERE id=$1 AND user_id=$2 AND session_id=$3 AND turn_id=$4 AND generation=$5 AND kind IN ('show_message','announce_message_skip','speak_progress')`,
       [actionId,userId,sessionId,turnId,session.generation]);
     if (!action?.current || action.state !== 'pending' || !['running','completed'].includes(turn.status) || turn.generation !== session.generation || !action.payload.narration)
       throw new AppError(409, 'STALE_SPEECH', 'This narration is no longer current.');
+    if (action.kind === 'speak_progress' && turn.status !== 'running')
+      throw new AppError(409, 'STALE_SPEECH', 'This progress update is no longer current.');
     const claimed = await this.db.query(`UPDATE device_actions a SET narration_requested=true FROM assistant_sessions s,assistant_turns t
       WHERE a.id=$1 AND a.session_id=s.id AND a.turn_id=t.id AND s.generation=a.generation
-      AND t.status IN ('running','completed') AND a.state='pending' AND a.expires_at>now() AND NOT a.narration_requested RETURNING a.id`, [actionId]);
+      AND t.status IN ('running','completed') AND (a.kind <> 'speak_progress' OR t.status='running')
+      AND a.state='pending' AND a.expires_at>now() AND NOT a.narration_requested RETURNING a.id`, [actionId]);
     if (!claimed.length) throw new AppError(409, 'STALE_SPEECH', 'This narration was already requested or cancelled.');
-    return { turn, text: action.payload.narration, delivery: speechDeliverySchema.safeParse(action.payload.delivery).data ?? defaultSpeechDelivery };
+    return { turn, kind: action.kind, text: action.payload.narration, delivery: speechDeliverySchema.safeParse(action.payload.delivery).data ?? defaultSpeechDelivery };
   }
 
   async acknowledgeAction(userId: string, actionId: string, success: boolean, result: unknown) {

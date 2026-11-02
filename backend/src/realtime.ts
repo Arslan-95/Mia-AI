@@ -25,7 +25,7 @@ const frameSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('voice.cancel') }).strict(),
   z.object({ type: z.literal('voice.mute'), requestId: z.uuid(), muted: z.boolean(), revision: z.int().nonnegative() }).strict(),
   z.object({ type: z.literal('voice.context'), context: clientContextSchema }).strict(),
-  z.object({ type: z.literal('speech.playback'), turnId: z.uuid(), playing: z.boolean() }).strict(),
+  z.object({ type: z.literal('speech.playback'), turnId: z.uuid(), requestId: z.uuid().optional(), playing: z.boolean() }).strict(),
   z.object({ type: z.literal('speech.request'), requestId: z.uuid(), turnId: z.uuid(), actionId: z.uuid().optional() }).strict(),
   z.object({ type: z.literal('speech.cancel') }).strict(),
   z.object({ type: z.literal('device.result'), actionId: z.uuid(), success: z.boolean(),
@@ -307,14 +307,16 @@ export function registerRealtime(app: FastifyInstance, deps: {
         }
         synthesisGeneration = turn.generation;
         playback.remember(turnId, text);
+        playback.remember(requestId, text);
         send({ type: 'speech.started', requestId, turnId, format: 'pcm_s16le', sampleRate: 24000, channels: 1 });
         let sequence = 0;
         let totalBytes = 0;
-        for await (const bytes of speech.synthesize(text, signal, { delivery: segment?.delivery ?? turn.speechDelivery, narration: Boolean(segment) })) {
+        for await (const bytes of speech.synthesize(text, signal, { delivery: segment?.delivery ?? turn.speechDelivery, narration: Boolean(segment && segment.kind !== 'speak_progress') })) {
           throwIfAborted(signal);
           const current = await assistant.state.requireSession(user!.id, sessionId);
           throwIfAborted(signal);
           if (current.generation !== turn.generation) { controller.abort(); break; }
+          if (segment?.kind === 'speak_progress' && (await assistant.state.turn(user!.id, sessionId, turnId)).status !== 'running') { controller.abort(); break; }
           for (let offset = 0; offset < bytes.byteLength; offset += 12_000) {
             const part = bytes.subarray(offset, offset + 12_000);
             await sendSpeechChunk({ type: 'speech.chunk', requestId, turnId, sequence: sequence++, audio: Buffer.from(part).toString('base64') }, signal);
@@ -464,7 +466,8 @@ export function registerRealtime(app: FastifyInstance, deps: {
       // Mia's echo reaches recognition right after this frame. Record it now,
       // not behind ASR startup or database work queued for earlier frames.
       if (value.type === 'speech.playback' && user) {
-        if (value.playing) playback.start(value.turnId, Date.now()); else playback.stop(value.turnId, Date.now());
+        const playbackId = value.requestId ?? value.turnId;
+        if (value.playing) playback.start(playbackId, Date.now()); else playback.stop(playbackId, Date.now());
       }
       if (['turn', 'voice.cancel', 'assistant.stop'].includes(value.type)) { voiceEpoch++; cancelVoice(); }
       if (['turn', 'speech.cancel', 'assistant.stop'].includes(value.type)) { speechEpoch++; cancelSpeech(); }

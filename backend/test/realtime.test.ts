@@ -68,6 +68,34 @@ test('running-turn narration synthesizes only the persisted owned action once an
   assert.equal(spoken.length, 1);
 });
 
+test('progress uses persisted text and normal delivery, and completion cancels audio still being generated', async t => {
+  const spoken: { text: string; options?: SpeechOptions }[] = [];
+  let release!: () => void;
+  let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const speech: SpeechProvider = { recognitionConfigured: true, synthesisConfigured: true, transcribe: async () => '',
+    async *synthesize(text, _signal, options) { spoken.push({ text, options }); if (spoken.length === 2) { started(); await held; } yield new Uint8Array(4); },
+    async recognize() { return { write() {}, end() {}, close() {} }; } };
+  const c = await testApp({ speech }); t.after(() => { release(); return c.close(); });
+  const owner = await phoneSignIn(c.app, '+15551112901', 'progress_speaker');
+  const state = new AssistantState(c.db), session = await state.session(owner.user.id), signal = new AbortController().signal;
+  await state.accept(owner.user.id, session.id, randomUUID(), 'Find Ben.');
+  const turn = await state.claim(randomUUID()); assert.ok(turn);
+  const action = await state.action(turn, signal, 'speak_progress', { narration: 'I will find Ben.' });
+  const url = (await c.app.listen({ host: '127.0.0.1', port: 0 })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: owner.token, after: '0' }); await client.next('ready');
+  const first = randomUUID(); client.send({ type: 'speech.request', requestId: first, turnId: turn.id, actionId: action.id });
+  await client.next('speech.completed', f => f.requestId === first);
+  assert.deepEqual(spoken, [{ text: 'I will find Ben.', options: { narration: false, delivery: { tone: 'calm', pace: 'steady', warmth: 'reserved' } } }]);
+  const pending = await state.action(turn, signal, 'speak_progress', { narration: 'Preparing your draft.' });
+  const second = randomUUID(); client.send({ type: 'speech.request', requestId: second, turnId: turn.id, actionId: pending.id });
+  await ready; await state.finish(turn, signal, 'Your draft is ready.'); release();
+  await client.next('speech.cancelled', f => f.requestId === second);
+  assert.equal(client.frames.some(f => f.type === 'speech.chunk' && f.requestId === second), false);
+});
+
 test('final speech uses server-owned delivery and rejects caller-provided speech controls', async t => {
   const spoken: { text: string; options?: SpeechOptions }[] = [];
   const speech: SpeechProvider = { recognitionConfigured: true, synthesisConfigured: true, transcribe: async () => '',
@@ -215,7 +243,7 @@ test('voice onset and noise preserve a spoken reply; a recognized word cancels i
   assert.equal(client.frames.filter(frame => frame.type === 'voice.interruption').length, interruptions, 'cancelled recognition must revoke a pending stable-word timer');
 });
 
-test('Mia’s echo during reported playback neither interrupts nor submits a turn, while a person still can', { timeout: 12000 }, async t => {
+for (const scopedPlayback of [false, true]) test(`Mia’s echo stays filtered while a person can interrupt (${scopedPlayback ? 'per-request playback with a late earlier stop' : 'legacy playback'})`, { timeout: 12000 }, async t => {
   let emit!: (event: RecognitionEvent) => void; let synthesisSignal!: AbortSignal; let audioPackets = 0;
   const speech: SpeechProvider = {
     recognitionConfigured: true, synthesisConfigured: true, transcribe: async () => '',
@@ -234,10 +262,21 @@ test('Mia’s echo during reported playback neither interrupts nor submits a tur
   client.send({ type: 'turn', clientTurnId: randomUUID(), text: 'Read my message.' });
   const accepted = await client.next('turn.accepted'); const turnId = (accepted.turn as { id: string }).id;
   await client.next('event', frame => (frame.event as { type: string }).type === 'assistant.completed');
-  client.send({ type: 'speech.request', requestId: randomUUID(), turnId }); await client.next('speech.chunk');
+  const previousSpeech = randomUUID(), currentSpeech = randomUUID();
+  if (scopedPlayback) {
+    client.send({ type: 'speech.request', requestId: previousSpeech, turnId });
+    await client.next('speech.chunk', frame => frame.requestId === previousSpeech);
+    client.send({ type: 'speech.playback', turnId, requestId: previousSpeech, playing: true });
+  }
+  client.send({ type: 'speech.request', requestId: currentSpeech, turnId });
+  await client.next('speech.chunk', frame => frame.requestId === currentSpeech);
   const requestId = randomUUID(); client.send({ type: 'voice.start', requestId, sampleRate: 24000, format: 'pcm_s16le', inputProcessing: 'aec-residual-v1' });
   await client.next('voice.ready');
-  client.send({ type: 'speech.playback', turnId, playing: true });
+  client.send({ type: 'speech.playback', turnId, ...(scopedPlayback ? { requestId: currentSpeech } : {}), playing: true });
+  if (scopedPlayback) {
+    client.send({ type: 'speech.playback', turnId, requestId: previousSpeech, playing: false });
+    await delay(1600); // An old stop must not end the next segment's echo protection.
+  }
   const echo = new Uint8Array(3840), pcm = new DataView(echo.buffer);
   for (let i = 0; i < echo.length / 2; i++) pcm.setInt16(i * 2, Math.round(2000 * Math.sin(i * .1)), true);
   client.socket.send(echo); await waitFor(() => audioPackets === 1 ? true : undefined);
@@ -253,7 +292,7 @@ test('Mia’s echo during reported playback neither interrupts nor submits a tur
   await client.next('voice.interruption'); assert.equal(synthesisSignal.aborted, true);
   emit({ type: 'speechComplete', turnId: 2, transcript: 'Starts at six. No, open Boris.' });
   await client.next('turn.accepted', frame => (frame.turn as { userText: string }).userText === 'No, open Boris.');
-  client.send({ type: 'speech.playback', turnId, playing: false });
+  client.send({ type: 'speech.playback', turnId, ...(scopedPlayback ? { requestId: currentSpeech } : {}), playing: false });
 });
 
 test('logout immediately revokes matching sockets and pending ASR while preserving another login', { timeout: 12_000 }, async (t) => {
