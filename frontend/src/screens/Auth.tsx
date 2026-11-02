@@ -17,6 +17,7 @@ export function Auth({ mia }: { mia: Mia }) {
   const phone = phoneNumber.trim().replace(/[\s()-]/g, '');
   const validPhone = /^\+[1-9]\d{6,14}$/.test(phone);
   const remaining = challenge ? Math.max(0, Math.ceil((Date.parse(challenge.expiresAt) - now) / 1000)) : 0;
+  const resendRemaining = challenge?.resendAt ? Math.max(0, Math.ceil((Date.parse(challenge.resendAt) - now) / 1000)) : 0;
 
   useEffect(() => {
     if (!challenge) return;
@@ -26,7 +27,7 @@ export function Auth({ mia }: { mia: Mia }) {
   }, [challenge?.challengeId]);
 
   useEffect(() => {
-    return () => { requestEpoch.current++; };
+    return () => { requestEpoch.current++; mia.cancelOtp(); };
   }, []);
 
   async function requestCode() {
@@ -50,6 +51,7 @@ export function Auth({ mia }: { mia: Mia }) {
   }
 
   function changeNumber() {
+    mia.cancelOtp();
     requestEpoch.current++; setChallenge(null); setCode(''); setLocked(false); setPending(null); mia.setError('');
   }
 
@@ -60,9 +62,15 @@ export function Auth({ mia }: { mia: Mia }) {
       </View>
       <View style={a.hero}>
         <MiaCore compact />
-        <Text style={s.eyebrow}>CONNECTED, NATURALLY</Text>
-        <Text accessibilityRole="header" style={a.title}>{challenge ? 'One small step.' : 'Your people.\nA new frequency.'}</Text>
-        <Text style={[s.body, a.centered]}>{challenge ? 'Enter your code to continue.' : 'Messages, voice, and a little help from Mia.'}</Text>
+        <Text style={s.eyebrow}>THE WORLD’S FIRST</Text>
+        <Text
+          accessibilityRole="header"
+          style={[a.title, !challenge && a.landingTitle]}
+          numberOfLines={challenge ? undefined : 1}
+          adjustsFontSizeToFit={!challenge}
+          minimumFontScale={0.75}
+        >{challenge ? 'One small step.' : 'AI-powered messenger.'}</Text>
+        {challenge && <Text style={[s.body, a.centered]}>Enter your code to continue.</Text>}
       </View>
 
       <View style={a.form}>
@@ -81,7 +89,7 @@ export function Auth({ mia }: { mia: Mia }) {
               maxLength={24}
               editable={!pending}
             />
-            <Text style={s.small}>Include + and the country code. This number identifies your account.</Text>
+            <Text style={s.small}>We'll send you an SMS with a verification code.</Text>
             {!!mia.error && <Notice error>{mia.error}</Notice>}
             <Button label="Continue" icon="arrow-forward" disabled={!validPhone} loading={pending === 'request'} onPress={() => void requestCode()} />
           </>
@@ -103,12 +111,11 @@ export function Auth({ mia }: { mia: Mia }) {
             {locked ? <Notice>This verification session is locked. Request a new code to continue.</Notice> : remaining > 0 ? <Text style={s.small}>Verification expires in {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')}.</Text> : <Notice>This verification session has expired. Request a new code to continue.</Notice>}
             {!!mia.error && <Notice error>{mia.error}</Notice>}
             <Button label="Verify & continue" icon="checkmark-outline" loading={pending === 'verify'} disabled={!/^\d{6}$/.test(code) || remaining <= 0 || locked || pending === 'request'} onPress={() => void verifyCode()} />
-            <Button secondary label={remaining > 0 ? 'Request another code' : 'Request a new code'} loading={pending === 'request'} disabled={pending === 'verify'} onPress={() => void requestCode()} />
+            <Button secondary label={resendRemaining > 0 ? `Resend code in ${resendRemaining}s` : 'Request a new code'} loading={pending === 'request'} disabled={pending === 'verify' || resendRemaining > 0} onPress={() => void requestCode()} />
             <Button quiet label="Use a different number" disabled={pending === 'verify'} onPress={changeNumber} />
           </>
         )}
       </View>
-      <Text style={[s.small, a.footer]}>SPACE TO CONNECT.</Text>
     </ScrollView>
   );
 }
@@ -145,8 +152,8 @@ const a = StyleSheet.create({
   logo: { fontSize: 33, letterSpacing: -2, fontWeight: '700', color: colors.ink },
   hero: { alignItems: 'center', paddingTop: 14, paddingBottom: 32, gap: 14 },
   title: { fontSize: 40, lineHeight: 46, letterSpacing: -1.8, fontWeight: '500', textAlign: 'center', color: colors.ink },
+  landingTitle: { width: '100%', fontSize: 28, lineHeight: 34, letterSpacing: -0.8 },
   form: { width: '100%', gap: 17, padding: 24, borderRadius: 26, backgroundColor: colors.paper, borderWidth: 1, borderColor: colors.line },
   centered: { textAlign: 'center' },
   code: { fontSize: 26, letterSpacing: 8, textAlign: 'center' },
-  footer: { textAlign: 'center', padding: 24 },
 });

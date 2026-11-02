@@ -59,6 +59,7 @@ const sources: Record<string, string> = {
       if (n.holdStartup && key === 'mia.ai_mode') await new Promise(resolve => { n.releaseStartupMode = resolve; });
       return n.preferences.get(key) ?? null;
     }, set: async (key, value) => { if (n.failPreferences) throw new Error('Storage unavailable'); n.preferences.set(key, value); } };
+    export const smsAttemptStorage = { get: () => preferences.get('mia.sms.attempts'), set: value => preferences.set('mia.sms.attempts', value) };
     export const sessionStorage = { read: async () => {
       if (n.holdStartup) await new Promise(resolve => { n.releaseStartupSession = resolve; });
       return n.session;
@@ -156,7 +157,7 @@ const sources: Record<string, string> = {
 };
 const bundle = build({
   stdin: { contents: `export { useMia } from './src/useMia'; export { default as App } from './src/App'; export { UiProvider, Button } from './src/ui'; export { Reveal } from './src/motion'; export { ContactFormModal } from './src/screens/ContactFormModal'; export { MessageReferenceCard } from './src/screens/MessageReferenceCard'; export { VoiceNoteBubble } from './src/screens/VoiceNoteBubble';`, resolveDir: root },
-  bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react'],
+  bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react', '@react-native-firebase/auth'],
   define: { 'process.env.EXPO_PUBLIC_API_URL': JSON.stringify('http://mia.test') },
   plugins: [{ name: 'native-test', setup(build) {
     build.onResolve({ filter: /^(react-native|react-native-safe-area-context|@expo\/vector-icons\/Ionicons|expo-crypto|\.\/storage|\.\/audio\/engine|\.\/audio\/mediaStore|\.\.\/\.\.\/modules\/mia-voice|\.\/realtime)$/ }, args => ({ path: args.path, namespace: 'native-test' }));

@@ -21,6 +21,11 @@ export function registerMessagingRoutes(app: FastifyInstance, deps: {
   auth: AuthService; messaging: MessagingService; media: MediaService; db: Database;
 }) {
   const { auth, messaging, media, db } = deps;
+  app.post('/v1/auth/firebase', { config: { public: true },
+    preHandler: app.rateLimit({ max: 10, timeWindow: '1 minute' }) }, async request => {
+    const { idToken } = z.object({ idToken: z.string().min(100).max(16384) }).strict().parse(request.body);
+    return auth.signInWithFirebase(idToken);
+  });
   app.post('/v1/auth/otp/request', { config: { public: true },
     preHandler: app.rateLimit({ max: 8, timeWindow: '1 minute' }) }, async (request, reply) => {
     const { phoneNumber } = z.object({ phoneNumber: z.string().trim().regex(/^\+[1-9]\d{6,14}$/, 'Enter an international phone number with country code.') }).strict().parse(request.body);

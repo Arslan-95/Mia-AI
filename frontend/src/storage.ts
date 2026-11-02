@@ -16,3 +16,9 @@ export const preferences = {
   },
   set: keychain.set,
 };
+
+// Security budgets must distinguish an absent value from a Keychain failure.
+export const smsAttemptStorage = {
+  get: () => keychain.get('mia.sms.attempts'),
+  set: (value: string) => keychain.set('mia.sms.attempts', value),
+};

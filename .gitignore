@@ -10,3 +10,18 @@ coverage/
 .DS_Store
 
 .expo/
+
+# Server identities and Apple signing material never belong in this repository.
+*service-account*.json
+*serviceAccount*.json
+firebase-adminsdk*.json
+*.p8
+*.p12
+*.mobileprovision
+
+# Keep the real Firebase project configuration local, even though its app key
+# is public by design. EAS includes it explicitly for native builds.
+frontend/GoogleService-Info.plist
+.secret.local
+.firebase/
+.firebaserc

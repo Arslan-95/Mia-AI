@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AccessibilityInfo, AppState, Vibration } from 'react-native';
 import * as Crypto from 'expo-crypto';
 import { Api, ApiError } from './api';
+import { PhoneSignIn } from './phoneAuth';
+import { SmsAttemptBudget } from './smsAttemptBudget';
 import { CancelledError, UserFacingError, VoiceCaptureUnavailable, userErrorMessage } from './errors';
 import { AssistantControl } from './assistantControl';
 import { NavigationContext, pageView, routeView, sameContext, viewRoute, type View } from './navigationContext';
-import { preferences, sessionStorage } from './storage';
+import { preferences, sessionStorage, smsAttemptStorage } from './storage';
 import { Realtime, type Frame } from './realtime';
 import { PresentationLease, isLiveAction, mergeMessages } from './coordination';
 import { DeviceActionError, deviceActionFailure, speechFailure, type DeviceActionStage } from './deviceActionFeedback';
@@ -22,10 +24,12 @@ import { pcmLevel } from './audio/level';
 import { VoiceConversation, checkVoice, voiceDelay, type VoicePhase, type VoiceRuntime } from './voiceConversation';
 import type { Recording } from './audio/types';
 import type { VoiceNoteStage } from './voiceNoteGesture';
-import type { AssistantSession, Capabilities, Chat, ClientContext, Contact, DeviceAction, Draft, Message, MessageReference, MessageReferenceIdentity, OriginalPlayback, OtpChallenge, PendingMessage, Profile, ServerEvent, Session, Turn, User, VoiceNote } from './types';
+import type { AssistantSession, Capabilities, Chat, ClientContext, Contact, DeviceAction, Draft, Message, MessageReference, MessageReferenceIdentity, OriginalPlayback, PendingMessage, Profile, ServerEvent, Session, Turn, User, VoiceNote } from './types';
 export type Tab = View;
 const address = (process.env.EXPO_PUBLIC_API_URL ?? '').trim().replace(/\/+$/, '');
 export function useMia() {
+  const phoneSignIn = useRef(new PhoneSignIn(async () => (await import('./phoneAuthNative')).nativePhoneAuth(), Date.now,
+    new SmsAttemptBudget(smsAttemptStorage))).current;
   const [booting, setBooting] = useState(true); const [session, setSession] = useState<Session | null>(null);
   const [aiMode, setAiMode] = useState(false);
   const [microphoneMuted, setMicrophoneMuted] = useState(false);
@@ -739,12 +743,13 @@ export function useMia() {
     } else if (frame.type === 'speech.failed' || frame.type === 'speech.cancelled') { current.settle(frame.type === 'speech.failed' ? speechFailure(frame.code) : new CancelledError()); }
   };
   async function requestOtp(phoneNumber: string) {
-    return api.request<OtpChallenge>('/v1/auth/otp/request', 'POST', { phoneNumber });
+    return phoneSignIn.request(phoneNumber);
   }
   async function verifyOtp(challengeId: string, code: string) {
-    const result = await api.request<Session>('/v1/auth/otp/verify', 'POST', { challengeId, code });
+    const result = await phoneSignIn.verify(challengeId, code, idToken => api.request<Session>('/v1/auth/firebase', 'POST', { idToken }));
     await sessionStorage.write(result); setSession(result);
   }
+  function cancelOtp() { phoneSignIn.cancel(); }
   async function completeProfile(displayName: string) {
     if (!session) return;
     const epoch = authEpoch.current; identityRevision.current++;
@@ -755,7 +760,7 @@ export function useMia() {
       const updated = { ...session, user }; await sessionStorage.write(updated); setSession(updated);
     } catch (reason) { fail(reason); } finally { setBusy(false); }
   }
-  async function logout() { try { await api.request('/v1/auth/logout', 'POST'); } finally { await clearSession(); } }
+  async function logout() { phoneSignIn.cancel(); try { await api.request('/v1/auth/logout', 'POST'); } finally { await clearSession(); } }
   async function saveAiMode(enabled: boolean) {
     const wasFinishing = Boolean(finishingControl.current);
     finishingControl.current = null; setFinishingControlReply(false);
@@ -1346,7 +1351,7 @@ export function useMia() {
     });
     return () => { cancelled = true; void conversation.stop(); };
   }, [voiceSessionEnabled, session?.token, session?.user.profileComplete, assistantSession?.id, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, inForeground, suspendLegacyAudio, voiceRevision, voiceFault, voiceRecoverable, realtimeReady]);
-  return { contactForm, messageReference, originalPlayback, referencePresented, referenceDismissalRevision: referencePresentation.current?.revision, booting, session, aiMode, microphoneMuted, toggleMicrophone, stopAssistantReply, voiceLevel, voicePhase, voiceFault, error, errorRevision, setError, scrollRequests, busy, tab, capabilities, chats, contacts, drafts, messages, chatScrollPositions, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, recordingRecipient: recordDestination.current, voiceNoteStage, api, fail, requestOtp, verifyOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, navigateBack, startChat, saveContactName, sendText, sendPending, draftAction, interrupt, playMedia, toggleMediaPlayback, startRecording, beginHeldRecording, endHeldRecording, finishRecording, useRecording, discardRecording, preview, stopAudio,
+  return { contactForm, messageReference, originalPlayback, referencePresented, referenceDismissalRevision: referencePresentation.current?.revision, booting, session, aiMode, microphoneMuted, toggleMicrophone, stopAssistantReply, voiceLevel, voicePhase, voiceFault, error, errorRevision, setError, scrollRequests, busy, tab, capabilities, chats, contacts, drafts, messages, chatScrollPositions, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, recordingRecipient: recordDestination.current, voiceNoteStage, api, fail, requestOtp, verifyOtp, cancelOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, navigateBack, startChat, saveContactName, sendText, sendPending, draftAction, interrupt, playMedia, toggleMediaPlayback, startRecording, beginHeldRecording, endHeldRecording, finishRecording, useRecording, discardRecording, preview, stopAudio,
     backView: routeView(navigation.backRoute()), navigationDirection: navigationDirection.current, navigationRevision: navigation.snapshot().revision,
     prefetchVoiceMessages,
     setComposer: (text: string) => { if (activeChatId) setComposers(previous => ({ ...previous, [activeChatId]: text })); },

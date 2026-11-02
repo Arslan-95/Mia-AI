@@ -1,0 +1,23 @@
+# Build input rules are independent of Git so the local Firebase app config is
+# included in private EAS build uploads, without uploading server credentials.
+node_modules/
+dist/
+coverage/
+.expo/
+.data/
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+.DS_Store
+*service-account*.json
+*serviceAccount*.json
+firebase-adminsdk*.json
+*.p8
+*.p12
+*.mobileprovision
+!GoogleService-Info.plist
+.secret.local
+.firebase/
+.firebaserc
