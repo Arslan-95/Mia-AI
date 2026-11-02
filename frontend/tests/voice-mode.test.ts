@@ -146,6 +146,7 @@ const sources: Record<string, string> = {
         n.frames.push(frame);
         if (frame.type === 'voice.start' && !n.holdASR) queueMicrotask(() => n.frame({ type: 'voice.ready', requestId: frame.requestId }));
         if (frame.type === 'speech.request') queueMicrotask(() => {
+          if (n.holdSpeech) return;
           if (n.failSpeech) { n.frame({ type: 'speech.failed', requestId: frame.requestId }); return; }
           n.frame({ type: 'speech.chunk', requestId: frame.requestId, sequence: 0, audio: 'AAA=' });
           n.frame({ type: 'speech.completed', requestId: frame.requestId, chunks: 1, totalBytes: 2 });
@@ -544,7 +545,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
   const n = {
     session, preferences: new Map([['mia.ai_mode', String(mode)]]), captures: 0, playbacks: 0, deleted: [] as string[],
     frames: [] as Frame[], requests: [] as { path: string; method: string; body: any }[], turns: [] as Turn[],
-    capture: null as ((recording: Recording | null) => void) | null, playback: null as (() => void) | null,
+    capture: null as ((recording: Recording | null) => void) | null, playback: null as (() => void) | null, holdSpeech: false,
     playbackProgress: null as ((progress: PlaybackProgress) => void) | null,
     appState: (_state: string) => {}, event: async (_event: ServerEvent, _time: number, _replayed?: boolean) => {}, frame: (_frame: Frame) => {},
     connection: (_status: string) => {}, offline: false, holdHealth: false, healthHeld: false, healthCancelled: false,
@@ -696,7 +697,7 @@ async function mountProgress() {
   return { ...h, get mia() { return h.mia; }, turn, action };
 }
 
-test('progress speaks during the running task, navigation proceeds during playback, and final speech takes priority', async () => {
+test('progress finishes naturally while final audio is prepared, then hands off without a second synthesis request', async () => {
   const h = await mountProgress();
   try {
     await h.action('progress-one'); await h.wait(() => h.n.playbacks === 1);
@@ -707,13 +708,98 @@ test('progress speaks during the running task, navigation proceeds during playba
     assert.equal(h.mia.activeChatId, 'anna'); assert.equal(h.mia.audioState, 'playing');
     assert.equal(h.n.requests.some(r => r.path === '/v1/device-actions/progress-one/result'), false, 'opening the chat did not wait for or cancel the narration');
     h.turn.status = 'completed'; h.turn.assistantText = 'Your draft is ready.';
+    const finishProgress = h.n.playback!;
+    await h.wait(() => h.n.frames.filter(f => f.type === 'speech.request').length === 2);
+    assert.equal(h.n.playbacks, 1, 'prepared final audio cannot cut off the current phrase');
+    assert.equal(h.n.playback, finishProgress, 'the current playback was not stopped');
+    assert.equal(h.n.requests.some(r => r.path === '/v1/device-actions/progress-one/result'), false);
+    await act(async () => { finishProgress(); });
     await h.wait(() => h.n.playbacks === 2);
+    assert.equal(h.n.frames.filter(f => f.type === 'speech.request').length, 2, 'reuse the already prepared PCM');
     assert.equal(h.n.frames.filter(f => f.type === 'speech.request').at(-1)?.actionId, undefined);
     const progressFeedback = h.n.requests.find(r => r.path === '/v1/device-actions/progress-one/result')!.body;
-    assert.equal(progressFeedback.success, false, 'interrupted progress is not recorded as heard');
+    assert.equal(progressFeedback.success, true, 'the complete phrase is recorded as heard');
     assert.equal(h.mia.voiceFault, false); assert.equal(h.mia.error, '');
     await act(async () => { h.n.playback!(); });
     await h.wait(() => h.mia.voicePhase === 'listening');
+  } finally { await h.close(); }
+});
+
+test('manual navigation cancels an audible phrase and its prepared final reply without later playback', async () => {
+  const h = await mountProgress();
+  try {
+    await h.action('progress-before-navigation'); await h.wait(() => h.n.playbacks === 1);
+    h.turn.status = 'completed'; h.turn.assistantText = 'Ready.';
+    await h.wait(() => h.n.frames.filter(f => f.type === 'speech.request').length === 2);
+    const preparedId = h.n.frames.filter(f => f.type === 'speech.request').at(-1)!.requestId;
+    await act(async () => { await h.mia.navigate('people'); });
+    await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/progress-before-navigation/result'));
+    assert.equal(h.n.requests.find(r => r.path === '/v1/device-actions/progress-before-navigation/result')!.body.success, false);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)); });
+    assert.equal(h.n.playbacks, 1, 'cancelled prepared audio never starts');
+    assert.equal(h.n.frames.some(f => f.type === 'speech.playback' && f.requestId === preparedId && f.playing), false);
+    assert.equal(h.mia.audioState, 'idle'); assert.equal(h.mia.voiceFault, false);
+  } finally { await h.close(); }
+});
+
+test('a spoken user interruption cancels progress and prevents its prepared final audio from playing', async () => {
+  const h = await mountProgress();
+  try {
+    await h.action('progress-before-interruption'); await h.wait(() => h.n.playbacks === 1);
+    h.turn.status = 'completed'; h.turn.assistantText = 'Ready.';
+    await h.wait(() => h.n.frames.filter(f => f.type === 'speech.request').length === 2);
+    const stream = h.n.frames.filter(f => f.type === 'voice.start').at(-1)!;
+    await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: 'new-spoken-request' }); });
+    await h.wait(() => h.n.playback === null);
+    assert.equal(h.n.playbacks, 1);
+    assert.equal(h.mia.audioState, 'idle'); assert.equal(h.mia.voiceFault, false);
+    const finalId = h.n.frames.filter(f => f.type === 'speech.request').at(-1)!.requestId;
+    // A late synthesis frame from the cancelled request must remain inaudible.
+    await act(async () => { h.n.frame({ type: 'speech.completed', requestId: finalId, chunks: 1, totalBytes: 2 }); });
+    assert.equal(h.n.playbacks, 1);
+  } finally { await h.close(); }
+});
+
+test('an explicit audio-stop action interrupts progress immediately', async () => {
+  const h = await mountProgress();
+  try {
+    await h.action('progress-before-stop'); await h.wait(() => h.n.playbacks === 1);
+    await h.action('stop-progress', 'stop_audio');
+    await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/stop-progress/result'));
+    await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/progress-before-stop/result'));
+    assert.equal(h.n.requests.find(r => r.path === '/v1/device-actions/progress-before-stop/result')!.body.success, false);
+    assert.equal(h.n.requests.find(r => r.path === '/v1/device-actions/stop-progress/result')!.body.success, true);
+    assert.equal(h.mia.audioState, 'idle'); assert.equal(h.mia.voiceFault, false);
+  } finally { await h.close(); }
+});
+
+test('a final reply skips unheard progress that is still loading', async () => {
+  const h = await mountProgress();
+  try {
+    h.n.holdSpeech = true;
+    await h.action('unheard-progress'); await h.wait(() => h.n.frames.some(f => f.type === 'speech.request'));
+    assert.equal(h.n.playbacks, 0);
+    h.n.holdSpeech = false; h.turn.status = 'completed'; h.turn.assistantText = 'Ready.';
+    await h.wait(() => h.n.playbacks === 1);
+    assert.equal(h.n.requests.find(r => r.path === '/v1/device-actions/unheard-progress/result')!.body.success, false);
+    assert.equal(h.n.frames.filter(f => f.type === 'speech.request').at(-1)?.actionId, undefined);
+    await act(async () => { h.n.playback!(); });
+    await h.wait(() => h.mia.voicePhase === 'listening');
+  } finally { await h.close(); }
+});
+
+test('failed final preparation leaves the current phrase audible until it finishes', async () => {
+  const h = await mountProgress();
+  try {
+    await h.action('progress-before-prefetch-error'); await h.wait(() => h.n.playbacks === 1);
+    const finish = h.n.playback;
+    h.n.failSpeech = true; h.turn.status = 'completed'; h.turn.assistantText = 'Ready.';
+    await h.wait(() => h.n.frames.filter(f => f.type === 'speech.request').length === 2);
+    assert.equal(h.n.playback, finish); assert.equal(h.mia.voiceFault, false);
+    await act(async () => { finish!(); });
+    await h.wait(() => h.mia.voiceFault);
+    assert.equal(h.n.playbacks, 1);
+    assert.equal(h.n.requests.find(r => r.path === '/v1/device-actions/progress-before-prefetch-error/result')!.body.success, true);
   } finally { await h.close(); }
 });
 
@@ -737,7 +823,7 @@ test('optional progress failures preserve the task and confirmed narration is ac
   } finally { await h.close(); }
 });
 
-test('source narration preempts progress and cannot be interrupted by another optional update', async () => {
+test('source narration waits for progress and cannot be interrupted by another optional update', async () => {
   const h = await mountProgress();
   try {
     h.n.referenceSources.push({ id: 'source', chatId: 'anna', senderId: 'recipient', kind: 'text', text: 'Bring the blue notebook.', mediaId: null, createdAt: new Date().toISOString() });
@@ -746,6 +832,9 @@ test('source narration preempts progress and cannot be interrupted by another op
       actionId: 'source-action', sessionId: 'assistant', turnId: h.turn.id, kind: 'show_message', context: h.turn.context,
       sequence: '22', payload: { chatId: 'anna', messageId: 'source', narration: 'Bring the blue notebook.' },
     } }, 0); });
+    assert.equal(h.mia.messageReference, null, 'wait for the spoken phrase before changing to its source');
+    assert.equal(h.n.playbacks, 1);
+    await act(async () => { h.n.playback!(); });
     await h.wait(() => h.mia.messageReference?.messageId === 'source');
     await act(async () => { h.mia.referencePresented(22); });
     await h.wait(() => h.n.playbacks === 2);

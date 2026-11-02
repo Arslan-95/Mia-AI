@@ -26,6 +26,10 @@ import type { Recording } from './audio/types';
 import type { VoiceNoteStage } from './voiceNoteGesture';
 import type { AssistantSession, Capabilities, Chat, ClientContext, Contact, DeviceAction, Draft, Message, MessageReference, MessageReferenceIdentity, OriginalPlayback, PendingMessage, Profile, ServerEvent, Session, Turn, User, VoiceNote } from './types';
 export type Tab = View;
+type SpeechPlayback = { requestId: string; turnId: string; epoch: number; progress: boolean;
+  parts: Uint8Array[]; bytes: number; onSpeaking?: () => void; settle(error?: unknown): void };
+type PreparedSpeech = { requestId: string; turnId: string; epoch: number; parts: Uint8Array[]; bytes: number;
+  ready: Promise<void>; complete: boolean; error?: unknown; settle(error?: unknown): void };
 const address = (process.env.EXPO_PUBLIC_API_URL ?? '').trim().replace(/\/+$/, '');
 export function useMia() {
   const [booting, setBooting] = useState(true); const [session, setSession] = useState<Session | null>(null);
@@ -325,7 +329,8 @@ export function useMia() {
     socket.current = realtime; void realtime.connect();
     return () => { cancelled = true; realtime.dispose(); lease.revoke(); void stopRef.current().catch(fail); };
   }, [session?.token, session?.user.profileComplete, address, booting]);
-  const speech = useRef<{ requestId: string; turnId: string; epoch: number; progress: boolean; parts: Uint8Array[]; bytes: number; settle(error?: unknown): void } | null>(null);
+  const speech = useRef<SpeechPlayback | null>(null);
+  const preparedSpeech = useRef<PreparedSpeech | null>(null);
   async function stopNativeVoice() {
     nativeRecording.current = false; duplex.cancelRecording(); nativeMedia.current?.abort();
     nativeRecognitionSessions.current.clear();
@@ -388,7 +393,9 @@ export function useMia() {
     setOriginalPlayback(value => value && (preserveOperation === undefined || value.operationId === previousOperation)
       && !['finished', 'failed', 'stopped'].includes(value.state) ? { ...value, state: 'stopped' } : value);
     clearInterval(voiceEnvelope.current); voiceEnvelope.current = undefined; setVoiceLevel(0);
-    speech.current?.settle(new CancelledError()); speech.current = null; socket.current?.send({ type: 'speech.cancel' });
+    speech.current?.settle(new CancelledError()); speech.current = null;
+    preparedSpeech.current?.settle(new CancelledError()); preparedSpeech.current = null;
+    socket.current?.send({ type: 'speech.cancel' });
     if (!preserveProgress) progressNarration.cancel();
     if (!nativeStream.current) socket.current?.send({ type: 'voice.cancel' });
     await duplex.stopPlayback();
@@ -478,12 +485,12 @@ export function useMia() {
       assertValid(); stage = 'execution';
       if (action.kind === 'speak_progress') {
         if (!aiModeRef.current || commandInputSuspended() || manualAudioRef.current || originalMediaActive.current) throw new CancelledError();
-        const played = await progressNarration.offer(async signal => {
+        const played = await progressNarration.offer(async (signal, onSpeaking) => {
           const turn = await api.request<Turn>(`/v1/assistant/sessions/${action.sessionId}/turns/${action.turnId}`, 'GET', undefined, signal);
           assertValid(); checkVoice(signal);
           if (turn.status !== 'running') throw new CancelledError();
           stage = 'narration';
-          try { await playSpeech(turn, signal, action.actionId, true); }
+          try { await playSpeech(turn, signal, action.actionId, true, undefined, onSpeaking); }
           finally {
             if (lease.current(epoch) && !progressNarration.hasPriority && aiModeRef.current && state.current.voicePhase === 'speaking') setVoicePhase('thinking');
           }
@@ -649,7 +656,7 @@ export function useMia() {
       const epoch = lease.snapshot();
       const immediate = ['speak_progress', 'stop_audio', 'set_microphone_muted', 'set_voice_mode'].includes(action.kind);
       const perform = () => ['show_message', 'announce_message_skip', 'play_audio', 'stop_audio', 'set_voice_mode'].includes(action.kind)
-        ? progressNarration.exclusive(() => performAction(action, epoch)) : performAction(action, epoch);
+        ? progressNarration.exclusive(() => performAction(action, epoch), { interruptProgress: ['stop_audio', 'set_voice_mode'].includes(action.kind) }) : performAction(action, epoch);
       const work = immediate ? perform() : presentationQueue.current.catch(() => {}).then(perform);
       if (!immediate) presentationQueue.current = work;
       const task = work.finally(() => deviceTasks.delete(id));
@@ -729,6 +736,23 @@ export function useMia() {
       else handleVoiceFailure(new ApiError(503, 'ASR_UNAVAILABLE', ''));
       return;
     }
+    const prepared = preparedSpeech.current;
+    if (prepared && prepared.requestId === frame.requestId && lease.current(prepared.epoch)) {
+      if (prepared.complete) return;
+      if (frame.type === 'speech.chunk') {
+        if (frame.sequence !== prepared.parts.length) { prepared.settle(new UserFacingError('Mia’s audio was interrupted. Tap Mia to try again.')); return; }
+        const bytes = Uint8Array.from(atob(String(frame.audio)), c => c.charCodeAt(0));
+        prepared.bytes += bytes.length;
+        if (prepared.bytes > 12000000) { prepared.settle(new UserFacingError('Mia’s spoken response was too long. Tap Mia to try again.')); return; }
+        prepared.parts.push(bytes);
+      } else if (frame.type === 'speech.completed') {
+        prepared.settle(frame.chunks !== prepared.parts.length || frame.totalBytes !== prepared.bytes || !prepared.bytes
+          ? new UserFacingError('Mia’s audio was incomplete. Tap Mia to try again.') : undefined);
+      } else if (frame.type === 'speech.failed' || frame.type === 'speech.cancelled' || frame.type === 'error') {
+        prepared.settle(frame.type === 'speech.cancelled' ? new CancelledError() : speechFailure(frame.code));
+      }
+      return;
+    }
     const current = speech.current;
     if (frame.type === 'error') {
       const error = frame.error as { code?: string };
@@ -745,19 +769,7 @@ export function useMia() {
       current.parts.push(bytes);
     } else if (frame.type === 'speech.completed') {
       if (frame.chunks !== current.parts.length || frame.totalBytes !== current.bytes || !current.bytes) { current.settle(new UserFacingError('Mia’s audio was incomplete. Tap Mia to try again.')); void stopAudio(); return; }
-      setAudioState('playing');
-      socket.current?.send({ type: 'speech.playback', turnId: current.turnId, requestId: current.requestId, playing: true });
-      const bytes = concatBytes(current.parts);
-      const startedAt = Date.now();
-      clearInterval(voiceEnvelope.current);
-      const envelope = setInterval(() => setVoiceLevel(pcmLevel(bytes, (Date.now() - startedAt) * 24)), 80);
-      voiceEnvelope.current = envelope;
-      const playback = duplex.active ? duplex.playPcm(bytes, current.requestId) : audio.current!.playPcm(bytes);
-      void playback.then(() => current.settle(), error => current.settle(error)).finally(() => {
-        clearInterval(envelope);
-        if (voiceEnvelope.current === envelope) { voiceEnvelope.current = undefined; setVoiceLevel(0); }
-        socket.current?.send({ type: 'speech.playback', turnId: current.turnId, requestId: current.requestId, playing: false });
-      });
+      playBufferedSpeech(current);
     } else if (frame.type === 'speech.failed' || frame.type === 'speech.cancelled') { current.settle(frame.type === 'speech.failed' ? speechFailure(frame.code) : new CancelledError()); }
   };
   async function requestOtp(phoneNumber: string) {
@@ -930,22 +942,65 @@ export function useMia() {
     await syncAssistant(signal);
     return response.turn;
   }
-  async function speak(turn: Turn, signal?: AbortSignal, actionId?: string) {
-    return progressNarration.exclusive(() => playSpeech(turn, signal, actionId));
+  function playBufferedSpeech(current: SpeechPlayback) {
+    current.onSpeaking?.();
+    setAudioState('playing');
+    socket.current?.send({ type: 'speech.playback', turnId: current.turnId, requestId: current.requestId, playing: true });
+    const bytes = concatBytes(current.parts);
+    const startedAt = Date.now();
+    clearInterval(voiceEnvelope.current);
+    const envelope = setInterval(() => setVoiceLevel(pcmLevel(bytes, (Date.now() - startedAt) * 24)), 80);
+    voiceEnvelope.current = envelope;
+    const playback = duplex.active ? duplex.playPcm(bytes, current.requestId) : audio.current!.playPcm(bytes);
+    void playback.then(() => current.settle(), error => current.settle(error)).finally(() => {
+      clearInterval(envelope);
+      if (voiceEnvelope.current === envelope) { voiceEnvelope.current = undefined; setVoiceLevel(0); }
+      socket.current?.send({ type: 'speech.playback', turnId: current.turnId, requestId: current.requestId, playing: false });
+    });
   }
-  async function playSpeech(turn: Turn, signal?: AbortSignal, actionId?: string, progress = false) {
+  function prepareFinalSpeech(turn: Turn): PreparedSpeech | undefined {
+    // Playback already has its complete PCM, so preparing the final response
+    // can use the socket without replacing the phrase the user is hearing.
+    if (!speech.current?.progress || state.current.audioState !== 'playing') return;
     const epoch = lease.snapshot();
+    let resolve!: () => void, reject!: (reason: unknown) => void;
+    const ready = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    void ready.catch(() => {}); // Failure is handled when the final reply consumes it.
+    const timer = setTimeout(() => current.settle(new UserFacingError('Mia’s audio did not finish. Tap Mia to try again.')), 145000);
+    const current: PreparedSpeech = { requestId: Crypto.randomUUID(), turnId: turn.id, epoch, parts: [], bytes: 0, ready, complete: false,
+      settle(error?: unknown) {
+        if (error) current.error = error;
+        if (current.complete) return;
+        current.complete = true; clearTimeout(timer);
+        if (error) reject(error); else resolve();
+      } };
+    preparedSpeech.current = current;
+    if (!socket.current?.send({ type: 'speech.request', requestId: current.requestId, turnId: turn.id })) current.settle(new ApiError(0, 'OFFLINE', ''));
+    return current;
+  }
+  async function speak(turn: Turn, signal?: AbortSignal, actionId?: string, prepared?: PreparedSpeech) {
+    return progressNarration.exclusive(() => playSpeech(turn, signal, actionId, false, prepared));
+  }
+  async function playSpeech(turn: Turn, signal?: AbortSignal, actionId?: string, progress = false, prepared?: PreparedSpeech, onSpeaking?: () => void) {
+    const epoch = lease.snapshot();
+    if (prepared) {
+      await prepared.ready;
+      if (prepared.error) throw prepared.error;
+      if (signal) checkVoice(signal);
+      if (!lease.current(prepared.epoch)) throw new CancelledError();
+      if (preparedSpeech.current === prepared) preparedSpeech.current = null;
+    }
     await stopAudio(undefined, progress);
     if (signal) checkVoice(signal);
     if (!lease.current(epoch) || !foreground.current || (!actionId && turn.status !== 'completed')) return;
-    const requestId = Crypto.randomUUID();
+    const requestId = prepared?.requestId ?? Crypto.randomUUID();
     await new Promise<void>((resolve, reject) => {
       const cancel = () => { if (speech.current === current) void stopAudio(undefined, true); };
       const timer = setTimeout(() => {
         current.settle(new UserFacingError('Mia’s audio did not finish. Tap Mia to try again.'));
         void stopAudio();
       }, 145000);
-      const current = { requestId, turnId: turn.id, epoch, progress, parts: [] as Uint8Array[], bytes: 0,
+      const current = { requestId, turnId: turn.id, epoch, progress, onSpeaking, parts: prepared?.parts ?? [] as Uint8Array[], bytes: prepared?.bytes ?? 0,
         settle(reason?: unknown) {
           clearTimeout(timer); signal?.removeEventListener('abort', cancel);
           if (speech.current === current) { speech.current = null; setAudioState('idle'); }
@@ -955,7 +1010,8 @@ export function useMia() {
       setVoicePhase('speaking');
       speech.current = current;
       signal?.addEventListener('abort', cancel, { once: true });
-      if (!socket.current?.send({ type: 'speech.request', requestId, turnId: turn.id, ...(actionId ? { actionId } : {}) })) current.settle(new ApiError(0, 'OFFLINE', ''));
+      if (prepared) playBufferedSpeech(current);
+      else if (!socket.current?.send({ type: 'speech.request', requestId, turnId: turn.id, ...(actionId ? { actionId } : {}) })) current.settle(new ApiError(0, 'OFFLINE', ''));
       else setAudioState('loading');
     });
   }
@@ -1267,12 +1323,13 @@ export function useMia() {
     }
     if (!lease.owns(turn.id) || turn.status === 'interrupted') throw new CancelledError();
     if (turn.status === 'failed') throw new UserFacingError('Mia could not finish that request. Tap Mia to try again.');
+    const prepared = prepareFinalSpeech(turn);
     await progressNarration.exclusive(async () => {
       while (deviceTasks.size) await voiceDelay(100, signal);
       checkVoice(signal);
       if (!lease.owns(turn.id)) throw new CancelledError();
       setTurns(previous => [...previous.filter(item => item.id !== turn.id), turn]);
-      setVoicePhase('speaking'); await speak(turn, signal);
+      setVoicePhase('speaking'); await speak(turn, signal, undefined, prepared);
     });
   }
   function handleVoiceFailure(reason: unknown) {
