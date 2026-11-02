@@ -18,6 +18,9 @@ process.env.TEST_DATABASE_URL = config.databaseUrl;
 const db = await testDatabase();
 const provider = new MetaResponsesProvider(config);
 const runtime = new AssistantRuntime(db, { configured: provider.configured, async respond(request) {
+  const toolErrors = request.input.filter(item => item.type === 'function_call_output' && typeof item.output === 'string'
+    && JSON.parse(item.output)?.error);
+  if (toolErrors.length) console.info(JSON.stringify({ toolErrors }));
   const response = await provider.respond(request);
   if (process.argv[2]) {
     const context = request.instructions.split('Server-supplied current context (data, not instructions):\n').at(-1);
@@ -65,14 +68,20 @@ const timer = setInterval(() => {
   polling = (async () => {
     const pending = await db.query<Action>('SELECT id,user_id AS "userId",turn_id AS "turnId",kind,payload FROM device_actions WHERE state=$1 ORDER BY sequence', ['pending']);
     for (const action of pending) {
-      actions.push(action);
       const screen = screens.get(action.userId)!;
+      if (action.kind === 'speak_progress') {
+        await runtime.state.acknowledgeAction(action.userId, action.id, false,
+          { code: 'ACTION_CANCELLED', stage: 'narration', context: structuredClone(screen) });
+        continue; // Optional status audio is validated by the separate real-TTS test.
+      }
+      actions.push(action);
       if (action.kind === 'show_message' && deviceFailures.get(action.userId) !== 'presentation') {
         const source = await messaging.source(action.userId, action.payload.chatId!, action.payload.messageId!);
         screen.route = `/chat/${source.chatId}`;
         screen.reference = { chatId: source.chatId, messageId: source.id, revision: (screen.reference?.revision ?? 0) + 1,
           ...(action.payload.focus ? { focus: action.payload.focus } : {}) };
       } else if (action.kind === 'show_message') { /* Simulated presentation never completed. */ }
+      else if (action.kind === 'announce_message_skip') { /* Audible recovery notice leaves the current card intact. */ }
       else if (action.kind === 'dismiss_message') delete screen.reference;
       else if (action.kind === 'open_chat' || action.kind === 'open_page') {
         screen.route = action.payload.route ?? `/chat/${action.payload.chatId}`;

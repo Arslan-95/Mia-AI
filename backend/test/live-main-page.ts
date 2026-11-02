@@ -20,6 +20,10 @@ const timer = setInterval(() => {
   polling = (async () => {
     const pending = await db.query<{ id: string; userId: string; kind: string; payload: { route?: string } }>("SELECT id,user_id AS \"userId\",kind,payload FROM device_actions WHERE state='pending'");
     for (const action of pending) {
+      if (action.kind === 'speak_progress') {
+        await runtime.state.acknowledgeAction(action.userId, action.id, false, { code: 'ACTION_CANCELLED', stage: 'narration' });
+        continue;
+      }
       assert.equal(action.kind, 'open_page'); assert.equal(action.payload.route, '/chats');
       const screen = screens.get(action.userId)!;
       screen.previousRoute = screen.route; screen.route = '/chats'; screen.revision++;
@@ -39,7 +43,7 @@ try {
     const deadline = Date.now() + 90000;
     let current;
     do { current = await runtime.state.turn(owner, session.id, turn.id); if (!['queued', 'running'].includes(current.status)) break; await delay(100); } while (Date.now() < deadline);
-    const actions = await db.query<{kind: string; state: string}>('SELECT kind,state FROM device_actions WHERE turn_id=$1', [turn.id]);
+    const actions = await db.query<{kind: string; state: string}>("SELECT kind,state FROM device_actions WHERE turn_id=$1 AND kind<>'speak_progress'", [turn.id]);
     const result = { request, passed: current.status === 'completed' && actions.length === 1 && actions[0]!.state === 'completed' && actions[0]!.kind === 'open_page' && context.route === '/chats' && context.voice!.enabled, reply: current.assistantText };
     results.push(result); console.info(JSON.stringify(result));
   }
