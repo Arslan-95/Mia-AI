@@ -43,7 +43,7 @@ test('a revised first word restarts stability and words need acoustic evidence o
   assert.equal(gate.userText(2, 'the meeting starts at six'), '');
   assert.equal(gate.observe(2, 'the meeting starts at six', true, 2100, true), true);
   assert.equal(gate.userText(2, 'the meeting starts at six'), 'the meeting starts at six');
-  assert.equal(meaningfulSpeech('Нет, открой другой чат'), true);
+  assert.equal(meaningfulSpeech('No, open another chat'), true);
   assert.equal(meaningfulSpeech('2'), true);
   gate.start(3);
   assert.equal(gate.observe(3, 'Open', false, 1000), false);
@@ -53,14 +53,14 @@ test('a revised first word restarts stability and words need acoustic evidence o
 });
 test('Mia’s own words heard during playback neither interrupt her nor become a turn', () => {
   const playback = new PlaybackEcho();
-  playback.remember('a', 'Анна написала, что встреча начнётся в шесть. Ответить ей?');
+  playback.remember('a', 'Anna wrote that the meeting starts at six. Should I reply?');
   playback.start('a', 1000);
   const gate = new WordBargeInGate(); gate.start(1, true, true); gate.hear(1, playback.at(1200));
-  for (const text of ['Анна', 'Анна написала', 'Анна написала что встре', 'Анна написала, что встреча начнется в шесть'])
+  for (const text of ['Anna', 'Anna wrote', 'Anna wrote that the meet', 'Anna wrote that the meeting starts at six'])
     assert.equal(gate.observe(1, text, false, 1400), false);
   assert.equal(gate.due(1), undefined);
-  assert.equal(gate.observe(1, 'Анна написала, что встреча начинается в шесть.', true, 3000), false, 'recognition errors on the echo are tolerated');
-  assert.equal(gate.userText(1, 'Анна написала, что встреча начинается в шесть.'), '');
+  assert.equal(gate.observe(1, 'Anna wrote that the meeting start at six.', true, 3000), false, 'recognition errors on the echo are tolerated');
+  assert.equal(gate.userText(1, 'Anna wrote that the meeting start at six.'), '');
 });
 test('during playback a person needs two words of their own, and echo before them is dropped', () => {
   const playback = new PlaybackEcho();
@@ -118,25 +118,25 @@ test('an utterance that began over Mia and ends after her is the person’s, and
 });
 test('digits the person says are never matched against different digits or words of Mia', () => {
   const playback = new PlaybackEcho();
-  playback.remember('a', 'На какое время поставить будильник?');
-  playback.remember('b', 'Свободно в 3 и в 5. Какое время подходит?');
+  playback.remember('a', 'What time should I set the alarm for?');
+  playback.remember('b', 'Free at 3 and at 5. Which time works?');
   playback.start('a', 0); playback.stop('a', 2000);
   const gate = new WordBargeInGate(); gate.start(1, true, true); gate.hear(1, playback.at(2300));
-  assert.equal(gate.observe(1, 'на 7 30', true, 2500), true);
-  assert.equal(gate.userText(1, 'на 7 30'), 'на 7 30');
+  assert.equal(gate.observe(1, 'at 7 30', true, 2500), true);
+  assert.equal(gate.userText(1, 'at 7 30'), 'at 7 30');
   playback.start('b', 5000);
   gate.start(2, true, true); gate.hear(2, playback.at(5500));
-  assert.equal(gate.observe(2, 'нет давай в 8 вечера', false, 5500), false);
-  assert.equal(gate.observe(2, 'нет давай в 8 вечера', true, 5700), true);
-  assert.equal(gate.userText(2, 'нет давай в 8 вечера'), 'нет давай в 8 вечера');
+  assert.equal(gate.observe(2, 'no make it 8 tonight', false, 5500), false);
+  assert.equal(gate.observe(2, 'no make it 8 tonight', true, 5700), true);
+  assert.equal(gate.userText(2, 'no make it 8 tonight'), 'no make it 8 tonight');
 });
 test('recognition merging or splitting Mia’s words is still her echo, and trailing echo is cut', () => {
   const playback = new PlaybackEcho();
-  playback.remember('a', 'Напоминание на завтра установлено. Что-нибудь ещё?');
+  playback.remember('a', 'The note book reminder is set. Anything else?');
   playback.start('a', 0);
   const gate = new WordBargeInGate(); gate.start(1, true, true); gate.hear(1, playback.at(500));
-  assert.equal(gate.observe(1, 'напоминание назавтра установлено что нибудь еще', true, 900), false);
-  assert.equal(gate.userText(1, 'напоминание назавтра установлено что нибудь еще'), '');
+  assert.equal(gate.observe(1, 'the notebook reminder is set any thing else', true, 900), false);
+  assert.equal(gate.userText(1, 'the notebook reminder is set any thing else'), '');
   playback.remember('b', 'Anna said the meeting starts at six. Should I reply?');
   playback.start('b', 3000);
   gate.start(2, true, true); gate.hear(2, playback.at(3500));
@@ -145,9 +145,9 @@ test('recognition merging or splitting Mia’s words is still her echo, and trai
 });
 test('common short pairs are not echo on their own', () => {
   const playback = new PlaybackEcho();
-  playback.remember('a', 'Я не нашла такой контакт, и я не уверена, что номер верный.');
+  playback.remember('a', 'I do not see that contact, and I do not know whether the number is right.');
   playback.start('a', 0);
   const gate = new WordBargeInGate(); gate.start(1, true, true); gate.hear(1, playback.at(500));
-  assert.equal(gate.observe(1, 'я не хочу', true, 900), true);
-  assert.equal(gate.userText(1, 'я не хочу'), 'я не хочу');
+  assert.equal(gate.observe(1, 'I do prefer another', true, 900), true);
+  assert.equal(gate.userText(1, 'I do prefer another'), 'I do prefer another');
 });
