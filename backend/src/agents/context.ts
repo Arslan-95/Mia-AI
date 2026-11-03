@@ -14,7 +14,7 @@ export const referenceSchema = z.object({ chatId: z.uuid(), messageId: z.uuid(),
 export const voiceNoteSchema = z.object({ id: z.uuid(), recipientId: z.uuid(), durationMs: z.int().nonnegative().max(119000) }).strict();
 export const contactFormSchema = z.object({ turnId: z.uuid(), operation: z.enum(['create', 'rename']),
   name: z.string().max(80).nullable(), identifier: z.string().max(100).nullable(),
-  status: z.enum(['editing', 'saving', 'saved', 'failed', 'interrupted']) }).strict();
+  status: z.enum(['editing', 'saving', 'saved', 'failed', 'interrupted', 'clarification']) }).strict();
 export const clientContextSchema = z.object({ route: routeSchema, revision: z.int().nonnegative(), navigationSessionId: z.uuid().optional(), voice: voiceStateSchema.optional(),
   contactForm: contactFormSchema.nullable().optional(), voiceNote: voiceNoteSchema.optional(), reference: referenceSchema.optional(), previousRoute: routeSchema.optional() }).strict();
 export type ClientContext = z.infer<typeof clientContextSchema>;

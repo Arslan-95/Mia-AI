@@ -42,7 +42,7 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
   const messaging = new MessagingService(db);
   const memory = new AgentMemory(db);
   const resolution = async (contact: Awaited<ReturnType<MessagingService['contact']>>) => ({ contact,
-    sameNameContacts: await db.query(`SELECT c.id AS "contactId",c.name,u.phone_number AS "phoneNumber" FROM contacts c JOIN users u ON u.id=c.user_id
+    sameNameContacts: await db.query(`SELECT c.id AS "contactId",c.name,u.display_name AS "displayName",u.phone_number AS "phoneNumber" FROM contacts c JOIN users u ON u.id=c.user_id
       WHERE c.owner_id=$1 AND lower(c.name)=lower($2) ORDER BY c.id LIMIT 50`, [turn.userId, contact.name]),
   });
   const review = (change: MemoryChange) => {
@@ -79,9 +79,9 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
     save: (service: MessagingService, scoped: Database) => Promise<Awaited<ReturnType<MessagingService['contact']>>>,
     validate?: () => Promise<unknown>) => {
     const fields = { operation, name, identifier: profile.phoneNumber };
-    await contactForm({ ...fields, status: 'saving' });
     try {
       await validate?.();
+      await contactForm({ ...fields, status: 'saving' });
       return await mutate(async (service, scoped) => {
         const contact = await save(service, scoped);
         // Commit the success presentation together with the contact itself.
@@ -91,7 +91,10 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
         return contact;
       });
     } catch (reason) {
-      if (!signal.aborted) await contactForm({ ...fields, status: 'failed' });
+      if (!signal.aborted) await contactForm({ ...fields,
+        status: reason instanceof AppError && reason.code === 'MEMORY_CHANGE_UNSUPPORTED' ? 'clarification' : 'failed',
+        ...(reason instanceof AppError ? { code: reason.code } : {}),
+      });
       throw reason;
     }
   };
