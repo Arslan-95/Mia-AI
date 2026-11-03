@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { pcmLevel } from '../src/audio/level';
+import { pcmLevel } from '../src/shared/audio/level';
 
 test('visual PCM meter handles silence, signed samples and clipped peaks without modifying audio', () => {
   assert.equal(pcmLevel(new Uint8Array()), 0);

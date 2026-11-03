@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MessageFeedback, messageCuePcm } from '../src/audio/messageFeedback';
+import { MessageFeedback, messageCuePcm } from '../src/shared/audio/messageFeedback';
 
 const active = { userId: 'me', foreground: true, audioBusy: false };
 const incoming = (id: string) => ({ id, senderId: 'friend' });

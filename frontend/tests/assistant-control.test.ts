@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { Api } from '../src/api';
-import { AssistantControl } from '../src/assistantControl';
-import type { Session } from '../src/types';
+import { Api } from '../src/shared/api/api';
+import { AssistantControl } from '../src/features/assistant/model/assistantControl';
+import type { Session } from '../src/shared/types';
 
 const identity: Session = { token: 'test-session', expiresAt: '2099-01-01T00:00:00Z',
   user: { id: 'owner', displayName: 'Owner', phoneNumber: '+15550000000', profileComplete: true } };

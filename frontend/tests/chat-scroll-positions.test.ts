@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ChatScrollPositions } from '../src/chatScrollPositions';
+import { ChatScrollPositions } from '../src/features/chats/model/chatScrollPositions';
 
 test('scroll memory is per account/chat and lasts only for this app session', () => {
   const positions = new ChatScrollPositions();

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ApiError } from '../src/api';
-import { CancelledError, UserFacingError, userErrorMessage } from '../src/errors';
+import { ApiError } from '../src/shared/api/api';
+import { CancelledError, UserFacingError, userErrorMessage } from '../src/shared/errors';
 
 test('raw service and native failures cannot expose internal details in the interface', () => {
   const detail = 'POST https://internal.example/v1/debug failed; provider=private; /app/audio/cache.wav';

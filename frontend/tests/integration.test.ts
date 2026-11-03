@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { Api, ApiError } from '../src/api';
-import { pcmWav } from '../src/audio/wav';
-import type { Chat, Contact, Draft, Message, OtpChallenge, Profile, Session, User } from '../src/types';
+import { Api, ApiError } from '../src/shared/api/api';
+import { pcmWav } from '../src/shared/audio/wav';
+import type { Chat, Contact, Draft, Message, OtpChallenge, Profile, Session, User } from '../src/shared/types';
 
 const integrationEnabled = !!process.env.MIA_TEST_API && !!process.env.MIA_TEST_OTP;
 

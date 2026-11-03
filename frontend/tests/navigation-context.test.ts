@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { NavigationContext, pageView, routeView, sameContext, viewRoute } from '../src/navigationContext';
-import { PresentationLease } from '../src/coordination';
-import type { ClientContext } from '../src/types';
+import { NavigationContext, pageView, routeView, sameContext, viewRoute } from '../src/app/navigationContext';
+import { PresentationLease } from '../src/app/coordination';
+import type { ClientContext } from '../src/shared/types';
 
 test('visible-reference identity ignores JSON property order while preserving every navigation boundary', () => {
   const phone: ClientContext = { route: '/chat/anna', revision: 2, previousRoute: '/mia',

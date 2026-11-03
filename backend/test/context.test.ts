@@ -12,7 +12,7 @@ import { clientContextSchema, sameContext } from '../src/agents/context.js';
 test('a visible-card request survives JSONB serialization, duplicate retry and phone action validation', async t => {
   // Load the real phone guard at runtime without joining the two independent
   // TypeScript projects or bundling frontend modules into the backend build.
-  const { sameContext: phoneSameContext } = await import(new URL('../../frontend/src/navigationContext.ts', import.meta.url).href) as { sameContext: typeof sameContext };
+  const { sameContext: phoneSameContext } = await import(new URL('../../frontend/src/app/navigationContext.ts', import.meta.url).href) as { sameContext: typeof sameContext };
   const c = await testApp(); t.after(() => c.close());
   const owner = await phoneSignIn(c.app, '+15550000811', 'context_card_owner');
   const friend = await phoneSignIn(c.app, '+15550000812', 'context_card_friend');

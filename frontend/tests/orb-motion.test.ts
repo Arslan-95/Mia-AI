@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { build } from 'esbuild';
-import type { VoicePhase } from '../src/voiceConversation';
+import type { VoicePhase } from '../src/features/assistant/model/voiceConversation';
 
 // Model the native angle separately from the cached JS value, and control
 // completion/readback explicitly to exercise interrupted native animations.
@@ -49,13 +49,13 @@ const native = `const n = globalThis.__orbNative;
     },
   };`;
 const bundle = build({
-  entryPoints: [fileURLToPath(new URL('../src/screens/AssistantOrb.tsx', import.meta.url).toString())],
+  entryPoints: [fileURLToPath(new URL('../src/features/assistant/ui/AssistantOrb.tsx', import.meta.url).toString())],
   bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react'],
   plugins: [{ name: 'orb-native', setup(builder) {
-    builder.onResolve({ filter: /^(react-native|\.\.\/ui|\.\.\/motion|\.\/AgentRecordingAura|\.\/ConversationStatus)$/ }, args => ({ path: args.path, namespace: 'orb-native' }));
+    builder.onResolve({ filter: /^(react-native|\.\.\/\.\.\/\.\.\/shared\/ui\/ui|\.\.\/\.\.\/\.\.\/shared\/ui\/motion|\.\/AgentRecordingAura|\.\/ConversationStatus)$/ }, args => ({ path: args.path, namespace: 'orb-native' }));
     builder.onLoad({ filter: /.*/, namespace: 'orb-native' }, args => ({ contents: args.path === 'react-native' ? native
-      : args.path === '../motion' ? 'export const useReducedMotion = () => globalThis.__orbNative.reduced;'
-      : args.path === '../ui' ? "export const Icon = 'Icon'; export const agentColors = {};"
+      : args.path === '../../../shared/ui/motion' ? 'export const useReducedMotion = () => globalThis.__orbNative.reduced;'
+      : args.path === '../../../shared/ui/ui' ? "export const Icon = 'Icon'; export const agentColors = {};"
       : 'export const AgentRecordingAura = () => null; export const ConversationStatus = () => null;' }));
   } }],
 });

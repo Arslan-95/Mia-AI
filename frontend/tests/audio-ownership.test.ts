@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AudioOwnership } from '../src/audio/ownership';
+import { AudioOwnership } from '../src/shared/audio/ownership';
 test('a stop revokes pending microphone permission before capture can start', async () => {
   const owner = new AudioOwnership(); let grant!: () => void; const permission = new Promise<void>(resolve => { grant = resolve; });
   const steps: string[] = [];

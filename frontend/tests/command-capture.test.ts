@@ -3,13 +3,13 @@ import { test } from 'node:test';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
-import type { Engine } from '../src/audio/engine';
-import type { PlaybackProgress } from '../src/audio/types';
-import { pcmWav } from '../src/audio/wav';
+import type { Engine } from '../src/shared/audio/engine';
+import type { PlaybackProgress } from '../src/shared/audio/types';
+import { pcmWav } from '../src/shared/audio/wav';
 
 const root = fileURLToPath(new URL('../', import.meta.url).toString()).replaceAll('\\', '/');
 const bundle = build({
-  stdin: { contents: `export { Engine } from './src/audio/engine'; export { MicrophoneCuePlayer } from './src/audio/microphoneCuePlayer'; export { LocalCuePlayer } from './src/audio/localCuePlayer';`, resolveDir: root },
+  stdin: { contents: `export { Engine } from './src/shared/audio/engine'; export { MicrophoneCuePlayer } from './src/shared/audio/microphoneCuePlayer'; export { LocalCuePlayer } from './src/shared/audio/localCuePlayer';`, resolveDir: root },
   bundle: true, write: false, platform: 'node', format: 'cjs',
   plugins: [{ name: 'audio-device', setup(build) {
     build.onResolve({ filter: /^(expo-audio|expo-file-system)$/ }, args => ({ path: args.path, namespace: 'audio-device' }));
@@ -53,7 +53,7 @@ async function device() {
     samples: 0, files: new Set<string>(), fileData: new Map<string, Uint8Array>(), level: (_sample: number) => -80, nativeDuration: undefined as number | undefined,
     playerSources: [] as { uri: string; headers?: Record<string, string> }[], playerOptions: [] as { keepAudioSessionActive?: boolean }[], failPlay: false, removed: 0, playersReleased: 0, status: (_status: any) => {} };
   (globalThis as any).__miaAudio = n;
-  const module = { exports: {} as { Engine: new () => Engine; MicrophoneCuePlayer: typeof import('../src/audio/microphoneCuePlayer').MicrophoneCuePlayer; LocalCuePlayer: typeof import('../src/audio/localCuePlayer').LocalCuePlayer } };
+  const module = { exports: {} as { Engine: new () => Engine; MicrophoneCuePlayer: typeof import('../src/shared/audio/microphoneCuePlayer').MicrophoneCuePlayer; LocalCuePlayer: typeof import('../src/shared/audio/localCuePlayer').LocalCuePlayer } };
   new Function('require', 'module', 'exports', (await bundle).outputFiles[0]!.text)(createRequire(import.meta.url), module, module.exports);
   return { n, engine: new module.exports.Engine(), CuePlayer: module.exports.MicrophoneCuePlayer, LocalCuePlayer: module.exports.LocalCuePlayer };
 }

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { PcmPlayback } from '../src/audio/pcmPlayback';
-import { CancelledError } from '../src/errors';
-import type { PlaybackProgress } from '../src/audio/types';
+import { PcmPlayback } from '../src/shared/audio/pcmPlayback';
+import { CancelledError } from '../src/shared/errors';
+import type { PlaybackProgress } from '../src/shared/audio/types';
 
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 test('native pause freezes progress and resumes only the remaining original samples', async t => {
