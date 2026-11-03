@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { PlaybackEchoGate } from '../src/audio/echo';
+import { PlaybackEchoGate } from '../src/shared/audio/echo';
 
 function voice(seed: number, ms = 2000, gain = .3) {
   const samples = ms * 24;

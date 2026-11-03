@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ApiError } from '../src/api';
-import { CancelledError } from '../src/errors';
-import { DeviceActionError, deviceActionFailure, speechFailure } from '../src/deviceActionFeedback';
+import { ApiError } from '../src/shared/api/api';
+import { CancelledError } from '../src/shared/errors';
+import { DeviceActionError, deviceActionFailure, speechFailure } from '../src/features/assistant/model/deviceActionFeedback';
 
 test('device feedback distinguishes validation, presentation and speech failures without leaking raw errors', () => {
   assert.deepEqual(deviceActionFailure(new DeviceActionError('ACTION_CONTEXT_CHANGED', 'This request view changed.'), 'validation'),

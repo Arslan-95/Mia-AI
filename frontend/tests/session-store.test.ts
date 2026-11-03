@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSessionStore } from '../src/sessionStore';
-import type { Session } from '../src/types';
+import { createSessionStore } from '../src/shared/storage/sessionStore';
+import type { Session } from '../src/shared/types';
 
 function fixture(initial: string | null = null) {
   let value = initial;

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Api, ApiError } from '../src/api';
-import { CancelledError } from '../src/errors';
-import { PhoneSignIn } from '../src/phoneAuth';
-import type { Session } from '../src/types';
+import { Api, ApiError } from '../src/shared/api/api';
+import { CancelledError } from '../src/shared/errors';
+import { PhoneSignIn } from '../src/features/auth/model/phoneAuth';
+import type { Session } from '../src/shared/types';
 
 const phone = '+995555123456';
 const challenge = { challengeId: 'test-challenge', expiresAt: '2099-01-01T00:00:00Z', delivery: 'test' };

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Api, ApiError } from '../src/api';
+import { Api, ApiError } from '../src/shared/api/api';
 import { createRequire } from 'node:module';
 test('API preserves structured errors and invalidates expired authenticated sessions', async () => {
   const original = globalThis.fetch; let expired = false;

@@ -5,23 +5,23 @@ import { fileURLToPath } from 'node:url';
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { build } from 'esbuild';
-import type { Mia } from '../src/useMia';
-import type { Auth } from '../src/screens/Auth';
+import type { Mia } from '../src/app/useMia';
+import type { Auth } from '../src/features/auth/ui/Auth';
 
 const sources: Record<string, string> = {
   'react-native': `export const ScrollView='ScrollView', Text='Text', View='View', TextInput='TextInput',
     FlatList='FlatList', Modal='Modal', Pressable='Pressable', KeyboardAvoidingView='KeyboardAvoidingView';
     export const StyleSheet={create: value => value}; export const Keyboard={dismiss() {}};`,
   'react-native-safe-area-context': `export const SafeAreaView='SafeAreaView';`,
-  '../ui': `export const colors={}, s={}; export const Button='Button', Field='Field', Notice='Notice', Icon='Icon', SearchField='SearchField';
+  '../../../shared/ui/ui': `export const colors={}, s={}; export const Button='Button', Field='Field', Notice='Notice', Icon='Icon', SearchField='SearchField';
     export const useUi=() => ({colors, s});`,
-  './AssistantOrb': `export const MiaCore='MiaCore';`,
+  '../../assistant/ui/AssistantOrb': `export const MiaCore='MiaCore';`,
 };
 const bundle = build({
-  stdin: { contents: `export { Auth } from './src/screens/Auth';`, resolveDir: fileURLToPath(new URL('../', import.meta.url).toString()) },
+  stdin: { contents: `export { Auth } from './src/features/auth/ui/Auth';`, resolveDir: fileURLToPath(new URL('../', import.meta.url).toString()) },
   bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react'],
   plugins: [{ name: 'native-boundary', setup(builder) {
-    builder.onResolve({ filter: /^(react-native|react-native-safe-area-context|\.\.\/ui|\.\/AssistantOrb)$/ }, args => ({ path: args.path, namespace: 'native-boundary' }));
+    builder.onResolve({ filter: /^(react-native|react-native-safe-area-context|\.\.\/\.\.\/\.\.\/shared\/ui\/ui|\.\.\/\.\.\/assistant\/ui\/AssistantOrb)$/ }, args => ({ path: args.path, namespace: 'native-boundary' }));
     builder.onLoad({ filter: /.*/, namespace: 'native-boundary' }, args => ({ contents: sources[args.path]!, loader: 'js' }));
   } }],
 });

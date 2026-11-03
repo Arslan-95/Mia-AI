@@ -5,12 +5,12 @@ import { fileURLToPath } from 'node:url';
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { build } from 'esbuild';
-import type { Mia } from '../src/useMia';
-import type { Recording, PlaybackProgress } from '../src/audio/types';
-import type { Frame } from '../src/realtime';
-import type { Contact, Draft, Message, MessageReference, ServerEvent, Turn } from '../src/types';
+import type { Mia } from '../src/app/useMia';
+import type { Recording, PlaybackProgress } from '../src/shared/audio/types';
+import type { Frame } from '../src/shared/api/realtime';
+import type { Contact, Draft, Message, MessageReference, ServerEvent, Turn } from '../src/shared/types';
 import { pressGesture } from './pressability';
-import { pcmWav } from '../src/audio/wav';
+import { pcmWav } from '../src/shared/audio/wav';
 
 // Run the real hook, API and conversation loop. Only OS audio, secure storage
 // and the socket transport are substituted, so React lifecycle races execute.
@@ -54,17 +54,17 @@ const sources: Record<string, string> = {
   'react-native-safe-area-context': `export const SafeAreaProvider='SafeAreaProvider', SafeAreaView='SafeAreaView'; export const useSafeAreaInsets = () => globalThis.__miaNative.insets;`,
   '@expo/vector-icons/Ionicons': `export default 'Icon';`,
   'expo-crypto': `export { randomUUID } from 'node:crypto';`,
-  './audio/microphoneCuePlayer': `const n = globalThis.__miaNative;
+  '../shared/audio/microphoneCuePlayer': `const n = globalThis.__miaNative;
     export class MicrophoneCuePlayer {
       play(enabled) { n.microphoneCues.push(enabled); }
       stop() {}
     }`,
-  './audio/localCuePlayer': `const n = globalThis.__miaNative;
+  '../shared/audio/localCuePlayer': `const n = globalThis.__miaNative;
     export class LocalCuePlayer {
       play() { n.messageCues++; }
       stop() { n.messageCueStops++; }
     }`,
-  './storage': `const n = globalThis.__miaNative;
+  '../shared/storage/storage': `const n = globalThis.__miaNative;
     export const preferences = { get: async key => {
       if (n.holdStartup && key === 'mia.ai_mode') await new Promise(resolve => { n.releaseStartupMode = resolve; });
       return n.preferences.get(key) ?? null;
@@ -73,7 +73,7 @@ const sources: Record<string, string> = {
       if (n.holdStartup) await new Promise(resolve => { n.releaseStartupSession = resolve; });
       return n.session;
     }, write: async value => { n.session = value; } };`,
-  './audio/mediaStore': `import { pcmWav } from '${root}/src/audio/wav';
+  '../shared/audio/mediaStore': `import { pcmWav } from '${root}/src/shared/audio/wav';
     const n = globalThis.__miaNative;
     export class FileVoiceMediaStore {
       constructor(server, user) { this.prefix = server + '/' + user + '/'; }
@@ -86,7 +86,7 @@ const sources: Record<string, string> = {
       touch(id, usedAt) { if (this.lookup(id)) this.lookup(id).usedAt = usedAt; }
       remove(id) { n.cachedVoices.delete(this.key(id)); }
     }`,
-  './audio/engine': `import { CancelledError, UserFacingError } from '${root}/src/errors';
+  '../shared/audio/engine': `import { CancelledError, UserFacingError } from '${root}/src/shared/errors';
     const n = globalThis.__miaNative;
     export class Engine {
       constructor() { n.engine = this; }
@@ -121,7 +121,7 @@ const sources: Record<string, string> = {
         if (signal?.aborted) throw new CancelledError(); return new Uint8Array(480000);
       }
     }`,
-  '../../modules/mia-voice': `const n = globalThis.__miaNative;
+  '../../../modules/mia-voice': `const n = globalThis.__miaNative;
     const listeners = new Map();
     let heldStop;
     const native = {
@@ -147,7 +147,7 @@ const sources: Record<string, string> = {
       async play() { n.playbacks++; await new Promise((resolve, reject) => { n.nativeReject = reject; n.playback = () => { n.nativeReject = null; resolve(); }; }); },
     };
     export default n.nativeAvailable ? native : null;`,
-  './realtime': `const n = globalThis.__miaNative;
+  '../shared/api/realtime': `const n = globalThis.__miaNative;
     export class Realtime {
       constructor(_, __, event, frame, status) { n.event = event; n.frame = frame; n.connection = status; }
       async connect() { n.connection('Connected'); }
@@ -167,11 +167,11 @@ const sources: Record<string, string> = {
     }`,
 };
 const bundle = build({
-  stdin: { contents: `export { useMia } from './src/useMia'; export { default as App } from './src/App'; export { UiProvider, Button } from './src/ui'; export { Reveal } from './src/motion'; export { ContactFormModal } from './src/screens/ContactFormModal'; export { MessageReferenceCard } from './src/screens/MessageReferenceCard'; export { VoiceNoteBubble } from './src/screens/VoiceNoteBubble';`, resolveDir: root },
+  stdin: { contents: `export { useMia } from './src/app/useMia'; export { default as App } from './src/app/App'; export { UiProvider, Button } from './src/shared/ui/ui'; export { Reveal } from './src/shared/ui/motion'; export { ContactFormModal } from './src/features/contacts/ui/ContactFormModal'; export { MessageReferenceCard } from './src/features/assistant/ui/MessageReferenceCard'; export { VoiceNoteBubble } from './src/features/chats/ui/VoiceNoteBubble';`, resolveDir: root },
   bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react'],
   define: { 'process.env.EXPO_PUBLIC_API_URL': JSON.stringify('http://mia.test') },
   plugins: [{ name: 'native-test', setup(build) {
-    build.onResolve({ filter: /^(react-native|react-native-safe-area-context|@expo\/vector-icons\/Ionicons|expo-crypto|\.\/storage|\.\/audio\/engine|\.\/audio\/mediaStore|\.\/audio\/microphoneCuePlayer|\.\/audio\/localCuePlayer|\.\.\/\.\.\/modules\/mia-voice|\.\/realtime)$/ }, args => ({ path: args.path, namespace: 'native-test' }));
+    build.onResolve({ filter: /^(react-native|react-native-safe-area-context|@expo\/vector-icons\/Ionicons|expo-crypto|\.\.\/shared\/storage\/storage|\.\.\/shared\/audio\/engine|\.\.\/shared\/audio\/mediaStore|\.\.\/shared\/audio\/microphoneCuePlayer|\.\.\/shared\/audio\/localCuePlayer|\.\.\/\.\.\/\.\.\/modules\/mia-voice|\.\.\/shared\/api\/realtime)$/ }, args => ({ path: args.path, namespace: 'native-test' }));
     build.onLoad({ filter: /.*/, namespace: 'native-test' }, args => ({ contents: sources[args.path], resolveDir: root }));
   } }],
 });
@@ -673,7 +673,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     if (path.startsWith('/v1/device-actions/')) return response({});
     throw new Error(`Unexpected API call: ${method} ${path}`);
   };
-  const module = { exports: {} as { useMia: () => Mia; App: React.ComponentType; UiProvider: React.ComponentType<any>; Button: React.ComponentType<any>; Reveal: React.ComponentType<any>; ContactFormModal: typeof import('../src/screens/ContactFormModal').ContactFormModal; VoiceNoteBubble: typeof import('../src/screens/VoiceNoteBubble').VoiceNoteBubble; MessageReferenceCard: React.ComponentType<React.ComponentProps<typeof import('../src/screens/MessageReferenceCard').MessageReferenceCard>> } };
+  const module = { exports: {} as { useMia: () => Mia; App: React.ComponentType; UiProvider: React.ComponentType<any>; Button: React.ComponentType<any>; Reveal: React.ComponentType<any>; ContactFormModal: typeof import('../src/features/contacts/ui/ContactFormModal').ContactFormModal; VoiceNoteBubble: typeof import('../src/features/chats/ui/VoiceNoteBubble').VoiceNoteBubble; MessageReferenceCard: React.ComponentType<React.ComponentProps<typeof import('../src/features/assistant/ui/MessageReferenceCard').MessageReferenceCard>> } };
   new Function('require', 'module', 'exports', code)(createRequire(import.meta.url), module, module.exports);
   let mia!: Mia; let renderer!: ReactTestRenderer;
   function Host() { mia = module.exports.useMia(); return null; }
@@ -949,7 +949,7 @@ test('contact forms reuse the message shutter, retain their exit snapshot and co
   const h = await mount(false);
   let probe: ReactTestRenderer | undefined;
   const form = { turnId: 'one', operation: 'create' as const, name: 'Anna', identifier: '+12025550101', status: 'editing' as const };
-  const sample = (value: import('../src/contactForm').ContactForm | null) => React.createElement(h.components.ContactFormModal, {
+  const sample = (value: import('../src/features/contacts/model/contactForm').ContactForm | null) => React.createElement(h.components.ContactFormModal, {
     form: value, bottomClearance: 180, contentInsets: h.n.insets,
   });
   const card = () => probe!.root.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'contact-form-card')[0]!;
@@ -1004,7 +1004,7 @@ test('contact form dismissal under Reduce Motion uses the same short fade and ca
   try {
     await act(async () => { h.n.reducedMotion = true; for (const handler of h.n.motionHandlers) handler(true); });
     h.n.holdAnimation = true;
-    const sample = (form: import('../src/contactForm').ContactForm | null) => React.createElement(h.components.ContactFormModal, {
+    const sample = (form: import('../src/features/contacts/model/contactForm').ContactForm | null) => React.createElement(h.components.ContactFormModal, {
       form, bottomClearance: 180, contentInsets: h.n.insets,
     });
     await act(async () => { probe = create(sample({ turnId: 'reduced', operation: 'rename', name: 'David', identifier: '+12025550102', status: 'editing' })); });
@@ -1037,7 +1037,7 @@ test('contact form fills across voice turns, stays passive, and fences stale, re
       return turn;
     };
     const first = await accept('contact-first');
-    const reportedForm = () => (h.n.frames.filter(frame => frame.type === 'voice.context').at(-1)?.context as import('../src/types').ClientContext | undefined)?.contactForm;
+    const reportedForm = () => (h.n.frames.filter(frame => frame.type === 'voice.context').at(-1)?.context as import('../src/shared/types').ClientContext | undefined)?.contactForm;
     const update = async (turnId: string, fields: Record<string, unknown>, replayed = false) => {
       await act(async () => { await h.n.event({ id: 'contact-event', type: 'agent.contact_form', createdAt: new Date().toISOString(),
         payload: { turnId, operation: 'create', name: 'Anna', identifier: null, status: 'editing', ...fields } }, 0, replayed); });

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { VoiceMediaCache, type CachedVoice, type VoiceMediaStore } from '../src/audio/mediaCache';
-import { pcmWav } from '../src/audio/wav';
+import { VoiceMediaCache, type CachedVoice, type VoiceMediaStore } from '../src/shared/audio/mediaCache';
+import { pcmWav } from '../src/shared/audio/wav';
 
 const wav = pcmWav(new Uint8Array(4800));
 class Store implements VoiceMediaStore {

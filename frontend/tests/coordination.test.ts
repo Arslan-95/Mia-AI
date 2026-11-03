@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PresentationLease, isLiveAction, mergeMessages } from '../src/coordination';
-import { pcmWav, playbackPcm } from '../src/audio/wav';
-import type { Message } from '../src/types';
+import { PresentationLease, isLiveAction, mergeMessages } from '../src/app/coordination';
+import { pcmWav, playbackPcm } from '../src/shared/audio/wav';
+import type { Message } from '../src/shared/types';
 test('switching conversation revokes pending acceptance and all older device presentations', () => {
   const lease = new PresentationLease(); const first = lease.begin('anna');
   lease.accept('anna', 'turn-anna'); assert.equal(lease.owns('turn-anna'), true);

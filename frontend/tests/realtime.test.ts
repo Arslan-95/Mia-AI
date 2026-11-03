@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Realtime } from '../src/realtime';
-import type { Session } from '../src/types';
+import { Realtime } from '../src/shared/api/realtime';
+import type { Session } from '../src/shared/types';
 class Socket {
   static OPEN = 1; static instances: Socket[] = []; readyState = 1; sent: string[] = [];
   onopen?: () => void; onclose?: () => void; onerror?: () => void; onmessage?: (event: { data: string }) => void;

@@ -84,3 +84,30 @@ Restart Metro after changing `.env.local`. A distributed binary with an embedded
 - **Development server unreachable:** check that Metro is running and the phone can reach its displayed address.
 - **Sign-in rejected:** check the allowed phone/code pairs on your backend.
 - **Microphone unavailable:** check Mia's microphone permission in iPhone settings. Voice interaction runs while the app is in the foreground.
+
+## Source layout
+
+```text
+src/
+  app/                  App entry, navigation, and application coordination
+  features/
+    auth/               Phone sign-in and profile UI
+    chats/              Chats, messages, drafts, and voice messages
+    contacts/           People search, contact details, and contact forms
+    assistant/          Agent interaction, voice conversation, and source cards
+    settings/           Settings screen
+  shared/
+    api/                HTTP and WebSocket clients
+    audio/              Capture, playback, PCM, echo handling, and media cache
+    hooks/              Shared React hooks
+    storage/            Session and preference storage
+    ui/                 Shared components, appearance, and motion
+    errors.ts           Shared error types and presentation
+    phone.ts            Shared phone-number normalization
+    types.ts            Existing cross-feature data contracts
+modules/
+  mia-voice/            Native iOS audio module
+tests/                  Frontend regression tests and native test substitutes
+```
+
+Feature UI lives under `ui/`; feature helpers and state-related types live under `model/` where needed. `src/app/useMia.ts` retains the existing application coordination. This organization groups existing code without changing its runtime logic or splitting that coordinator.

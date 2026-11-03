@@ -3,12 +3,12 @@ import { test } from 'node:test';
 import { build } from 'esbuild';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import type { FileVoiceMediaStore } from '../src/audio/mediaStore';
-import { pcmWav } from '../src/audio/wav';
+import type { FileVoiceMediaStore } from '../src/shared/audio/mediaStore';
+import { pcmWav } from '../src/shared/audio/wav';
 
 const root = fileURLToPath(new URL('../', import.meta.url).toString()).replaceAll('\\', '/');
 const bundle = build({
-  stdin: { contents: `export { FileVoiceMediaStore } from './src/audio/mediaStore';`, resolveDir: root },
+  stdin: { contents: `export { FileVoiceMediaStore } from './src/shared/audio/mediaStore';`, resolveDir: root },
   bundle: true, write: false, platform: 'node', format: 'cjs',
   plugins: [{ name: 'disk', setup(build) {
     build.onResolve({ filter: /^expo-file-system$/ }, () => ({ path: 'disk', namespace: 'disk' }));

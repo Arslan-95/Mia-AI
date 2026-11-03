@@ -3,9 +3,9 @@ import { test } from 'node:test';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
-import type { DuplexAudio } from '../src/audio/duplex';
+import type { DuplexAudio } from '../src/shared/audio/duplex';
 const root = fileURLToPath(new URL('../', import.meta.url).toString());
-const bundle = build({ stdin: { contents: `export { DuplexAudio } from './src/audio/duplex';`, resolveDir: root },
+const bundle = build({ stdin: { contents: `export { DuplexAudio } from './src/shared/audio/duplex';`, resolveDir: root },
   bundle: true, write: false, platform: 'node', format: 'cjs',
   plugins: [{ name: 'native-voice', setup(build) {
     build.onResolve({ filter: /modules\/mia-voice$/ }, () => ({ path: 'voice', namespace: 'native-voice' }));

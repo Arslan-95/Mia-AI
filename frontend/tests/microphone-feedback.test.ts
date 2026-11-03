@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { MicrophoneFeedback, microphoneCuePcm } from '../src/audio/microphoneFeedback';
+import { MicrophoneFeedback, microphoneCuePcm } from '../src/shared/audio/microphoneFeedback';
 
 test('ready microphone plays once after 200 ms, including the first ready state', t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });

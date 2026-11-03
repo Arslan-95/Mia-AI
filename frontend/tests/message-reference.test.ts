@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { sourceExcerpt, referenceKey } from '../src/messageReference';
-import { sameContext } from '../src/navigationContext';
+import { sourceExcerpt, referenceKey } from '../src/features/assistant/model/messageReference';
+import { sameContext } from '../src/app/navigationContext';
 test('long source excerpts remain exact and explicit, keeping emoji graphemes intact', () => {
   const text = 'Hello 👩‍💻 café and family 👨‍👩‍👧‍👦. '.repeat(80);
   for (const budget of [0, 5, 8, 10, 20, 150, 800]) {

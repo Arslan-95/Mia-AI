@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ProgressNarration } from '../src/audio/progressNarration';
+import { ProgressNarration } from '../src/shared/audio/progressNarration';
 
 test('a current update finishes naturally while excess updates are dropped without a backlog', async () => {
   const narration = new ProgressNarration();

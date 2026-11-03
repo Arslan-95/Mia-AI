@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CancelledError } from '../src/errors';
-import { UtteranceDetector } from '../src/audio/utterance';
-import { VoiceConversation, voiceDelay, type VoiceRuntime } from '../src/voiceConversation';
+import { CancelledError } from '../src/shared/errors';
+import { UtteranceDetector } from '../src/shared/audio/utterance';
+import { VoiceConversation, voiceDelay, type VoiceRuntime } from '../src/features/assistant/model/voiceConversation';
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
