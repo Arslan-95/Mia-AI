@@ -3,14 +3,17 @@
     "name": "Mia",
     "slug": "mia-ai",
     "version": "1.0.0",
+    "icon": "./assets/app-icons/mia-voice-ribbon.png",
     "scheme": "mia",
     "orientation": "portrait",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#09090F",
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "app.mia.messenger",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Record a voice note or speak a request to Mia, only when you choose."
+        "NSMicrophoneUsageDescription": "Record a voice note or speak a request to Mia, only when you choose.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "plugins": [
@@ -28,6 +31,12 @@
     ],
     "platforms": [
       "ios"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "4e9da75b-6212-4954-9933-3149997c7f8c"
+      }
+    },
+    "owner": "s_arslan"
   }
 }

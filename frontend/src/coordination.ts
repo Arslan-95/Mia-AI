@@ -18,5 +18,5 @@ export function mergeMessages(previous: Message[], incoming: Message[]) {
 }
 export function isLiveAction(event: ServerEvent, connectedAt: number) {
   const time = Date.parse(event.createdAt);
-  return event.type === 'device.action_requested' && time >= connectedAt && Date.now() - time < 18000;
+  return event.type === 'device.action_requested' && time >= connectedAt && Date.now() - time < Math.min(180000, typeof event.payload.expiresIn === 'number' ? event.payload.expiresIn : 18000);
 }

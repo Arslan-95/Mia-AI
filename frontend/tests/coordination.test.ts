@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PresentationLease, isLiveAction, mergeMessages } from '../src/coordination';
-import { pcmWav } from '../src/audio/wav';
+import { pcmWav, playbackPcm } from '../src/audio/wav';
 import type { Message } from '../src/types';
 test('switching conversation revokes pending acceptance and all older device presentations', () => {
   const lease = new PresentationLease(); const first = lease.begin('anna');
@@ -31,4 +31,12 @@ test('voice notes encode signed mono Int16 little endian WAV within backend cont
   assert.equal(view.getUint32(24, true), 24000); assert.equal(view.getUint32(40, true), 8);
   assert.equal(view.getInt16(44, true), -32768); assert.equal(view.getInt16(48, true), 32767); assert.equal(view.getInt16(50, true), -1234);
   assert.throws(() => pcmWav(new Uint8Array(3)));
+});
+test('original WAV playback preserves samples at 24 kHz, resamples other rates and rejects malformed media', () => {
+  const pcm = new Uint8Array(480), samples = new DataView(pcm.buffer);
+  for (let index = 0; index < pcm.length / 2; index++) samples.setInt16(index * 2, index * 100 - 12000, true);
+  assert.deepEqual(playbackPcm(pcmWav(pcm)), pcm);
+  for (const rate of [8000, 16000, 48000]) assert.equal(playbackPcm(pcmWav(pcm, rate)).length, Math.round(pcm.length / 2 * 24000 / rate) * 2);
+  for (const broken of [new Uint8Array(44), pcmWav(pcm).subarray(0, 50)]) assert.throws(() => playbackPcm(broken));
+  const stereo = pcmWav(pcm); new DataView(stereo.buffer).setUint16(22, 2, true); assert.throws(() => playbackPcm(stereo));
 });

@@ -1,0 +1,22 @@
+# Keep local credentials and unused provider configuration out of native builds.
+node_modules/
+dist/
+coverage/
+.expo/
+.data/
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+.DS_Store
+*service-account*.json
+*serviceAccount*.json
+firebase-adminsdk*.json
+*.p8
+*.p12
+*.mobileprovision
+GoogleService-Info.plist
+.secret.local
+.firebase/
+.firebaserc

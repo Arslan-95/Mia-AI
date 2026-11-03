@@ -5,12 +5,20 @@
   "license": "UNLICENSED",
   "type": "module",
   "scripts": {
-    "dev": "node --env-file-if-exists=.env --import tsx --watch src/main.ts",
+    "dev": "tsx watch --exclude \"**/node_modules/**\" --exclude \"**/.data/**\" --exclude \"**/dist/**\" --env-file-if-exists=.env src/main.ts",
     "start": "node --env-file-if-exists=.env dist/main.js",
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
     "test": "tsx --test --test-concurrency=1 test/*.test.ts",
     "test:postgres": "node --env-file-if-exists=.env --import tsx test/run-postgres.ts",
+    "test:memory:live": "node --env-file-if-exists=.env --import tsx test/live-memory.ts && node --env-file-if-exists=.env --import tsx test/live-memory-policy.ts",
+    "test:voice:live": "node --env-file-if-exists=.env --import tsx test/live-voice-controls.ts && node --env-file-if-exists=.env --import tsx test/live-voice-exit-policy.ts",
+    "test:conversation:live": "node --env-file-if-exists=.env --import tsx test/live-conversation.ts",
+    "test:progress:live": "node --env-file-if-exists=.env --import tsx test/live-progress-narration.ts",
+    "test:approval:live": "node --env-file-if-exists=.env --import tsx test/live-send-approval.ts",
+    "test:presentation:live": "node --env-file-if-exists=.env --import tsx test/live-message-presentation.ts",
+    "test:delivery:live": "node --env-file-if-exists=.env --import tsx test/live-speech-delivery.ts",
+    "speech:samples": "node --env-file-if-exists=.env --import tsx test/live-speech-samples.ts",
     "speech:check": "node --env-file-if-exists=.env --import tsx src/speech/check.ts",
     "db:migrate": "node --env-file-if-exists=.env --import tsx src/db/migrate.ts"
   },
@@ -21,6 +29,7 @@
     "@fastify/rate-limit": "11.2.1",
     "@fastify/websocket": "11.3.4",
     "fastify": "5.12.7",
+    "google-auth-library": "^11.3.2",
     "pg": "8.23.1",
     "ws": "8.21.3",
     "zod": "4.6.7"
@@ -33,5 +42,7 @@
     "tsx": "^4.0.0",
     "typescript": "7.0.2"
   },
-  "engines": { "node": ">=24" }
+  "engines": {
+    "node": ">=24"
+  }
 }

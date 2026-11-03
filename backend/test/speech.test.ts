@@ -6,6 +6,7 @@ import { readConfig } from '../src/config.js';
 import { CloudSpeechProvider, type RecognitionEvent } from '../src/speech/providers.js';
 import { inspectWav } from '../src/media.js';
 import { wav } from './helpers.js';
+import { calmSpeechPrompt } from '../src/speech/delivery.js';
 
 function synthesizedWav(pcm = Buffer.from([1, 2, 3, 4, 5, 6]), rate = 24_000) {
   const audio = Buffer.concat([wav(0), pcm]);
@@ -42,7 +43,7 @@ test('speech adapters use Meta transcription and Google API-key synthesis withou
     assert.equal(init?.method, 'POST');
     assert.equal(new Headers(init?.headers).get('x-goog-api-key'), 'tts-test');
     assert.ok(!String(url).includes('tts-test'));
-    assert.deepEqual(JSON.parse(String(init?.body)), { input: { text: 'Hello.' },
+    assert.deepEqual(JSON.parse(String(init?.body)), { input: { ssml: '<speak><google:style name="calm">Hello.</google:style></speak>' },
       voice: { languageCode: 'en-US', name: 'en-US-Neural2-F' },
       audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: 24_000 } });
     return Response.json({ audioContent: synthesizedWav().toString('base64') });
@@ -51,6 +52,83 @@ test('speech adapters use Meta transcription and Google API-key synthesis withou
   assert.equal(speech.synthesisConfigured, true);
   assert.equal(await speech.transcribe(wav(), new AbortController().signal), 'Seven works for me.');
   assert.deepEqual(await spokenAudio(speech), Buffer.from([1, 2, 3, 4, 5, 6]));
+});
+
+test('calm delivery treats source markup as literal text and budgets escaped SSML chunks', async () => {
+  const source = 'Hi <Ben> & "friends" 👩‍💻. '.repeat(800).trim();
+  const parts: string[] = [];
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { input: { ssml: string; text?: string } };
+    assert.equal(body.input.text, undefined);
+    assert.ok(Buffer.byteLength(body.input.ssml, 'utf8') <= 4800, 'the limit includes entities and wrapper tags');
+    assert.ok(body.input.ssml.startsWith('<speak><google:style name="calm">'));
+    assert.ok(body.input.ssml.endsWith('</google:style></speak>'));
+    assert.equal(body.input.ssml.includes('<Ben>'), false);
+    const encoded = body.input.ssml.replace(/^<speak><google:style name="calm">|<\/google:style><\/speak>$/g, '');
+    assert.equal(encoded.includes('\uFFFD'), false);
+    parts.push(encoded.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
+  });
+  await spokenAudio(provider, source);
+  assert.ok(parts.length > 1);
+  assert.equal(parts.join(' '), source);
+  assert.ok(parts.every(part => part.endsWith('.')), 'whole sentences stay together when they fit');
+});
+
+test('Neural2 can return to its original delivery without interpreting source markup', async () => {
+  const source = '<break time="10s"/> & goodbye.';
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test', GOOGLE_TTS_STYLE: 'none' }), async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { input: unknown };
+    assert.deepEqual(body.input, { text: source });
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
+  });
+  await spokenAudio(provider, source);
+});
+
+test('Gemini TTS uses Kore and separate calm delivery instructions with refreshed authorization and bounded source chunks', async () => {
+  const config = readConfig({ GOOGLE_TTS_MODEL: 'gemini-3.1-flash-tts-preview', GOOGLE_TTS_PROJECT: 'tts-project' });
+  assert.equal(config.googleTtsVoice, 'Kore');
+  assert.equal(config.googleTtsAuth, 'adc');
+  assert.equal(config.googleTtsPrompt, calmSpeechPrompt);
+  const source = 'Hello <Ben> & friends 👋. '.repeat(400).trim();
+  const parts: string[] = [];
+  let authorizations = 0;
+  const speech = new CloudSpeechProvider(config, async (url, init) => {
+    assert.equal(String(url), 'https://texttospeech.googleapis.com/v1/text:synthesize');
+    assert.equal(new Headers(init?.headers).get('authorization'), `Bearer refreshed-${parts.length + 1}`);
+    assert.equal(new Headers(init?.headers).has('x-goog-api-key'), false);
+    const body = JSON.parse(String(init?.body)) as { input: { text: string; prompt: string; ssml?: string }; voice: unknown; audioConfig: unknown };
+    assert.deepEqual(body.voice, { languageCode: 'en-US', name: 'Kore', modelName: 'gemini-3.1-flash-tts-preview' });
+    assert.deepEqual(body.audioConfig, { audioEncoding: 'LINEAR16', sampleRateHertz: 24000 });
+    assert.ok(body.input.prompt.startsWith(calmSpeechPrompt));
+    assert.ok(body.input.prompt.includes('matter-of-fact'));
+    assert.equal(body.input.ssml, undefined);
+    assert.ok(Buffer.byteLength(body.input.text, 'utf8') <= 4000);
+    assert.equal(body.input.text.includes('Read aloud'), false, 'delivery instructions are not mixed into message contents');
+    parts.push(body.input.text);
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
+  }, undefined, async () => new Headers({ authorization: `Bearer refreshed-${++authorizations}` }));
+  assert.equal(speech.synthesisConfigured, true, 'ADC does not require an API key');
+  const output = await spokenAudio(speech, source);
+  assert.ok(parts.length > 1); assert.equal(authorizations, parts.length);
+  assert.equal(parts.join(' '), source); assert.equal(output.length, parts.length * 6);
+});
+
+test('Gemini TTS cancellation during authorization cannot issue a later synthesis request', async () => {
+  const config = readConfig({ GOOGLE_TTS_MODEL: 'gemini-3.1-flash-tts-preview' });
+  const cancelled = new AbortController();
+  let requests = 0;
+  const speech = new CloudSpeechProvider(config, async () => { requests++; return Response.json({}); }, undefined,
+    async () => { cancelled.abort(); return new Headers({ authorization: 'Bearer obsolete' }); });
+  await assert.rejects(() => spokenAudio(speech, 'Hello.', cancelled.signal), { name: 'AbortError' });
+  assert.equal(requests, 0);
+});
+
+test('Gemini configuration rejects mismatched voices and prompts exceeding its UTF-8 limit', () => {
+  assert.throws(() => readConfig({ GOOGLE_TTS_MODEL: 'gemini-3.1-flash-tts-preview', GOOGLE_TTS_VOICE: 'en-US-Neural2-F' }));
+  assert.throws(() => readConfig({ GOOGLE_TTS_MODEL: 'standard', GOOGLE_TTS_VOICE: 'Kore' }));
+  assert.throws(() => readConfig({ GOOGLE_TTS_PROMPT: '👋'.repeat(1001) }));
+  assert.equal(readConfig({ GOOGLE_TTS_PROMPT: '👋'.repeat(1000) }).googleTtsPrompt.length, 2000);
 });
 
 test('Google TTS rejects missing credentials, provider errors and malformed audio', async () => {
@@ -70,7 +148,89 @@ test('Google TTS rejects missing credentials, provider errors and malformed audi
     await assert.rejects(() => spokenAudio(provider), { code: 'INVALID_TTS_AUDIO' });
   }
   const provider = new CloudSpeechProvider(config, async () => Response.json({ error: 'private provider detail' }, { status: 403 }));
-  await assert.rejects(() => spokenAudio(provider), { code: 'TTS_UNAVAILABLE', message: 'Speech synthesis is temporarily unavailable.' });
+  await assert.rejects(() => spokenAudio(provider), { code: 'TTS_AUTH_UNAVAILABLE', providerStatus: 403, attempts: 1,
+    message: 'Speech synthesis is temporarily unavailable.' });
+});
+
+test('Google TTS retries transient HTTP and network failures without duplicating audio', async () => {
+  for (const failure of [400, 503, 429, 'network', 'body'] as const) {
+    let attempts = 0;
+    const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async () => {
+      if (++attempts === 1) {
+        if (failure === 'network') throw new TypeError('private network details');
+        if (failure === 'body') return new Response(new ReadableStream({ start(controller) { controller.error(new TypeError('private connection reset')); } }));
+        return new Response('private provider details', { status: failure });
+      }
+      return Response.json({ audioContent: synthesizedWav().toString('base64') });
+    });
+    assert.deepEqual(await spokenAudio(provider), Buffer.from([1, 2, 3, 4, 5, 6]));
+    assert.equal(attempts, 2);
+  }
+});
+
+test('Google TTS bounds retries, preserves status and does not retry permanent rejections', async () => {
+  for (const status of [429, 503, 400, 403]) {
+    let attempts = 0;
+    const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async () => {
+      attempts++;
+      return new Response('private provider details', { status });
+    });
+    const expected = status === 429 ? 'TTS_RATE_LIMITED' : status === 400 ? 'TTS_REQUEST_REJECTED'
+      : status === 403 ? 'TTS_AUTH_UNAVAILABLE' : 'TTS_UNAVAILABLE';
+    await assert.rejects(() => spokenAudio(provider), { code: expected, providerStatus: status, attempts: status === 403 ? 1 : 3 });
+    assert.equal(attempts, status === 403 ? 1 : 3);
+  }
+});
+
+test('Google TTS recovers on the third 400 attempt and records sanitized diagnostics even when recovery succeeds', async () => {
+  const diagnostics: unknown[] = [];
+  let requests = 0;
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'private-test-key' }), async () => {
+    if (++requests < 3) return Response.json({ error: { code: 400, status: 'INVALID_ARGUMENT',
+      message: 'Generation failed for Hello. with private-test-key; echoed "private source fragment". See https://example.test/private-token',
+      details: [{ reason: 'GENERATION_FAILED', metadata: { secret: 'must never be copied' } }] } }, { status: 400 });
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
+  }, undefined, undefined, diagnostic => { diagnostics.push(diagnostic); });
+  assert.deepEqual(await spokenAudio(provider), Buffer.from([1, 2, 3, 4, 5, 6]));
+  assert.equal(requests, 3); assert.equal(diagnostics.length, 2);
+  assert.deepEqual(diagnostics.map(item => (item as { attempt: number }).attempt), [1, 2]);
+  const first = diagnostics[0] as { providerStatus: number; providerErrorStatus: string; providerReason: string; providerMessage: string };
+  assert.equal(first.providerStatus, 400); assert.equal(first.providerErrorStatus, 'INVALID_ARGUMENT');
+  assert.equal(first.providerReason, 'GENERATION_FAILED'); assert.match(first.providerMessage, /Generation failed/);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /Hello\.|private-test-key|private source fragment|private-token|must never be copied/);
+});
+
+test('Google TTS diagnostics are bounded and diagnostic write failures cannot disable retries', async () => {
+  let requests = 0;
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async () => {
+    if (++requests === 1) return new Response('x'.repeat(10_000), { status: 400 });
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
+  }, undefined, undefined, () => { throw new Error('diagnostic disk unavailable'); });
+  assert.deepEqual(await spokenAudio(provider), Buffer.from([1, 2, 3, 4, 5, 6]));
+  assert.equal(requests, 2);
+});
+
+test('Google TTS keeps the final provider reason after exhausting all three 400 attempts', async () => {
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async () =>
+    Response.json({ error: { status: 'INVALID_ARGUMENT', message: 'Generation could not complete.', details: [{ reason: 'GENERATION_FAILED' }] } }, { status: 400 }));
+  await assert.rejects(() => spokenAudio(provider), error => {
+    const failure = error as { code: string; attempts: number; diagnostic: { providerReason: string } };
+    assert.equal(failure.code, 'TTS_REQUEST_REJECTED'); assert.equal(failure.attempts, 3);
+    assert.equal(failure.diagnostic.providerReason, 'GENERATION_FAILED');
+    return true;
+  });
+});
+
+test('Google TTS cancellation during retry backoff prevents another request', async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const provider = new CloudSpeechProvider(readConfig({ GOOGLE_TTS_API_KEY: 'tts-test' }), async () => {
+    attempts++;
+    setTimeout(() => controller.abort(), 20);
+    return new Response('', { status: 400 });
+  });
+  await assert.rejects(() => spokenAudio(provider, 'Hello.', controller.signal), { name: 'AbortError' });
+  assert.equal(attempts, 1);
 });
 
 test('Google TTS splits long Unicode text within the byte limit and respects the configured voice', async () => {
@@ -144,9 +304,9 @@ test('Meta realtime recognizer authenticates in its handshake, streams PCM and e
       }
       if (binary) {
         assert.equal(Array.isArray(data) ? Buffer.concat(data).byteLength : data.byteLength, 3840);
-        socket.send(JSON.stringify({ type: 'speechStart', turnId: 1 }));
-        socket.send(JSON.stringify({ type: 'transcript', transcript: 'hello', final: false }));
-        socket.send(JSON.stringify({ type: 'speechComplete', turnId: 1, transcript: 'Hello.' }));
+        socket.send(JSON.stringify({ type: 'speechStart', turnId: 1, audioProcessedMs: 40 }));
+        socket.send(JSON.stringify({ type: 'transcript', transcript: 'hello', final: false, audioProcessedMs: 80 }));
+        socket.send(JSON.stringify({ type: 'speechComplete', turnId: 1, transcript: 'Hello.', audioProcessedMs: 80 }));
         return;
       }
       assert.equal((JSON.parse(data.toString()) as { type: string }).type, 'endStream');
@@ -162,6 +322,7 @@ test('Meta realtime recognizer authenticates in its handshake, streams PCM and e
   stream.write(Buffer.alloc(3840));
   await completed;
   assert.deepEqual(events.map((event) => event.type), ['speechStart', 'transcript', 'speechComplete']);
+  assert.deepEqual(events.map((event) => event.audioProcessedMs), [40, 80, 80]);
   assert.equal(failures, 0);
   stream.close();
 });

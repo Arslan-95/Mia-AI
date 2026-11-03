@@ -14,6 +14,29 @@ const responseSchema = z.object({
   output: z.array(z.record(z.string(), z.unknown())).max(100),
 });
 
+function schemaAllows(schema: Record<string, unknown>, type: string): boolean {
+  return schema.type === type || Array.isArray(schema.type) && schema.type.includes(type)
+    || Array.isArray(schema.anyOf) && schema.anyOf.some(branch => branch && typeof branch === 'object' && schemaAllows(branch, type));
+}
+// Meta can serialize nullable tool scalars as strings. Interpret "null" only
+// in declared nullable slots; numeric/boolean conversion additionally requires
+// a non-string scalar schema. Ordinary message/value strings stay untouched.
+function typedArguments(value: unknown, schema: Record<string, unknown>): unknown {
+  if (typeof value === 'string') {
+    if (value === 'null' && schemaAllows(schema, 'null')) return null;
+    if (!schemaAllows(schema, 'string')) {
+      if (schemaAllows(schema, 'integer') && /^-?(0|[1-9]\d*)$/.test(value) && Number.isSafeInteger(Number(value))) return Number(value);
+      if (schemaAllows(schema, 'boolean') && ['true', 'false'].includes(value)) return value === 'true';
+    }
+    return value;
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
+    if (properties) return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, properties[key] ? typedArguments(entry, properties[key]) : entry]));
+  }
+  return value;
+}
+
 export class MetaResponsesProvider implements ModelProvider {
   readonly configured: boolean;
   constructor(private readonly config: Config, private readonly fetcher: typeof fetch = fetch) {
@@ -45,7 +68,13 @@ export class MetaResponsesProvider implements ModelProvider {
       if (item.type === 'function_call') {
         const call = z.object({ call_id: z.string().min(1).max(64), name: z.string().min(1).max(100),
           arguments: z.string().max(32_768) }).parse(item);
-        calls.push({ callId: call.call_id, name: call.name, arguments: call.arguments });
+        let args = call.arguments;
+        const definition = request.tools.find(tool => tool.name === call.name);
+        if (definition) {
+          try { args = JSON.stringify(typedArguments(JSON.parse(args), definition.parameters)); }
+          catch { /* Let the tool's validation report malformed JSON. */ }
+        }
+        calls.push({ callId: call.call_id, name: call.name, arguments: args });
       } else if (item.type === 'message' && item.role === 'assistant') {
         const content = z.array(z.object({ type: z.string(), text: z.string().optional() })).parse(item.content);
         for (const part of content) if (part.type === 'output_text' && part.text) text.push(part.text);

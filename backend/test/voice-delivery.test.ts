@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import test from 'node:test';
+import { phoneSignIn, testApp } from './helpers.js';
+import { MediaService, inspectWav } from '../src/media.js';
+
+test('a complete five-second original voice note survives authenticated storage and concurrent retry without duplication', async t => {
+  const context = await testApp(); t.after(() => context.close());
+  const owner = await phoneSignIn(context.app, '+15550000301', 'voice_sender');
+  const recipient = await phoneSignIn(context.app, '+15550000302', 'voice_receiver');
+  const headers = { authorization: `Bearer ${owner.token}` }, receiveHeaders = { authorization: `Bearer ${recipient.token}` };
+  const chat = (await context.app.inject({ method: 'POST', url: '/v1/chats', headers, payload: { recipientId: recipient.user.id } })).json();
+  const pcm = Buffer.alloc(240000);
+  for (let i = 0; i < pcm.length / 2; i++) pcm.writeInt16LE(Math.round(10000 * Math.sin(i * .06)), i * 2);
+  const wav = Buffer.alloc(44 + pcm.length);
+  wav.write('RIFF'); wav.writeUInt32LE(wav.length - 8, 4); wav.write('WAVEfmt ', 8); wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(24000, 24); wav.writeUInt32LE(48000, 28);
+  wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(pcm.length, 40); pcm.copy(wav, 44);
+  const media = await new MediaService(context.db, context.config.mediaDirectory).upload(owner.user.id, wav);
+  const payload = { clientMessageId: randomUUID(), content: { kind: 'voice', mediaId: media.id } };
+  const responses = await Promise.all([1, 2].map(() => context.app.inject({ method: 'POST', url: `/v1/chats/${chat.id}/messages`, headers, payload })));
+  for (const response of responses) assert.equal(response.statusCode, 201, response.body);
+  assert.equal(responses[0]!.json().id, responses[1]!.json().id);
+  const history = (await context.app.inject({ url: `/v1/chats/${chat.id}/messages`, headers: receiveHeaders })).json();
+  assert.equal(history.length, 1); assert.equal(history[0].durationMs, 5000); assert.equal(history[0].clientMessageId, payload.clientMessageId);
+  const audio = await context.app.inject({ url: `/v1/media/${media.id}`, headers: receiveHeaders });
+  assert.equal(audio.headers['x-audio-duration-ms'], '5000');
+  assert.deepEqual(inspectWav(audio.rawPayload).pcm, pcm);
+  const events = (await context.app.inject({ url: '/v1/events', headers })).json();
+  const delivered = events.filter((event: { type: string }) => event.type === 'message.created');
+  assert.equal(delivered.length, 1); assert.equal(delivered[0].payload.clientMessageId, payload.clientMessageId);
+});

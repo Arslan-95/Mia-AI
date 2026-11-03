@@ -3,13 +3,15 @@ import { z } from 'zod';
 import type { Config } from '../config.js';
 import { AppError, throwIfAborted } from '../errors.js';
 import { inspectWav } from '../media.js';
-import { synthesizeGoogleSpeech } from './google-tts.js';
+import { synthesizeGoogleSpeech, type SpeechDiagnosticReporter } from './google-tts.js';
+import { googleSpeechHeaders, type GoogleSpeechHeaders } from './google-auth.js';
+import type { SpeechOptions } from './delivery.js';
 
-export type RecognitionEvent =
+export type RecognitionEvent = (
   | { type: 'speechStart'; turnId: number }
   | { type: 'speechEnd'; turnId: number }
   | { type: 'speechComplete'; turnId: number; transcript: string }
-  | { type: 'transcript'; transcript: string; final: boolean };
+  | { type: 'transcript'; transcript: string; final: boolean }) & { audioProcessedMs?: number };
 export interface RecognitionStream { write(audio: Buffer): void; end(): void; close(): void }
 export interface SpeechProvider {
   readonly recognitionConfigured: boolean;
@@ -17,23 +19,27 @@ export interface SpeechProvider {
   transcribe(audio: Buffer, signal: AbortSignal): Promise<string>;
   recognize(keywords: string[], onEvent: (event: RecognitionEvent) => void,
     onFailure: () => void, signal: AbortSignal): Promise<RecognitionStream>;
-  synthesize(text: string, signal: AbortSignal): AsyncIterable<Uint8Array>;
+  synthesize(text: string, signal: AbortSignal, options?: SpeechOptions): AsyncIterable<Uint8Array>;
 }
 
+const audioPosition = { audioProcessedMs: z.number().finite().nonnegative().optional() };
 const recognitionEventSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('speechStart'), turnId: z.int().nonnegative() }),
-  z.object({ type: z.literal('speechEnd'), turnId: z.int().nonnegative() }),
-  z.object({ type: z.literal('speechComplete'), turnId: z.int().nonnegative(), transcript: z.string().max(8000) }),
-  z.object({ type: z.literal('transcript'), transcript: z.string().max(8000), final: z.boolean() }),
+  z.object({ type: z.literal('speechStart'), turnId: z.int().nonnegative(), ...audioPosition }),
+  z.object({ type: z.literal('speechEnd'), turnId: z.int().nonnegative(), ...audioPosition }),
+  z.object({ type: z.literal('speechComplete'), turnId: z.int().nonnegative(), transcript: z.string().max(8000), ...audioPosition }),
+  z.object({ type: z.literal('transcript'), transcript: z.string().max(8000), final: z.boolean(), ...audioPosition }),
 ]);
 
 export class CloudSpeechProvider implements SpeechProvider {
   readonly recognitionConfigured: boolean;
   readonly synthesisConfigured: boolean;
+  private readonly ttsHeaders: GoogleSpeechHeaders;
   constructor(private readonly config: Config, private readonly fetcher: typeof fetch = fetch,
-    private readonly socketFactory: (url: string) => WebSocket = (url) => new WebSocket(url, { maxPayload: 256_000, handshakeTimeout: 10_000 })) {
+    private readonly socketFactory: (url: string) => WebSocket = (url) => new WebSocket(url, { maxPayload: 256_000, handshakeTimeout: 10_000 }),
+    ttsHeaders?: GoogleSpeechHeaders, private readonly reportSpeechAttempt?: SpeechDiagnosticReporter) {
     this.recognitionConfigured = Boolean(config.metaApiKey);
-    this.synthesisConfigured = Boolean(config.googleTtsApiKey);
+    this.synthesisConfigured = config.googleTtsAuth === 'adc' || Boolean(config.googleTtsApiKey);
+    this.ttsHeaders = ttsHeaders ?? googleSpeechHeaders(config);
   }
 
   async transcribe(audio: Buffer, signal: AbortSignal): Promise<string> {
@@ -131,8 +137,8 @@ export class CloudSpeechProvider implements SpeechProvider {
     });
   }
 
-  async *synthesize(text: string, signal: AbortSignal): AsyncIterable<Uint8Array> {
+  async *synthesize(text: string, signal: AbortSignal, options: SpeechOptions = {}): AsyncIterable<Uint8Array> {
     if (!this.synthesisConfigured) throw new AppError(503, 'TTS_UNAVAILABLE', 'Speech synthesis is not configured yet.');
-    yield* synthesizeGoogleSpeech(this.config, this.fetcher, text, signal);
+    yield* synthesizeGoogleSpeech(this.config, this.fetcher, text, signal, this.ttsHeaders, options, this.reportSpeechAttempt);
   }
 }

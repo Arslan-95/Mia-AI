@@ -10,3 +10,17 @@ coverage/
 .DS_Store
 
 .expo/
+
+# Server identities and Apple signing material never belong in this repository.
+*service-account*.json
+*serviceAccount*.json
+firebase-adminsdk*.json
+*.p8
+*.p12
+*.mobileprovision
+
+# Keep old Firebase project configuration local; test sign-in no longer uses it.
+frontend/GoogleService-Info.plist
+.secret.local
+.firebase/
+.firebaserc

@@ -11,18 +11,25 @@ import { listEvents } from './events.js';
 import { MessagingService } from './messaging.js';
 import type { RecognitionEvent, RecognitionStream, SpeechProvider } from './speech/providers.js';
 import { eventQuery } from './routes/messaging.js';
+import { assertContextAccess, clientContextSchema, deviceResultSchema, type ClientContext } from './agents/context.js';
+import { PlaybackEcho, WordBargeInGate } from './speech/barge-in.js';
+import { AcousticEvidence } from './speech/acoustic-evidence.js';
+import { SpeechSynthesisError } from './speech/google-tts.js';
 
 const frameSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('auth'), token: z.string().regex(/^[A-Za-z0-9_-]{43}$/), after: eventQuery.shape.after }).strict(),
-  z.object({ type: z.literal('turn'), clientTurnId: z.uuid(), text: z.string().trim().min(1).max(8000) }).strict(),
+  z.object({ type: z.literal('turn'), clientTurnId: z.uuid(), text: z.string().trim().min(1).max(8000), context: clientContextSchema.optional() }).strict(),
   z.object({ type: z.literal('assistant.stop') }).strict(),
-  z.object({ type: z.literal('voice.start'), requestId: z.uuid(), sampleRate: z.literal(24000), format: z.literal('pcm_s16le') }).strict(),
+  z.object({ type: z.literal('voice.start'), requestId: z.uuid(), sampleRate: z.literal(24000), format: z.literal('pcm_s16le'), context: clientContextSchema.optional(), inputProcessing: z.literal('aec-residual-v1').optional() }).strict(),
   z.object({ type: z.literal('voice.end') }).strict(),
   z.object({ type: z.literal('voice.cancel') }).strict(),
-  z.object({ type: z.literal('speech.request'), requestId: z.uuid(), turnId: z.uuid() }).strict(),
+  z.object({ type: z.literal('voice.mute'), requestId: z.uuid(), muted: z.boolean(), revision: z.int().nonnegative() }).strict(),
+  z.object({ type: z.literal('voice.context'), context: clientContextSchema }).strict(),
+  z.object({ type: z.literal('speech.playback'), turnId: z.uuid(), requestId: z.uuid().optional(), playing: z.boolean() }).strict(),
+  z.object({ type: z.literal('speech.request'), requestId: z.uuid(), turnId: z.uuid(), actionId: z.uuid().optional() }).strict(),
   z.object({ type: z.literal('speech.cancel') }).strict(),
   z.object({ type: z.literal('device.result'), actionId: z.uuid(), success: z.boolean(),
-    result: z.object({ message: z.string().max(500).optional(), mediaId: z.uuid().optional() }).strict().default({}) }).strict(),
+    result: deviceResultSchema.default({}) }).strict(),
   z.object({ type: z.literal('ping') }).strict(),
 ]);
 
@@ -35,7 +42,17 @@ export function registerRealtime(app: FastifyInstance, deps: {
     for (const sockets of connections.values()) for (const socket of sockets) socket.close(1001, 'Server restarting');
   });
   app.get('/v1/realtime', { websocket: true, config: { public: true } }, (socket, request) => {
-    if (request.headers.origin && !config.corsOrigins.includes(request.headers.origin)) {
+    // SocketRocket/React Native supplies the API's own HTTP(S) origin even
+    // though this is a native client. Browser origins still require an exact
+    // allowlist match or the same origin as this request; never use '*'.
+    const origin = request.headers.origin;
+    let sameOrigin = false;
+    if (origin && request.headers.host) {
+      try { sameOrigin = origin === new URL(`${request.protocol}://${request.headers.host}`).origin; }
+      catch { /* Malformed origins/hosts do not bypass the allowlist. */ }
+    }
+    if (origin && !sameOrigin && !config.corsOrigins.includes(origin)) {
+      request.log.warn({ code: 'WS_ORIGIN_REJECTED' }, 'Realtime connection rejected');
       socket.close(1008, 'Origin is not allowed'); return;
     }
     let user: User | undefined;
@@ -44,6 +61,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
     let cursor = '0';
     let authenticating = false;
     let stopped = false;
+    let unwatchSession: (() => void) | undefined;
     let reading = false;
     let alive = true;
     let queue = Promise.resolve();
@@ -52,6 +70,8 @@ export function registerRealtime(app: FastifyInstance, deps: {
     let recognitionController: AbortController | undefined;
     let recognitionId: string | undefined;
     let voiceStartedAt = 0;
+    let voiceGeneration: number | undefined;
+    let voiceContext: ClientContext | undefined;
     let receivedBytes = 0;
     let voiceTimer: ReturnType<typeof setTimeout> | undefined;
     let voiceEndTimer: ReturnType<typeof setTimeout> | undefined;
@@ -65,7 +85,20 @@ export function registerRealtime(app: FastifyInstance, deps: {
     const requestedSpeech = new Set<string>();
     const starts: number[] = [];
     const finalTranscripts = new Map<number, string>();
+    const utteranceContexts = new Map<number, ClientContext | undefined>();
     const completedSpeech = new Set<number>();
+    const wordGate = new WordBargeInGate();
+    const stableWords = new Map<number, ReturnType<typeof setTimeout>>();
+    let latestSpeechTurn: number | undefined;
+    const acoustic = new AcousticEvidence();
+    let needsAudioEvidence = false;
+    let inputMuted = false;
+    let inputController = new AbortController();
+    let inputBoundary: number | undefined;
+    let inputRevision = 0;
+    let pendingInputMute: { requestId: string; muted: boolean; revision: number } | undefined;
+    let mutedSilence: ReturnType<typeof setInterval> | undefined;
+    const playback = new PlaybackEcho();
 
     const send = (value: unknown) => {
       if (stopped || socket.readyState !== WebSocket.OPEN) return;
@@ -74,39 +107,96 @@ export function registerRealtime(app: FastifyInstance, deps: {
     };
     const failure = (error: unknown) => send({ type: 'error', error: error instanceof AppError
       ? { code: error.code, message: error.message } : { code: 'INVALID_REQUEST', message: 'The request could not be processed.' } });
+    async function sendSpeechChunk(value: unknown, signal: AbortSignal) {
+      throwIfAborted(signal);
+      // TTS can produce minutes of PCM at once. Wait for each small write to
+      // flush instead of filling the shared socket and triggering its 1013
+      // overflow protection. Cancellation must also release a stalled write.
+      await new Promise<void>((resolve, reject) => {
+        const finish = (error?: unknown) => {
+          clearTimeout(timer); signal.removeEventListener('abort', abort);
+          if (error) reject(error); else resolve();
+        };
+        const abort = () => finish(signal.reason ?? new Error('Speech cancelled'));
+        const timer = setTimeout(() => finish(new AppError(503, 'SPEECH_DELIVERY_TIMEOUT', 'Audio delivery stalled.')), 15_000);
+        signal.addEventListener('abort', abort, { once: true });
+        try { socket.send(JSON.stringify(value), error => finish(error)); }
+        catch (error) { finish(error); }
+      });
+      throwIfAborted(signal);
+    }
     const cancelSpeech = () => { synthesis?.abort(); synthesis = undefined; synthesisGeneration = undefined; };
+    const resetUtterances = () => {
+      acoustic.consumeThrough(acoustic.position);
+      for (const timer of stableWords.values()) clearTimeout(timer);
+      stableWords.clear();
+      for (const id of starts) completedSpeech.add(id);
+      starts.length = 0; finalTranscripts.clear(); utteranceContexts.clear(); wordGate.clear(); latestSpeechTurn = undefined;
+      inputController.abort(); inputController = new AbortController();
+    };
+    const setInputMuted = (muted: boolean, revision: number) => {
+      if (revision < inputRevision || inputMuted === muted && revision === inputRevision) return;
+      inputMuted = muted;
+      inputRevision = revision;
+      // Keep the provider's audio clock, but discard work crossing a mute edge.
+      inputBoundary = acoustic.position;
+      resetUtterances();
+    };
     const cancelVoice = () => {
+      clearInterval(mutedSilence); mutedSilence = undefined;
+      resetUtterances(); inputController.abort();
+      inputMuted = false; inputBoundary = undefined;
+      pendingInputMute = undefined;
       recognitionId = undefined;
+      voiceGeneration = undefined;
+      voiceContext = undefined;
+      acoustic.reset(); needsAudioEvidence = false;
+      for (const timer of stableWords.values()) clearTimeout(timer);
+      stableWords.clear();
       recognitionController?.abort(); recognitionController = undefined;
       recognition?.close(); recognition = undefined;
       if (voiceTimer) clearTimeout(voiceTimer);
       if (voiceEndTimer) clearTimeout(voiceEndTimer);
-      starts.length = 0; finalTranscripts.clear(); completedSpeech.clear();
+      starts.length = 0; finalTranscripts.clear(); utteranceContexts.clear(); completedSpeech.clear(); wordGate.clear(); latestSpeechTurn = undefined;
     };
     const authTimeout = setTimeout(() => { if (!user) socket.close(1008, 'Authentication timed out'); }, 5000);
     const poll = setInterval(() => { void replay(); }, 250);
     const heartbeat = setInterval(() => {
       if (!alive) { socket.terminate(); return; }
       alive = false; socket.ping();
-      if (user) void auth.authenticate(`Bearer ${token}`).catch(() => socket.close(1008, 'Session expired'));
+      if (user) void validateSession();
     }, 20_000);
     socket.on('pong', () => { alive = true; });
     socket.on('error', () => socket.close());
-    socket.on('close', () => {
+    const cleanup = () => {
       stopped = true; lifetime.abort(); cancelVoice(); cancelSpeech();
+      unwatchSession?.(); unwatchSession = undefined;
       clearTimeout(authTimeout); clearInterval(poll); clearInterval(heartbeat);
       if (user) {
         const group = connections.get(user.id); group?.delete(socket);
         if (group?.size === 0) connections.delete(user.id);
       }
-    });
+    };
+    const revoke = () => { cleanup(); socket.close(1008, 'Session expired'); };
+    socket.on('close', cleanup);
+
+    async function validateSession() {
+      if (!user || stopped) return false;
+      try { await auth.authenticate(`Bearer ${token}`); return !stopped; }
+      catch { revoke(); return false; }
+    }
 
     async function replay() {
       if (!user || reading || stopped) return;
       reading = true;
       try {
+        if (!await validateSession()) return;
         const events = await listEvents(db, user.id, cursor);
         for (const event of events) {
+          if (event.type === 'assistant.stopped') {
+            const payload = event.payload as { sessionId: string; generation: number };
+            if (payload.sessionId === sessionId && voiceGeneration !== undefined && payload.generation > voiceGeneration) cancelVoice();
+          }
           if (synthesis && ['assistant.accepted', 'assistant.interrupted', 'assistant.audio_cancelled'].includes(event.type)) {
             const session = await assistant.state.requireSession(user.id, sessionId);
             if (synthesisGeneration !== undefined && session.generation !== synthesisGeneration) cancelSpeech();
@@ -118,74 +208,137 @@ export function registerRealtime(app: FastifyInstance, deps: {
       finally { reading = false; }
     }
 
-    function onRecognition(id: string, event: RecognitionEvent, signal: AbortSignal) {
+    async function interruptRecognizedWord(id: string, speechId: number, signal: AbortSignal) {
+      cancelSpeech();
+      send({ type: 'voice.interruption', requestId: id, inputRevision, speechTurnId: speechId, clientTurnId: speechTurnId(id, speechId) });
+      const interrupted = await assistant.interrupt(user!.id, sessionId, signal, 'speech');
+      voiceGeneration = interrupted.generation;
+    }
+    function scheduleStableWord(id: string, speechId: number, signal: AbortSignal) {
+      clearTimeout(stableWords.get(speechId)); stableWords.delete(speechId);
+      const due = wordGate.due(speechId);
+      if (due === undefined) return;
+      stableWords.set(speechId, setTimeout(() => {
+        stableWords.delete(speechId);
+        speechQueue = speechQueue.then(async () => {
+          if (!user || recognitionId !== id || stopped || signal.aborted || !await validateSession() || signal.aborted) return;
+          if (wordGate.confirmStable(speechId, Date.now())) await interruptRecognizedWord(id, speechId, signal);
+        }).catch((error: unknown) => { if (!signal.aborted) { failure(error); cancelVoice(); } });
+      }, Math.max(0, due - Date.now())));
+    }
+    function onRecognition(id: string, event: RecognitionEvent, recognitionSignal: AbortSignal) {
+      if (recognitionId !== id || stopped || recognitionSignal.aborted) return;
+      if (inputMuted) {
+        if (event.type === 'speechStart' && completedSpeech.size < 256) completedSpeech.add(event.turnId);
+        return;
+      }
+      const eventInputRevision = inputRevision;
+      const signal = AbortSignal.any([recognitionSignal, inputController.signal]);
+      // Database work below can delay this event while newer PCM arrives.
+      // Assess audio at event receipt, not against a later utterance's audio.
+      const receivedAt = Date.now();
+      const audioAt = Math.min(event.audioProcessedMs ?? acoustic.position, acoustic.position);
+      const audible = acoustic.hasSpeech(audioAt);
+      const echo = playback.at(receivedAt);
       speechQueue = speechQueue.then(async () => {
         if (!user || recognitionId !== id || stopped || signal.aborted) return;
+        if (!await validateSession() || signal.aborted) return;
         if (event.type === 'speechStart') {
-          if (starts.includes(event.turnId) || completedSpeech.has(event.turnId)) return;
+          if (completedSpeech.has(event.turnId) || inputBoundary !== undefined && event.audioProcessedMs !== undefined && event.audioProcessedMs <= inputBoundary) {
+            latestSpeechTurn = undefined; return;
+          }
+          if (starts.includes(event.turnId)) return;
           if (starts.length >= 8) throw new AppError(503, 'ASR_OVERFLOW', 'Too many unfinished speech turns. Please reconnect.');
           starts.push(event.turnId);
-          cancelSpeech();
-          await assistant.interrupt(user.id, sessionId, signal);
+          utteranceContexts.set(event.turnId, voiceContext ? { ...voiceContext } : undefined);
+          latestSpeechTurn = event.turnId; wordGate.start(event.turnId, needsAudioEvidence, audible); wordGate.hear(event.turnId, echo);
         }
+        // A final result from before mute must not become a new command after unmute.
+        if (event.type === 'speechComplete' && !starts.includes(event.turnId)) return;
+        const speechId = event.type === 'speechComplete' ? event.turnId : event.type === 'transcript' ? latestSpeechTurn : undefined;
+        if (speechId !== undefined) wordGate.hear(speechId, echo);
+        if (speechId !== undefined && (event.type === 'transcript' || event.type === 'speechComplete')
+          && wordGate.observe(speechId, event.transcript, event.type === 'speechComplete' || event.final, receivedAt, audible)) {
+          // VAD/speechStart alone never stops Mia. Cancel only after the
+          // recognizer confirms a stable word or a final lexical utterance.
+          await interruptRecognizedWord(id, speechId, signal);
+        }
+        if (speechId !== undefined) scheduleStableWord(id, speechId, signal);
         throwIfAborted(signal);
         send({ type: 'voice.event', requestId: id, event });
         if (event.type !== 'speechComplete' || completedSpeech.has(event.turnId)) return;
         if (!starts.includes(event.turnId)) throw new AppError(503, 'INVALID_SPEECH_TURN', 'The speech turn has no start event.');
-        finalTranscripts.set(event.turnId, event.transcript.trim());
+        finalTranscripts.set(event.turnId, wordGate.userText(event.turnId, event.transcript));
+        acoustic.consumeThrough(audioAt);
+        clearTimeout(stableWords.get(event.turnId)); stableWords.delete(event.turnId);
+        wordGate.finish(event.turnId);
         if (starts.some((turnId) => !finalTranscripts.has(turnId))) return;
         const transcripts: string[] = [];
         let lastTurnId = event.turnId;
+        let utteranceContext = utteranceContexts.get(lastTurnId);
         while (starts.length && finalTranscripts.has(starts[0]!)) {
           const turnId = starts.shift()!;
           const text = finalTranscripts.get(turnId)!;
           finalTranscripts.delete(turnId); completedSpeech.add(turnId);
           if (completedSpeech.size > 256) throw new AppError(503, 'VOICE_SESSION_LIMIT', 'Start a new speech session.');
           if (text) transcripts.push(text);
-          lastTurnId = turnId;
+          lastTurnId = turnId; utteranceContext = utteranceContexts.get(turnId); utteranceContexts.delete(turnId);
         }
         if (transcripts.length) {
-          const result = await assistant.submit(user.id, sessionId, speechTurnId(id, lastTurnId), transcripts.join(' '), signal);
-          send({ type: 'turn.accepted', ...result });
+          const result = await assistant.submit(user.id, sessionId, speechTurnId(id, lastTurnId), transcripts.join(' '), signal, utteranceContext);
+          send({ type: 'turn.accepted', ...result, requestId: id, inputRevision: eventInputRevision });
         }
       }).catch((error: unknown) => { if (!signal.aborted) { failure(error); cancelVoice(); } });
     }
 
-    async function synthesize(turnId: string, requestId: string) {
+    async function synthesize(turnId: string, requestId: string, actionId?: string) {
       cancelSpeech();
       const controller = new AbortController();
       synthesis = controller;
       const signal = AbortSignal.any([controller.signal, lifetime.signal]);
       try {
-        const turn = await assistant.state.turn(user!.id, sessionId, turnId);
+        const segment = actionId ? await assistant.state.actionSpeech(user!.id, sessionId, turnId, actionId) : null;
+        const turn = segment?.turn ?? await assistant.state.turn(user!.id, sessionId, turnId);
+        const text = segment?.text ?? turn.assistantText;
         const session = await assistant.state.requireSession(user!.id, sessionId);
         throwIfAborted(signal);
-        if (turn.status !== 'completed' || !turn.assistantText || turn.generation !== session.generation) {
+        if ((!segment && turn.status !== 'completed') || !text || turn.generation !== session.generation) {
           throw new AppError(409, 'STALE_SPEECH', 'This response is not current.');
         }
         synthesisGeneration = turn.generation;
+        playback.remember(turnId, text);
+        playback.remember(requestId, text);
         send({ type: 'speech.started', requestId, turnId, format: 'pcm_s16le', sampleRate: 24000, channels: 1 });
         let sequence = 0;
         let totalBytes = 0;
-        for await (const bytes of speech.synthesize(turn.assistantText, signal)) {
+        for await (const bytes of speech.synthesize(text, signal, { delivery: segment?.delivery ?? turn.speechDelivery, narration: Boolean(segment && segment.kind !== 'speak_progress') })) {
           throwIfAborted(signal);
           const current = await assistant.state.requireSession(user!.id, sessionId);
           throwIfAborted(signal);
           if (current.generation !== turn.generation) { controller.abort(); break; }
-          totalBytes += bytes.byteLength;
-          send({ type: 'speech.chunk', requestId, turnId, sequence: sequence++, audio: Buffer.from(bytes).toString('base64') });
+          if (segment?.kind === 'speak_progress' && (await assistant.state.turn(user!.id, sessionId, turnId)).status !== 'running') { controller.abort(); break; }
+          for (let offset = 0; offset < bytes.byteLength; offset += 12_000) {
+            const part = bytes.subarray(offset, offset + 12_000);
+            await sendSpeechChunk({ type: 'speech.chunk', requestId, turnId, sequence: sequence++, audio: Buffer.from(part).toString('base64') }, signal);
+            totalBytes += part.byteLength;
+          }
         }
         if (!signal.aborted) send({ type: 'speech.completed', requestId, turnId, chunks: sequence, totalBytes });
       } catch (error) {
-        if (!signal.aborted) send({ type: 'speech.failed', requestId, turnId,
-          code: error instanceof AppError ? error.code : 'TTS_UNAVAILABLE' });
+        if (!signal.aborted) {
+          const code = error instanceof AppError ? error.code : 'TTS_UNAVAILABLE';
+          // Keep actionable metadata, never source text, credentials or raw provider bodies.
+          request.log.warn({ code, requestId, turnId, actionId,
+            ...(error instanceof SpeechSynthesisError ? { providerStatus: error.providerStatus, attempts: error.attempts, ...error.diagnostic } : {}) }, 'Speech synthesis failed');
+          send({ type: 'speech.failed', requestId, turnId, code });
+        }
       } finally {
         if (signal.aborted) send({ type: 'speech.cancelled', requestId, turnId });
         if (synthesis === controller) { synthesis = undefined; synthesisGeneration = undefined; }
       }
     }
 
-    async function handle(value: unknown) {
+    async function handle(value: unknown, queuedVoiceEpoch: number) {
       const frame = frameSchema.parse(value);
       if (frame.type === 'auth') {
         if (user || authenticating) throw new AppError(409, 'ALREADY_AUTHENTICATED', 'This connection already has an identity.');
@@ -199,45 +352,85 @@ export function registerRealtime(app: FastifyInstance, deps: {
           if (group.size >= 3) throw new AppError(429, 'CONNECTION_LIMIT', 'Too many active connections.');
           user = authenticated; token = frame.token; sessionId = session.id;
           group.add(socket); connections.set(user.id, group);
+          unwatchSession = auth.watchSession(token, revoke);
+          if (!await validateSession()) return;
           const [latest] = await db.query<{ id: string }>('SELECT COALESCE(max(id),0)::text AS id FROM events WHERE user_id = $1', [user.id]);
           cursor = BigInt(frame.after) > BigInt(latest!.id) ? '0' : frame.after;
           clearTimeout(authTimeout);
-          send({ type: 'ready', sessionId, after: cursor, protocolVersion: 1 });
+          send({ type: 'ready', sessionId, after: cursor, replayThrough: latest!.id, protocolVersion: 1 });
           await replay();
-        } catch (error) { failure(error); socket.close(1008, 'Authentication failed'); }
+        } catch (error) { failure(error); cleanup(); socket.close(1008, 'Authentication failed'); }
         finally { authenticating = false; }
         return;
       }
       if (!user) { socket.close(1008, 'Authenticate first'); return; }
+      if (!await validateSession() || frame.type === 'voice.start' && queuedVoiceEpoch !== voiceEpoch) return;
       if (frame.type === 'ping') { send({ type: 'pong' }); return; }
       if (frame.type === 'turn') {
         cancelSpeech(); cancelVoice();
-        send({ type: 'turn.accepted', ...await assistant.submit(user.id, sessionId, frame.clientTurnId, frame.text) });
+        send({ type: 'turn.accepted', ...await assistant.submit(user.id, sessionId, frame.clientTurnId, frame.text, undefined, frame.context) });
       } else if (frame.type === 'assistant.stop') {
-        cancelSpeech(); await assistant.interrupt(user.id, sessionId);
-        send({ type: 'assistant.stopped' });
+        cancelSpeech();
+        send({ type: 'assistant.stopped', ...await assistant.interrupt(user.id, sessionId) });
       } else if (frame.type === 'voice.cancel') {
         cancelVoice(); send({ type: 'voice.cancelled' });
+      } else if (frame.type === 'voice.mute') {
+        // Applied immediately on receipt, including while ASR startup is pending.
+      } else if (frame.type === 'voice.context') {
+        await assertContextAccess(db, user.id, frame.context);
+        voiceContext = frame.context;
+      } else if (frame.type === 'speech.playback') {
+        // Tracked on receipt in the message handler, outside this queue.
       } else if (frame.type === 'voice.end') {
+        clearInterval(mutedSilence); mutedSilence = undefined;
         recognition?.end();
         voiceEndTimer = setTimeout(() => { cancelVoice(); send({ type: 'voice.closed' }); }, 10_000);
       } else if (frame.type === 'voice.start') {
+        const pendingMute = pendingInputMute;
         cancelVoice();
-        recognitionId = frame.requestId;
+        // Cancellation must own the entire startup, including database lookups.
         const controller = new AbortController(); recognitionController = controller;
-        const contacts = await new MessagingService(db).contacts(user.id);
+        const signal = AbortSignal.any([controller.signal, lifetime.signal]);
         try {
+          await assertContextAccess(db, user.id, frame.context ?? null);
+          throwIfAborted(signal);
+          recognitionId = frame.requestId;
+          const latestMute = pendingInputMute?.requestId === frame.requestId ? pendingInputMute : pendingMute;
+          inputMuted = latestMute?.requestId === frame.requestId ? latestMute.muted : frame.context?.voice?.microphoneMuted === true;
+          inputRevision = latestMute?.requestId === frame.requestId ? latestMute.revision : frame.context?.voice?.revision ?? 0;
+          inputController = new AbortController();
+          needsAudioEvidence = frame.inputProcessing === 'aec-residual-v1';
+          voiceContext = frame.context;
+          const contacts = await new MessagingService(db).contacts(user.id);
+          throwIfAborted(signal);
+          const session = await assistant.state.requireSession(user.id, sessionId);
+          throwIfAborted(signal);
+          voiceGeneration = session.generation;
           const stream = await speech.recognize(contacts.map((contact) => contact.name),
             (event) => onRecognition(frame.requestId, event, controller.signal),
             () => { if (recognitionId === frame.requestId) { send({ type: 'voice.failed', requestId: frame.requestId, code: 'ASR_UNAVAILABLE' }); cancelVoice(); } },
-            AbortSignal.any([controller.signal, lifetime.signal]));
-          if (stopped || recognitionId !== frame.requestId) { stream.close(); return; }
+            signal);
+          if (signal.aborted || stopped || recognitionId !== frame.requestId) { stream.close(); return; }
           recognition = stream; voiceStartedAt = Date.now(); receivedBytes = 0;
-          voiceTimer = setTimeout(() => { cancelVoice(); send({ type: 'voice.closed' }); }, 300_000);
+          // Meta requires real-time PCM even during silence. Never forward muted
+          // microphone bytes; generate silence here without a client audio stream.
+          let silenceAt = Date.now();
+          mutedSilence = setInterval(() => {
+            const now = Date.now();
+            const elapsed = Math.min(now - silenceAt, 160);
+            silenceAt = now;
+            if (!inputMuted || recognition !== stream) return;
+            try {
+              const silence = Buffer.alloc(Math.max(0, Math.round(elapsed * 24)) * 2);
+              acoustic.observe(silence); stream.write(silence);
+            } catch { send({ type: 'voice.failed', requestId: frame.requestId, code: 'ASR_UNAVAILABLE' }); cancelVoice(); }
+          }, 80);
+          voiceTimer = setTimeout(() => { const requestId = recognitionId; cancelVoice(); send({ type: 'voice.closed', requestId }); }, 300_000);
           send({ type: 'voice.ready', requestId: frame.requestId, sampleRate: 24000, format: 'pcm_s16le' });
         } catch (error) {
-          const cancelled = controller.signal.aborted;
-          cancelVoice(); if (!cancelled) throw error;
+          const cancelled = signal.aborted;
+          if (recognitionController === controller) cancelVoice();
+          if (!cancelled) throw error;
         }
       } else if (frame.type === 'speech.cancel') {
         cancelSpeech();
@@ -245,7 +438,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
         if (requestedSpeech.has(frame.requestId)) throw new AppError(409, 'DUPLICATE_SPEECH', 'That speech request was already handled.');
         requestedSpeech.add(frame.requestId);
         if (requestedSpeech.size > 64) requestedSpeech.delete(requestedSpeech.values().next().value!);
-        void synthesize(frame.turnId, frame.requestId);
+        void synthesize(frame.turnId, frame.requestId, frame.actionId);
       } else if (frame.type === 'device.result') {
         send({ type: 'device.result_accepted', action: await assistant.state.acknowledgeAction(user.id, frame.actionId, frame.success, frame.result) });
       }
@@ -262,6 +455,8 @@ export function registerRealtime(app: FastifyInstance, deps: {
             || receivedBytes > 96_000 + (Date.now() - voiceStartedAt) * 60) {
             throw new AppError(400, 'INVALID_AUDIO_FRAME', 'Send realtime mono 24 kHz Int16 PCM in small ordered frames.');
           }
+          if (inputMuted) return;
+          acoustic.observe(bytes);
           recognition.write(bytes);
         } catch (error) { failure(error); cancelVoice(); }
         return;
@@ -271,6 +466,16 @@ export function registerRealtime(app: FastifyInstance, deps: {
       let value: z.infer<typeof frameSchema>;
       try { value = frameSchema.parse(JSON.parse(data.toString())); }
       catch (error) { failure(error); return; }
+      if (value.type === 'voice.mute' && user) {
+        pendingInputMute = value;
+        if (value.requestId === recognitionId) setInputMuted(value.muted, value.revision);
+      }
+      // Mia's echo reaches recognition right after this frame. Record it now,
+      // not behind ASR startup or database work queued for earlier frames.
+      if (value.type === 'speech.playback' && user) {
+        const playbackId = value.requestId ?? value.turnId;
+        if (value.playing) playback.start(playbackId, Date.now()); else playback.stop(playbackId, Date.now());
+      }
       if (['turn', 'voice.cancel', 'assistant.stop'].includes(value.type)) { voiceEpoch++; cancelVoice(); }
       if (['turn', 'speech.cancel', 'assistant.stop'].includes(value.type)) { speechEpoch++; cancelSpeech(); }
       const queuedVoiceEpoch = voiceEpoch;
@@ -278,7 +483,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
       queue = queue.then(async () => {
         if (stopped || value.type === 'voice.start' && queuedVoiceEpoch !== voiceEpoch
           || value.type === 'speech.request' && queuedSpeechEpoch !== speechEpoch) return;
-        await handle(value);
+        await handle(value, queuedVoiceEpoch);
       }).catch(failure);
     });
   });

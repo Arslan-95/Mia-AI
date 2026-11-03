@@ -12,16 +12,16 @@ import type { FastifyInstance } from 'fastify';
 import assert from 'node:assert/strict';
 import type { User } from '../src/auth.js';
 
-export async function phoneSignIn(app: FastifyInstance, phoneNumber: string, username?: string) {
+export async function phoneSignIn(app: FastifyInstance, phoneNumber: string, displayName?: string) {
   const challenge = await app.inject({ method: 'POST', url: '/v1/auth/otp/request', payload: { phoneNumber } });
   assert.equal(challenge.statusCode, 202, challenge.body);
   const result = await app.inject({ method: 'POST', url: '/v1/auth/otp/verify',
     payload: { challengeId: challenge.json().challengeId, code: '123456' } });
   assert.equal(result.statusCode, 200, result.body);
   const session = result.json() as { token: string; expiresAt: string; user: User };
-  if (username) {
+  if (displayName) {
     const profile = await app.inject({ method: 'PATCH', url: '/v1/me', headers: { authorization: `Bearer ${session.token}` },
-      payload: { username, displayName: username } });
+      payload: { displayName } });
     assert.equal(profile.statusCode, 200, profile.body);
     session.user = profile.json() as User;
   }
@@ -63,10 +63,10 @@ export async function testDatabase(): Promise<Database> {
   return db;
 }
 
-export async function testApp(options: Parameters<typeof createApp>[2] = {}) {
+export async function testApp(options: Parameters<typeof createApp>[2] = {}, env: NodeJS.ProcessEnv = {}) {
   const db = await testDatabase();
   const directory = await mkdtemp(join(tmpdir(), 'mia-test-'));
-  const config = readConfig({ NODE_ENV: 'test', DEV_OTP_CODE: '123456', LOG_LEVEL: 'silent', MEDIA_DIRECTORY: directory });
+  const config = readConfig({ NODE_ENV: 'test', DEV_OTP_CODE: '123456', LOG_LEVEL: 'silent', MEDIA_DIRECTORY: directory, ...env });
   const app = await createApp(config, db, options);
   await app.ready();
   return { app, db, config, async close() {

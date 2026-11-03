@@ -2,48 +2,72 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Database, Sql } from './db/database.js';
 import { AppError, conflict, notFound, throwIfAborted } from './errors.js';
 import { publish } from './events.js';
+import { isPhoneSearch, normalizePhoneSearch } from './phone.js';
 
-export type Profile = { id: string; username: string; displayName: string };
+export type Profile = { id: string; phoneNumber: string | null; displayName: string };
 export type Contact = Profile & { contactId: string; name: string };
 export type Message = { id: string; chatId: string; senderId: string; kind: 'text' | 'voice';
-  text: string | null; mediaId: string | null; createdAt: Date };
+  text: string | null; mediaId: string | null; createdAt: Date; clientMessageId?: string; durationMs?: number | null };
 export type Draft = { id: string; recipientId: string; kind: 'text' | 'voice'; text: string | null;
   mediaId: string | null; version: number; state: 'editing' | 'ready' | 'sent' | 'discarded';
-  reviewedVersion: number | null; messageId: string | null; updatedAt: Date };
+  reviewedVersion: number | null; messageId: string | null; updatedAt: Date; recipient: Profile };
 type Content = { kind: 'text' | 'voice'; text?: string; mediaId?: string };
-const messageColumns = 'id, chat_id AS "chatId", sender_id AS "senderId", kind, text, media_id AS "mediaId", created_at AS "createdAt"';
-const draftColumns = 'id, recipient_id AS "recipientId", kind, text, media_id AS "mediaId", version, state, reviewed_version AS "reviewedVersion", message_id AS "messageId", updated_at AS "updatedAt"';
+const messageColumns = 'id, chat_id AS "chatId", sender_id AS "senderId", kind, text, media_id AS "mediaId", created_at AS "createdAt", client_id AS "clientMessageId", (SELECT duration_ms FROM media WHERE media.id=media_id) AS "durationMs"';
+const draftColumns = `id, recipient_id AS "recipientId", kind, text, media_id AS "mediaId", version, state,
+  reviewed_version AS "reviewedVersion", message_id AS "messageId", updated_at AS "updatedAt",
+  (SELECT json_build_object('id',u.id,'phoneNumber',u.phone_number,'displayName',COALESCE(c.name,u.display_name))
+   FROM users u LEFT JOIN contacts c ON c.user_id = u.id AND c.owner_id = message_drafts.owner_id
+   WHERE u.id = message_drafts.recipient_id) AS recipient`;
 
 export class MessagingService {
   constructor(private readonly db: Database) {}
 
   async searchUsers(ownerId: string, query: string) {
-    return this.db.query<Profile>(`SELECT id, username, display_name AS "displayName" FROM users
-      WHERE id <> $1 AND username LIKE $2 ESCAPE '\\' ORDER BY username LIMIT 20`,
-    [ownerId, `${escapeLike(query.toLowerCase())}%`]);
+    const phoneNumber = normalizePhoneSearch(query);
+    return this.db.query<Profile>(`SELECT id, phone_number AS "phoneNumber", display_name AS "displayName" FROM users
+      WHERE id <> $1 AND profile_complete = true AND phone_number = $2 LIMIT 1`, [ownerId, phoneNumber]);
   }
 
   async contacts(ownerId: string, query = '') {
-    return this.db.query<Contact>(`SELECT u.id, u.username, u.display_name AS "displayName", c.id AS "contactId", c.name
+    const phone = isPhoneSearch(query) ? normalizePhoneSearch(query) : null;
+    return this.db.query<Contact>(`SELECT u.id, u.phone_number AS "phoneNumber", u.display_name AS "displayName", c.id AS "contactId", c.name
       FROM contacts c JOIN users u ON u.id = c.user_id WHERE c.owner_id = $1
-      AND (c.name ILIKE $2 ESCAPE '\\' OR u.username ILIKE $2 ESCAPE '\\' OR u.display_name ILIKE $2 ESCAPE '\\')
-      ORDER BY c.name, c.id LIMIT 50`, [ownerId, `%${escapeLike(query)}%`]);
+      AND (($3::text IS NOT NULL AND u.phone_number = $3) OR ($3::text IS NULL
+        AND (c.name ILIKE $2 ESCAPE '\\' OR u.display_name ILIKE $2 ESCAPE '\\')))
+      ORDER BY c.name, c.id LIMIT 50`, [ownerId, `%${escapeLike(query)}%`, phone]);
   }
 
   async addContact(ownerId: string, userId: string, name?: string) {
     if (ownerId === userId) throw conflict('You cannot add yourself as a contact.');
     const user = await this.profile(userId);
     return this.db.transaction(async (sql) => {
-      const [contact] = await sql.query<{ id: string }>(`INSERT INTO contacts(id, owner_id, user_id, name)
-        VALUES ($1,$2,$3,$4) ON CONFLICT(owner_id,user_id) DO UPDATE SET name = EXCLUDED.name RETURNING id`,
-      [randomUUID(), ownerId, userId, name ?? user.displayName]);
+      const [contact] = await sql.query<{ id: string; name: string }>(`INSERT INTO contacts(id, owner_id, user_id, name)
+        VALUES ($1,$2,$3,$4) ON CONFLICT(owner_id,user_id) DO UPDATE SET name = COALESCE($5::text,contacts.name) RETURNING id,name`,
+      [randomUUID(), ownerId, userId, name ?? user.displayName, name ?? null]);
       await publish(sql, ownerId, 'contact.updated', { contactId: contact?.id });
-      return { ...user, contactId: contact!.id, name: name ?? user.displayName };
+      return { ...user, contactId: contact!.id, name: contact!.name };
+    });
+  }
+
+  async contact(ownerId: string, contactId: string) {
+    const [contact] = await this.db.query<Contact>(`SELECT u.id,u.phone_number AS "phoneNumber",u.display_name AS "displayName",c.id AS "contactId",c.name
+      FROM contacts c JOIN users u ON u.id = c.user_id WHERE c.owner_id = $1 AND c.id = $2`, [ownerId, contactId]);
+    if (!contact) throw notFound();
+    return contact;
+  }
+
+  async renameContact(ownerId: string, contactId: string, name: string) {
+    const current = await this.contact(ownerId, contactId);
+    return this.db.transaction(async sql => {
+      const updated = await sql.query('UPDATE contacts SET name=$3 WHERE owner_id=$1 AND id=$2 RETURNING id', [ownerId, contactId, name]);
+      if (!updated.length) throw notFound();
+      await publish(sql, ownerId, 'contact.updated', { contactId });
+      return { ...current, name };
     });
   }
 
   async profile(userId: string): Promise<Profile> {
-    const [user] = await this.db.query<Profile>('SELECT id, username, display_name AS "displayName" FROM users WHERE id = $1', [userId]);
+    const [user] = await this.db.query<Profile>('SELECT id, phone_number AS "phoneNumber", display_name AS "displayName" FROM users WHERE id = $1', [userId]);
     if (!user) throw notFound();
     return user;
   }
@@ -64,9 +88,9 @@ export class MessagingService {
     return this.db.transaction((sql) => this.directChat(ownerId, recipientId, sql));
   }
 
-  async chats(ownerId: string) {
+  async chats(ownerId: string, chatId?: string) {
     return this.db.query<{ id: string; recipient: Profile; lastMessage: Message | null; unreadCount: number }>(`
-      SELECT c.id, json_build_object('id', u.id, 'username', u.username,
+      SELECT c.id, json_build_object('id', u.id, 'phoneNumber', u.phone_number,
         'displayName', COALESCE(ct.name, u.display_name)) AS recipient,
         (SELECT json_build_object('id',m.id,'senderId',m.sender_id,'kind',m.kind,'text',m.text,'mediaId',m.media_id,'createdAt',m.created_at)
           FROM messages m WHERE m.chat_id = c.id ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS "lastMessage",
@@ -76,7 +100,14 @@ export class MessagingService {
       FROM chats c JOIN chat_members own ON own.chat_id = c.id AND own.user_id = $1
       JOIN chat_members other ON other.chat_id = c.id AND other.user_id <> $1
       JOIN users u ON u.id = other.user_id LEFT JOIN contacts ct ON ct.owner_id = $1 AND ct.user_id = u.id
-      ORDER BY COALESCE((SELECT max(created_at) FROM messages WHERE chat_id = c.id), c.created_at) DESC,c.id LIMIT 100`, [ownerId]);
+      WHERE ($2::uuid IS NULL OR c.id = $2)
+      ORDER BY COALESCE((SELECT max(created_at) FROM messages WHERE chat_id = c.id), c.created_at) DESC,c.id LIMIT 100`, [ownerId, chatId ?? null]);
+  }
+
+  async chat(ownerId: string, chatId: string) {
+    const [chat] = await this.chats(ownerId, chatId);
+    if (!chat) throw notFound();
+    return chat;
   }
 
   async assertMember(ownerId: string, chatId: string, sql: Sql = this.db): Promise<void> {
@@ -100,6 +131,25 @@ export class MessagingService {
       WHERE id = $1 AND chat_id IN (SELECT chat_id FROM chat_members WHERE user_id = $2)`, [messageId, ownerId]);
     if (!message) throw notFound();
     return message;
+  }
+
+  async source(ownerId: string, chatId: string, messageId: string) {
+    const message = await this.message(ownerId, messageId);
+    if (message.chatId !== chatId) throw notFound();
+    return message;
+  }
+
+  async searchMessages(ownerId: string, chatId: string, options: { query?: string; afterDate?: string; beforeDate?: string; before?: string; limit?: number }) {
+    await this.assertMember(ownerId, chatId);
+    if (options.before) await this.source(ownerId, chatId, options.before);
+    const limit = Math.min(20, Math.max(1, options.limit ?? 10));
+    const items = await this.db.query<Message>(`SELECT ${messageColumns} FROM messages WHERE chat_id=$1
+      AND ($2::text IS NULL OR text ILIKE $2 ESCAPE '\\')
+      AND ($3::timestamptz IS NULL OR created_at >= $3) AND ($4::timestamptz IS NULL OR created_at < $4)
+      AND ($5::uuid IS NULL OR (created_at,id) < (SELECT created_at,id FROM messages WHERE id=$5))
+      ORDER BY created_at DESC,id DESC LIMIT $6`, [chatId, options.query ? `%${escapeLike(options.query)}%` : null,
+      options.afterDate ?? null, options.beforeDate ?? null, options.before ?? null, limit + 1]);
+    return { messages: items.slice(0, limit), next: items.length > limit ? items[limit - 1]!.id : null };
   }
 
   async markRead(ownerId: string, chatId: string, messageId: string) {

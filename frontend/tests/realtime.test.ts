@@ -32,3 +32,19 @@ test('failed event handling leaves cursor unchanged for replay', async () => {
   try { await realtime.connect(); Socket.instances.at(-1)!.receive({ type: 'event', event: { id: '10' } }); await settle(); assert.deepEqual(persisted, []); }
   finally { realtime.dispose(); globalThis.WebSocket = original; }
 });
+
+test('the server replay boundary identifies history independently of device clock skew', async () => {
+  const original = globalThis.WebSocket; globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  const seen: { id: string; replayed?: boolean }[] = [];
+  const realtime = new Realtime('http://localhost:8082', session,
+    async (event, _connectedAt, replayed) => { seen.push({ id: event.id, replayed }); }, () => {}, () => {},
+    { get: async () => '0', set: async () => {} });
+  try {
+    await realtime.connect(); const socket = Socket.instances.at(-1)!;
+    socket.receive({ type: 'ready', replayThrough: '118' });
+    socket.receive({ type: 'event', event: { id: '118', createdAt: '2099-01-01T00:00:00Z' } });
+    socket.receive({ type: 'event', event: { id: '119', createdAt: '2000-01-01T00:00:00Z' } });
+    await settle();
+    assert.deepEqual(seen, [{ id: '118', replayed: true }, { id: '119', replayed: false }]);
+  } finally { realtime.dispose(); globalThis.WebSocket = original; }
+});
