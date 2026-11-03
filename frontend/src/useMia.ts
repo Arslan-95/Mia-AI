@@ -17,6 +17,8 @@ import { DuplexAudio } from './audio/duplex';
 import { PcmPlayback } from './audio/pcmPlayback';
 import { MicrophoneFeedback } from './audio/microphoneFeedback';
 import { MicrophoneCuePlayer } from './audio/microphoneCuePlayer';
+import { LocalCuePlayer } from './audio/localCuePlayer';
+import { MessageFeedback } from './audio/messageFeedback';
 import { ProgressNarration } from './audio/progressNarration';
 import { VoiceMediaCache } from './audio/mediaCache';
 import { FileVoiceMediaStore } from './audio/mediaStore';
@@ -62,6 +64,7 @@ export function useMia() {
   const [manualAudio, setManualAudioState] = useState(false);
   const manualAudioRef = useRef(false);
   function setManualAudio(value: boolean) {
+    if (value) messageFeedback.stop();
     manualAudioRef.current = value; setManualAudioState(value); syncAgentInput();
     if (duplex.available && aiModeRef.current && !['thinking', 'speaking'].includes(state.current.voicePhase)) setVoicePhase(idleNativePhase());
   }
@@ -69,6 +72,8 @@ export function useMia() {
   const conversation = useRef(new VoiceConversation()).current;
   const duplex = useRef(new DuplexAudio(() => audio.current!.stop())).current;
   const [microphoneFeedback] = useState(() => new MicrophoneFeedback(new MicrophoneCuePlayer(
+    (pcm, id) => duplex.beginFeedback(pcm, id), id => duplex.endFeedback(id))));
+  const [messageFeedback] = useState(() => new MessageFeedback(new LocalCuePlayer(
     (pcm, id) => duplex.beginFeedback(pcm, id), id => duplex.endFeedback(id))));
   const nativeStream = useRef<string | null>(null);
   const nativeRecognitionSessions = useRef(new Set<string>());
@@ -204,6 +209,17 @@ export function useMia() {
   const socket = useRef<Realtime | null>(null); const state = useRef({ session, activeChatId, tab, assistantSession, chats, audioState, voicePhase });
   state.current = { session, activeChatId, tab, assistantSession, chats, audioState, voicePhase };
   const foreground = useRef(inForeground); const authEpoch = useRef(0); const stopRef = useRef<() => Promise<void>>(async () => {});
+  function messageAudioBusy() {
+    return manualAudioRef.current || !!heldRecording.current || !!finishingRecording.current || nativeRecording.current
+      || state.current.audioState !== 'idle' || !!speech.current
+      || ['transcribing', 'thinking', 'speaking'].includes(state.current.voicePhase)
+      // Command capture needs a running graph to protect input from this cue.
+      || aiModeRef.current && (!duplex.available || !duplex.active);
+  }
+  useEffect(() => {
+    if (!inForeground || messageAudioBusy()) messageFeedback.stop();
+  }, [inForeground, audioState, voicePhase, manualAudio, aiMode, messageFeedback]);
+  useEffect(() => { messageFeedback.reset(); return () => messageFeedback.reset(); }, [session?.user.id, messageFeedback]);
   const identityRevision = useRef(0);
   const deviceTasks = useRef(new Map<string, Promise<void>>()).current;
   const nativeConnectTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -413,6 +429,7 @@ export function useMia() {
   useEffect(() => {
     const subscription = AppState.addEventListener('change', next => {
       foreground.current = next === 'active';
+      if (next !== 'active') messageFeedback.stop();
       setInForeground(next === 'active');
       if (next !== 'active') { heldRecording.current?.controller.abort(); heldRecording.current = null; void conversation.stop(); void stopNativeVoice(); lease.revoke(); void stopRef.current(); setManualAudio(false); }
     });
@@ -632,6 +649,7 @@ export function useMia() {
     }
     if (event.type === 'message.created') {
       const message = p as unknown as Message;
+      messageFeedback.receive(message, { userId: state.current.session?.user.id, foreground: foreground.current, audioBusy: messageAudioBusy() });
       if (message.senderId === state.current.session?.user.id) {
         if (message.clientMessageId) {
           deliveryReceipts.get(message.clientMessageId)?.(message);

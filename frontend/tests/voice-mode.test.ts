@@ -59,6 +59,11 @@ const sources: Record<string, string> = {
       play(enabled) { n.microphoneCues.push(enabled); }
       stop() {}
     }`,
+  './audio/localCuePlayer': `const n = globalThis.__miaNative;
+    export class LocalCuePlayer {
+      play() { n.messageCues++; }
+      stop() { n.messageCueStops++; }
+    }`,
   './storage': `const n = globalThis.__miaNative;
     export const preferences = { get: async key => {
       if (n.holdStartup && key === 'mia.ai_mode') await new Promise(resolve => { n.releaseStartupMode = resolve; });
@@ -166,7 +171,7 @@ const bundle = build({
   bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react'],
   define: { 'process.env.EXPO_PUBLIC_API_URL': JSON.stringify('http://mia.test') },
   plugins: [{ name: 'native-test', setup(build) {
-    build.onResolve({ filter: /^(react-native|react-native-safe-area-context|@expo\/vector-icons\/Ionicons|expo-crypto|\.\/storage|\.\/audio\/engine|\.\/audio\/mediaStore|\.\/audio\/microphoneCuePlayer|\.\.\/\.\.\/modules\/mia-voice|\.\/realtime)$/ }, args => ({ path: args.path, namespace: 'native-test' }));
+    build.onResolve({ filter: /^(react-native|react-native-safe-area-context|@expo\/vector-icons\/Ionicons|expo-crypto|\.\/storage|\.\/audio\/engine|\.\/audio\/mediaStore|\.\/audio\/microphoneCuePlayer|\.\/audio\/localCuePlayer|\.\.\/\.\.\/modules\/mia-voice|\.\/realtime)$/ }, args => ({ path: args.path, namespace: 'native-test' }));
     build.onLoad({ filter: /.*/, namespace: 'native-test' }, args => ({ contents: sources[args.path], resolveDir: root }));
   } }],
 });
@@ -558,6 +563,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     noteRecording: false, noteStarts: 0, noteDuration: 1000, complete: true, text: 'Open Anna', holdRecognition: false, recognitionCancelled: false, failSpeech: false, permissionDenied: false, dropAcceptedTurn: false,
     nativeAvailable, nativeStarts: 0, nativeStops: 0, nativePCM: null as ((bytes: Uint8Array) => void) | null,
     microphoneCues: [] as boolean[],
+    messageCues: 0, messageCueStops: 0,
     nativeReject: null as ((reason: unknown) => void) | null, pcmPackets: 0,
     nativeRevision: 0, nativeSession: false, audioConflicts: 0, holdNativeStart: false, holdNativeStop: false,
     releaseNativeStart: null as (() => void) | null, releaseNativeStop: null as (() => void) | null,
@@ -686,6 +692,54 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
   };
 }
 
+test('incoming message cues work in the open chat without sounding for own, replayed or duplicate messages', async () => {
+  const h = await mount(false);
+  const send = (id: string, senderId = 'recipient', replayed = false) => act(async () => {
+    await h.n.event({ id: `event-${id}`, type: 'message.created', createdAt: new Date().toISOString(), payload: {
+      id, chatId: 'anna', senderId, kind: 'text', text: 'Hello', mediaId: null, createdAt: new Date().toISOString(),
+    } }, 0, replayed);
+  });
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    await send('own', 'user');
+    await send('history', 'recipient', true);
+    assert.equal(h.n.messageCues, 0);
+    await send('incoming');
+    assert.equal(h.n.messageCues, 1);
+    assert.ok(h.mia.messages.anna?.some(message => message.id === 'incoming'));
+    assert.ok(h.n.requests.some(request => request.path === '/v1/chats/anna/read' && request.body.messageId === 'incoming'));
+    await send('incoming');
+    assert.equal(h.n.messageCues, 1);
+    const stops = h.n.messageCueStops;
+    await act(async () => { h.n.appState('background'); });
+    assert.ok(h.n.messageCueStops > stops);
+    await send('background');
+    assert.equal(h.n.messageCues, 1);
+  } finally { await h.close(); }
+});
+
+test('incoming cues preserve native listening and stop before voice-note capture', async () => {
+  const h = await mount(true, false, true);
+  const send = (id: string) => act(async () => {
+    await h.n.event({ id: `event-${id}`, type: 'message.created', createdAt: new Date().toISOString(), payload: {
+      id, chatId: 'anna', senderId: 'recipient', kind: 'voice', text: null, mediaId: null, createdAt: new Date().toISOString(),
+    } }, 0);
+  });
+  try {
+    await act(async () => { await h.mia.navigate('chats', 'anna'); });
+    await h.wait(() => !!h.n.nativePCM);
+    const starts = h.n.nativeStarts;
+    await send('voice-incoming');
+    assert.equal(h.n.messageCues, 1);
+    assert.equal(h.n.nativeStarts, starts);
+    const stops = h.n.messageCueStops;
+    await act(async () => { await h.mia.beginHeldRecording(); });
+    assert.ok(h.n.messageCueStops > stops);
+    await send('during-recording');
+    assert.equal(h.n.messageCues, 1);
+  } finally { await h.close(); }
+});
+
 async function mountProgress() {
   const h = await mount(true, false, true);
   await h.wait(() => !!h.n.nativePCM);
@@ -703,6 +757,20 @@ async function mountProgress() {
   });
   return { ...h, get mia() { return h.mia; }, turn, action };
 }
+
+test('incoming message feedback stays silent during Mia speech', async () => {
+  const h = await mountProgress();
+  try {
+    await h.action('progress-message-cue'); await h.wait(() => h.n.playbacks === 1);
+    await act(async () => {
+      await h.n.event({ id: 'incoming-during-speech', type: 'message.created', createdAt: new Date().toISOString(), payload: {
+        id: 'during-speech', chatId: 'anna', senderId: 'recipient', kind: 'text', text: 'Hello', mediaId: null, createdAt: new Date().toISOString(),
+      } }, 0);
+    });
+    assert.equal(h.n.messageCues, 0);
+    assert.ok(h.n.playback, 'the spoken phrase continues');
+  } finally { await h.close(); }
+});
 
 test('progress finishes naturally while final audio is prepared, then hands off without a second synthesis request', async () => {
   const h = await mountProgress();

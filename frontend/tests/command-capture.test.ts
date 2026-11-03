@@ -9,7 +9,7 @@ import { pcmWav } from '../src/audio/wav';
 
 const root = fileURLToPath(new URL('../', import.meta.url).toString()).replaceAll('\\', '/');
 const bundle = build({
-  stdin: { contents: `export { Engine } from './src/audio/engine'; export { MicrophoneCuePlayer } from './src/audio/microphoneCuePlayer';`, resolveDir: root },
+  stdin: { contents: `export { Engine } from './src/audio/engine'; export { MicrophoneCuePlayer } from './src/audio/microphoneCuePlayer'; export { LocalCuePlayer } from './src/audio/localCuePlayer';`, resolveDir: root },
   bundle: true, write: false, platform: 'node', format: 'cjs',
   plugins: [{ name: 'audio-device', setup(build) {
     build.onResolve({ filter: /^(expo-audio|expo-file-system)$/ }, args => ({ path: args.path, namespace: 'audio-device' }));
@@ -53,11 +53,31 @@ async function device() {
     samples: 0, files: new Set<string>(), fileData: new Map<string, Uint8Array>(), level: (_sample: number) => -80, nativeDuration: undefined as number | undefined,
     playerSources: [] as { uri: string; headers?: Record<string, string> }[], playerOptions: [] as { keepAudioSessionActive?: boolean }[], failPlay: false, removed: 0, playersReleased: 0, status: (_status: any) => {} };
   (globalThis as any).__miaAudio = n;
-  const module = { exports: {} as { Engine: new () => Engine; MicrophoneCuePlayer: typeof import('../src/audio/microphoneCuePlayer').MicrophoneCuePlayer } };
+  const module = { exports: {} as { Engine: new () => Engine; MicrophoneCuePlayer: typeof import('../src/audio/microphoneCuePlayer').MicrophoneCuePlayer; LocalCuePlayer: typeof import('../src/audio/localCuePlayer').LocalCuePlayer } };
   new Function('require', 'module', 'exports', (await bundle).outputFiles[0]!.text)(createRequire(import.meta.url), module, module.exports);
-  return { n, engine: new module.exports.Engine(), CuePlayer: module.exports.MicrophoneCuePlayer };
+  return { n, engine: new module.exports.Engine(), CuePlayer: module.exports.MicrophoneCuePlayer, LocalCuePlayer: module.exports.LocalCuePlayer };
 }
 async function flush() { for (let n = 0; n < 20; n++) await Promise.resolve(); }
+
+test('message cues preserve the audio session, register actual playback for echo protection and clean up', async () => {
+  const { n, LocalCuePlayer } = await device();
+  const started: string[] = [], ended: string[] = [];
+  const player = new LocalCuePlayer((_pcm, id) => started.push(id), id => ended.push(id));
+  try {
+    player.play(new Uint8Array(8640), 'message-soft-v1');
+    assert.deepEqual(n.modes, []);
+    assert.equal(n.created, 0);
+    assert.equal(n.playerOptions[0]!.keepAudioSessionActive, true);
+    assert.equal(started.length, 0);
+    n.status({ playing: true });
+    assert.equal(started.length, 1);
+    player.stop();
+    assert.deepEqual(ended, started);
+    assert.equal(n.playersReleased, 1);
+    n.status({ playing: true });
+    assert.equal(started.length, 1, 'late callbacks cannot restart a stopped cue');
+  } finally { player.stop(); delete (globalThis as any).__miaAudio; }
+});
 
 test('microphone feedback uses an independent local player without reconfiguring or deactivating capture', async () => {
   const { n, CuePlayer } = await device();
