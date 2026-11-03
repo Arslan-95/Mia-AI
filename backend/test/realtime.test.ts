@@ -715,6 +715,61 @@ test('mute arriving during route authorization applies to the new recognition se
   assert.equal(opens, 1);
 });
 
+for (const scenario of [
+  { stage: 'route', cancellation: 'voice.cancel', response: 'voice.cancelled' },
+  { stage: 'route', cancellation: 'assistant.stop', response: 'assistant.stopped' },
+  { stage: 'route', cancellation: 'turn', response: 'turn.accepted' },
+  { stage: 'contacts', cancellation: 'voice.cancel', response: 'voice.cancelled' },
+  { stage: 'session', cancellation: 'voice.cancel', response: 'voice.cancelled' },
+]) test(`ASR cancellation during ${scenario.stage} lookup by ${scenario.cancellation} never opens the provider`, { timeout: 12_000 }, async t => {
+  let opens = 0, release = () => {};
+  const speech: SpeechProvider = {
+    recognitionConfigured: true, synthesisConfigured: false, transcribe: async () => '',
+    async *synthesize() { yield new Uint8Array(2); },
+    async recognize() { opens++; return { write() {}, end() {}, close() {} }; },
+  };
+  const c = await testApp({ speech, provider: { configured: true, respond: async () => ({ text: 'Ready.', calls: [], output: [] }) } });
+  t.after(() => { release(); return c.close(); });
+  const owner = await phoneSignIn(c.app, '+15550000934', 'startup_owner');
+  const friend = await phoneSignIn(c.app, '+15550000935', 'startup_friend');
+  const chat = await new MessagingService(c.db).createDirectChat(owner.user.id, friend.user.id);
+  const url = (await c.app.listen({ port: 0, host: '127.0.0.1' })).replace('http:', 'ws:') + '/v1/realtime';
+  const client = await connect(url); t.after(() => client.close());
+  client.send({ type: 'auth', token: owner.token, after: '0' }); await client.next('ready');
+  const query = c.db.query.bind(c.db);
+  let held = false;
+  const blocked = new Promise<void>(resolve => {
+    c.db.query = (async (sql, values) => {
+      const matches = scenario.stage === 'route' ? sql.startsWith('SELECT 1 FROM chat_members')
+        : scenario.stage === 'contacts' ? sql.includes('FROM contacts c JOIN users u')
+        : sql.startsWith('SELECT id,user_id AS "userId",generation,active_chat_id');
+      if (!held && matches) {
+        held = true;
+        await new Promise<void>(resume => { release = resume; resolve(); });
+      }
+      return query(sql, values);
+    }) as typeof c.db.query;
+  });
+  const requestId = randomUUID();
+  client.send({ type: 'voice.start', requestId, sampleRate: 24000, format: 'pcm_s16le', context: { route: `/chat/${chat.id}`, revision: 0 } });
+  await blocked;
+  client.send(scenario.cancellation === 'turn'
+    ? { type: 'turn', clientTurnId: randomUUID(), text: 'Use this new request.' }
+    : { type: scenario.cancellation });
+  // The control pong confirms receipt of the preceding cancellation while
+  // the application queue is still held at the database boundary.
+  const received = once(client.socket, 'pong'); client.socket.ping(); await received;
+  release();
+  await client.next(scenario.response);
+  assert.equal(opens, 0);
+  assert.equal(client.frames.some(frame => frame.type === 'voice.ready' && frame.requestId === requestId), false);
+  assert.equal(client.frames.some(frame => frame.type === 'error'), false);
+  const nextRequest = randomUUID();
+  client.send({ type: 'voice.start', requestId: nextRequest, sampleRate: 24000, format: 'pcm_s16le' });
+  await client.next('voice.ready', frame => frame.requestId === nextRequest);
+  assert.equal(opens, 1, 'a later recognition session remains usable');
+});
+
 test('websocket rejects unauthenticated commands and disallowed browser origins', { timeout: 10_000 }, async (t) => {
   const context = await testApp(); t.after(() => context.close());
   const url = await context.app.listen({ port: 0, host: '127.0.0.1' });

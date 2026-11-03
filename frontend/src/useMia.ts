@@ -15,6 +15,8 @@ import { contactFormSnapshot, type ContactForm } from './contactForm';
 import { Engine } from './audio/engine';
 import { DuplexAudio } from './audio/duplex';
 import { PcmPlayback } from './audio/pcmPlayback';
+import { MicrophoneFeedback } from './audio/microphoneFeedback';
+import { MicrophoneCuePlayer } from './audio/microphoneCuePlayer';
 import { ProgressNarration } from './audio/progressNarration';
 import { VoiceMediaCache } from './audio/mediaCache';
 import { FileVoiceMediaStore } from './audio/mediaStore';
@@ -35,6 +37,7 @@ export function useMia() {
   const [booting, setBooting] = useState(true); const [session, setSession] = useState<Session | null>(null);
   const [aiMode, setAiMode] = useState(false);
   const [microphoneMuted, setMicrophoneMuted] = useState(false);
+  const [microphoneReady, setMicrophoneReady] = useState(false);
   const microphoneIntent = useRef(false);
   const recognitionInputRevision = useRef(0);
   const agentInputMuted = useRef(false);
@@ -65,6 +68,8 @@ export function useMia() {
   const [voiceRevision, setVoiceRevision] = useState(0);
   const conversation = useRef(new VoiceConversation()).current;
   const duplex = useRef(new DuplexAudio(() => audio.current!.stop())).current;
+  const [microphoneFeedback] = useState(() => new MicrophoneFeedback(new MicrophoneCuePlayer(
+    (pcm, id) => duplex.beginFeedback(pcm, id), id => duplex.endFeedback(id))));
   const nativeStream = useRef<string | null>(null);
   const nativeRecognitionSessions = useRef(new Set<string>());
   const nativeCandidate = useRef<string | null>(null);
@@ -332,6 +337,7 @@ export function useMia() {
   const speech = useRef<SpeechPlayback | null>(null);
   const preparedSpeech = useRef<PreparedSpeech | null>(null);
   async function stopNativeVoice() {
+    setMicrophoneReady(false);
     nativeRecording.current = false; duplex.cancelRecording(); nativeMedia.current?.abort();
     nativeRecognitionSessions.current.clear();
     respondingTurn.current = null;
@@ -670,6 +676,7 @@ export function useMia() {
       clearTimeout(nativeConnectTimeout.current); nativeConnectTimeout.current = undefined;
       nativeCapture.current = id;
       if (duplex.active) {
+        setMicrophoneReady(true);
         for (const part of nativePCM.current.parts) if (!socket.current?.sendAudio(part)) { handleVoiceFailure(new ApiError(0, 'OFFLINE', '')); break; }
         nativePCM.current = { parts: [], bytes: 0 };
         if (nativeStream.current === id && state.current.voicePhase === 'waiting') setVoicePhase(idleNativePhase());
@@ -690,6 +697,7 @@ export function useMia() {
       }, () => { if (nativeStream.current) setVoiceRevision(value => value + 1); }, reason => {
         if (nativeStream.current) handleVoiceFailure(reason);
       }).then(() => {
+        if (nativeStream.current === id && nativeCapture.current === id) setMicrophoneReady(true);
         if (nativeStream.current === id && !['thinking', 'speaking'].includes(state.current.voicePhase)) setVoicePhase(idleNativePhase());
       }).catch(reason => {
         if (nativeStream.current && !(reason instanceof CancelledError)) handleVoiceFailure(reason);
@@ -1346,7 +1354,7 @@ export function useMia() {
     phase: setVoicePhase,
     capture: signal => audio.current!.captureCommand(signal, level => {
       if (Date.now() - lastMeter.current >= 80) { lastMeter.current = Date.now(); setVoiceLevel(level); }
-    }),
+    }, () => { if (!signal.aborted) setMicrophoneReady(true); }),
     async transcribe(value, signal) {
       const media = await uploadRecording(value, signal);
       checkVoice(signal);
@@ -1401,7 +1409,7 @@ export function useMia() {
   }, [aiMode, microphoneMuted, session?.token, session?.user.profileComplete, inForeground, manualAudio, voiceFault, voiceRecoverable, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, assistantSession?.id]);
   const suspendLegacyAudio = manualAudio && !duplex.available && !mediaPaused;
   useEffect(() => {
-    if (!voiceSessionEnabled || !session?.user.profileComplete) { setVoicePhase('off'); return; }
+    if (!voiceSessionEnabled || !session?.user.profileComplete) { setMicrophoneReady(false); setVoicePhase('off'); return; }
     if (!inForeground || suspendLegacyAudio) { setVoicePhase('paused'); return; }
     if (voiceFault) { setVoicePhase(voiceRecoverable ? 'waiting' : 'error'); return; }
     if (!assistantSession || !realtimeReady || capabilities?.agent !== true || !capabilities.speechRecognition || !capabilities.speechSynthesis) {
@@ -1432,6 +1440,17 @@ export function useMia() {
     });
     return () => { cancelled = true; void conversation.stop(); };
   }, [voiceSessionEnabled, session?.token, session?.user.profileComplete, assistantSession?.id, capabilities?.agent, capabilities?.speechRecognition, capabilities?.speechSynthesis, inForeground, suspendLegacyAudio, voiceRevision, voiceFault, voiceRecoverable, realtimeReady]);
+  useEffect(() => {
+    if (booting || !session?.user.profileComplete || !inForeground || !aiMode || voiceFault) {
+      microphoneFeedback.reset(); return;
+    }
+    // Local voice-note capture must never record a pending feedback sound.
+    if (manualAudio) { microphoneFeedback.pause(); return; }
+    if (microphoneMuted) microphoneFeedback.update(false);
+    else if (microphoneReady && realtimeReady) microphoneFeedback.update(true);
+    else microphoneFeedback.reset();
+  }, [booting, session?.user.id, session?.user.profileComplete, inForeground, aiMode, microphoneMuted, microphoneReady, realtimeReady, voiceFault, manualAudio, microphoneFeedback]);
+  useEffect(() => () => microphoneFeedback.reset(), [microphoneFeedback]);
   return { contactForm, messageReference, originalPlayback, referencePresented, referenceDismissalRevision: referencePresentation.current?.revision, booting, session, aiMode, microphoneMuted, toggleMicrophone, stopAssistantReply, voiceLevel, voicePhase, voiceFault, error, errorRevision, setError, scrollRequests, busy, tab, capabilities, chats, contacts, drafts, messages, chatScrollPositions, hasOlder, activeChatId, composers, pending, turns, assistantSession, audioState, recording, recordingRecipient: recordDestination.current, voiceNoteStage, api, fail, requestOtp, verifyOtp, cancelOtp, completeProfile, logout, saveAiMode, resumeAssistant, retryAssistant, refresh, loadMessages, navigate, navigateBack, startChat, saveContactName, sendText, sendPending, draftAction, interrupt, playMedia, toggleMediaPlayback, startRecording, beginHeldRecording, endHeldRecording, finishRecording, useRecording, discardRecording, preview, stopAudio,
     backView: routeView(navigation.backRoute()), navigationDirection: navigationDirection.current, navigationRevision: navigation.snapshot().revision,
     prefetchVoiceMessages,

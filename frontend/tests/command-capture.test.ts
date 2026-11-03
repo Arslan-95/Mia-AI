@@ -9,7 +9,7 @@ import { pcmWav } from '../src/audio/wav';
 
 const root = fileURLToPath(new URL('../', import.meta.url).toString()).replaceAll('\\', '/');
 const bundle = build({
-  stdin: { contents: `export { Engine } from './src/audio/engine';`, resolveDir: root },
+  stdin: { contents: `export { Engine } from './src/audio/engine'; export { MicrophoneCuePlayer } from './src/audio/microphoneCuePlayer';`, resolveDir: root },
   bundle: true, write: false, platform: 'node', format: 'cjs',
   plugins: [{ name: 'audio-device', setup(build) {
     build.onResolve({ filter: /^(expo-audio|expo-file-system)$/ }, args => ({ path: args.path, namespace: 'audio-device' }));
@@ -28,8 +28,9 @@ const bundle = build({
           getStatus() { n.samples++; return { isRecording: this.active, metering: n.level(n.samples), durationMillis: n.nativeDuration }; }
         }
       };
-      export function createAudioPlayer(source) {
+      export function createAudioPlayer(source, options) {
         n.playerSources.push(source);
+        n.playerOptions.push(options);
         return { addListener(_, callback) { n.status = callback; return { remove() { n.removed++; } }; },
           play() { if (n.failPlay) throw new Error('Native player failure'); }, pause() {}, release() { n.playersReleased++; } };
       }
@@ -50,13 +51,33 @@ const bundle = build({
 async function device() {
   const n = { permission: Promise.resolve({ granted: true }), options: {} as any, modes: [] as unknown[], created: 0, released: 0,
     samples: 0, files: new Set<string>(), fileData: new Map<string, Uint8Array>(), level: (_sample: number) => -80, nativeDuration: undefined as number | undefined,
-    playerSources: [] as { uri: string; headers?: Record<string, string> }[], failPlay: false, removed: 0, playersReleased: 0, status: (_status: any) => {} };
+    playerSources: [] as { uri: string; headers?: Record<string, string> }[], playerOptions: [] as { keepAudioSessionActive?: boolean }[], failPlay: false, removed: 0, playersReleased: 0, status: (_status: any) => {} };
   (globalThis as any).__miaAudio = n;
-  const module = { exports: {} as { Engine: new () => Engine } };
+  const module = { exports: {} as { Engine: new () => Engine; MicrophoneCuePlayer: typeof import('../src/audio/microphoneCuePlayer').MicrophoneCuePlayer } };
   new Function('require', 'module', 'exports', (await bundle).outputFiles[0]!.text)(createRequire(import.meta.url), module, module.exports);
-  return { n, engine: new module.exports.Engine() };
+  return { n, engine: new module.exports.Engine(), CuePlayer: module.exports.MicrophoneCuePlayer };
 }
 async function flush() { for (let n = 0; n < 20; n++) await Promise.resolve(); }
+
+test('microphone feedback uses an independent local player without reconfiguring or deactivating capture', async () => {
+  const { n, CuePlayer } = await device();
+  const started: string[] = [], ended: string[] = [];
+  const player = new CuePlayer((_pcm, id) => started.push(id), id => ended.push(id));
+  player.play(true);
+  assert.equal(n.created, 0, 'feedback never opens a recorder');
+  assert.deepEqual(n.modes, [], 'feedback never changes the shared audio mode');
+  assert.equal(n.playerOptions[0]!.keepAudioSessionActive, true);
+  assert.match(n.playerSources[0]!.uri, /mia-microphone-on-v2\.wav$/);
+  assert.equal(n.fileData.get(n.playerSources[0]!.uri)!.length, 44 + 162 * 48);
+  n.status({ playing: true }); n.status({ playing: true });
+  assert.equal(started.length, 1, 'echo reference begins at actual playback, once');
+  n.status({ didJustFinish: true });
+  assert.deepEqual(ended, started); assert.equal(n.playersReleased, 1);
+  player.play(false); n.status({ playing: true }); player.stop();
+  assert.equal(n.playersReleased, 2); assert.deepEqual(ended, started);
+  assert.deepEqual(n.modes, []);
+  delete (globalThis as any).__miaAudio;
+});
 
 test('authenticated voice messages download completely before local playback and clean up after completion', async () => {
   const { n, engine } = await device(); const realFetch = globalThis.fetch;

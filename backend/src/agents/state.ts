@@ -216,6 +216,11 @@ export class AssistantState {
       if (action.state !== 'pending') return action;
       if (action.expired || session.generation !== action.generation) throw conflict('This device action has expired or was cancelled.');
       await assertContextAccess(sql, userId, feedback.context ?? null);
+      if (success && (action.kind === 'open_chat' || action.kind === 'open_page')) {
+        const requested = action.payload as { chatId?: string; route?: string };
+        const route = action.kind === 'open_chat' ? requested.chatId && `/chat/${requested.chatId}` : requested.route;
+        if (!route || feedback.context?.route !== route) throw conflict('Confirm the exact requested screen before reporting navigation success.');
+      }
       if (success && action.kind === 'show_message') {
         const source = action.payload as { chatId: string; messageId: string };
         if (feedback.reference?.chatId !== source.chatId || feedback.reference.messageId !== source.messageId || feedback.context?.route !== `/chat/${source.chatId}`)

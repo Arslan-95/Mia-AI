@@ -238,10 +238,10 @@ test('a plain new request interrupts specialists, keeps drafts and fences late m
   assert.equal(draft.text, 'A saved draft');
   assert.equal(draft.version, 1);
   assert.equal((await context.db.query('SELECT id FROM messages')).length, 0);
-  const [action] = await context.db.query<{ id: string; state: string }>('SELECT id,state FROM device_actions');
+  const [action] = await context.db.query<{ id: string; state: string; payload: { chatId: string } }>('SELECT id,state,payload FROM device_actions');
   assert.equal(action?.state, 'pending');
   assert.ok(action);
-  const ack = await context.runtime.state.acknowledgeAction(context.ids.alice, action.id, true, {});
+  const ack = await context.runtime.state.acknowledgeAction(context.ids.alice, action.id, true, { context: { route: `/chat/${action.payload.chatId}`, revision: 1 } });
   assert.equal(ack.state, 'completed');
 });
 

@@ -175,6 +175,37 @@ test('navigation requests never become current UI state and acknowledgements val
   assert.equal((await state.history(alice.user.id, session.id))[0]?.context?.route, `/draft/${draft.id}`);
 });
 
+test('navigation success requires the exact requested route and rejected feedback leaves the action pending', async t => {
+  const c = await testApp(); t.after(() => c.close());
+  const owner = await phoneSignIn(c.app, '+15550000815', 'navigation_owner');
+  const friend = await phoneSignIn(c.app, '+15550000816', 'navigation_friend');
+  const other = await phoneSignIn(c.app, '+15550000817', 'navigation_other');
+  const messaging = new MessagingService(c.db), state = new AssistantState(c.db);
+  const chat = await messaging.createDirectChat(owner.user.id, friend.user.id);
+  const otherChat = await messaging.createDirectChat(owner.user.id, other.user.id);
+  const session = await state.session(owner.user.id), signal = new AbortController().signal;
+  await state.accept(owner.user.id, session.id, randomUUID(), 'Open the requested screen.');
+  const turn = await state.claim(randomUUID()); assert.ok(turn);
+  for (const navigation of [
+    { kind: 'open_chat', payload: { chatId: chat.id }, route: `/chat/${chat.id}`, wrong: ['/settings', `/chat/${otherChat.id}`] },
+    { kind: 'open_page', payload: { route: '/contacts' }, route: '/contacts', wrong: ['/settings', '/chats'] },
+  ]) {
+    const action = await state.action(turn, signal, navigation.kind, navigation.payload);
+    for (const result of [{}, ...navigation.wrong.map(route => ({ context: { route, revision: 1 } }))]) {
+      await assert.rejects(state.acknowledgeAction(owner.user.id, action.id, true, result), { code: 'CONFLICT' });
+      const [stored] = await c.db.query('SELECT state,result FROM device_actions WHERE id=$1', [action.id]);
+      assert.deepEqual(stored, { state: 'pending', result: null });
+      assert.equal((await c.db.query("SELECT id FROM events WHERE type='device.action_completed' AND payload->>'actionId'=$1", [action.id])).length, 0);
+    }
+    const feedback = { context: { route: navigation.route, revision: 2 } };
+    assert.equal((await state.acknowledgeAction(owner.user.id, action.id, true, feedback)).state, 'completed');
+    assert.equal((await state.acknowledgeAction(owner.user.id, action.id, true, feedback)).state, 'completed');
+    assert.equal((await c.db.query("SELECT id FROM events WHERE type='device.action_completed' AND payload->>'actionId'=$1", [action.id])).length, 1);
+    const failed = await state.action(turn, signal, navigation.kind, navigation.payload);
+    assert.equal((await state.acknowledgeAction(owner.user.id, failed.id, false, { context: { route: '/settings', revision: 3 } })).state, 'failed');
+  }
+});
+
 test('page navigation tools choose allowlisted routes and retain action ownership and request context', async (t) => {
   const context = await testApp(); t.after(() => context.close());
   const owner = await phoneSignIn(context.app, '+15550000809', 'page_owner');

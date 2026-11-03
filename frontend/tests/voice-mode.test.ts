@@ -54,6 +54,11 @@ const sources: Record<string, string> = {
   'react-native-safe-area-context': `export const SafeAreaProvider='SafeAreaProvider', SafeAreaView='SafeAreaView'; export const useSafeAreaInsets = () => globalThis.__miaNative.insets;`,
   '@expo/vector-icons/Ionicons': `export default 'Icon';`,
   'expo-crypto': `export { randomUUID } from 'node:crypto';`,
+  './audio/microphoneCuePlayer': `const n = globalThis.__miaNative;
+    export class MicrophoneCuePlayer {
+      play(enabled) { n.microphoneCues.push(enabled); }
+      stop() {}
+    }`,
   './storage': `const n = globalThis.__miaNative;
     export const preferences = { get: async key => {
       if (n.holdStartup && key === 'mia.ai_mode') await new Promise(resolve => { n.releaseStartupMode = resolve; });
@@ -80,9 +85,10 @@ const sources: Record<string, string> = {
     const n = globalThis.__miaNative;
     export class Engine {
       constructor() { n.engine = this; }
-      async captureCommand(signal) {
+      async captureCommand(signal, level, ready) {
         n.captures++;
         if (n.permissionDenied) throw new UserFacingError('Microphone access is off. Enable it in your iPhone settings to record.');
+        ready?.();
         return new Promise((resolve, reject) => {
           const cancel = () => { n.capture = null; reject(new CancelledError()); };
           signal.addEventListener('abort', cancel, { once: true });
@@ -160,7 +166,7 @@ const bundle = build({
   bundle: true, write: false, platform: 'node', format: 'cjs', external: ['react'],
   define: { 'process.env.EXPO_PUBLIC_API_URL': JSON.stringify('http://mia.test') },
   plugins: [{ name: 'native-test', setup(build) {
-    build.onResolve({ filter: /^(react-native|react-native-safe-area-context|@expo\/vector-icons\/Ionicons|expo-crypto|\.\/storage|\.\/audio\/engine|\.\/audio\/mediaStore|\.\.\/\.\.\/modules\/mia-voice|\.\/realtime)$/ }, args => ({ path: args.path, namespace: 'native-test' }));
+    build.onResolve({ filter: /^(react-native|react-native-safe-area-context|@expo\/vector-icons\/Ionicons|expo-crypto|\.\/storage|\.\/audio\/engine|\.\/audio\/mediaStore|\.\/audio\/microphoneCuePlayer|\.\.\/\.\.\/modules\/mia-voice|\.\/realtime)$/ }, args => ({ path: args.path, namespace: 'native-test' }));
     build.onLoad({ filter: /.*/, namespace: 'native-test' }, args => ({ contents: sources[args.path], resolveDir: root }));
   } }],
 });
@@ -551,6 +557,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     connection: (_status: string) => {}, offline: false, holdHealth: false, healthHeld: false, healthCancelled: false,
     noteRecording: false, noteStarts: 0, noteDuration: 1000, complete: true, text: 'Open Anna', holdRecognition: false, recognitionCancelled: false, failSpeech: false, permissionDenied: false, dropAcceptedTurn: false,
     nativeAvailable, nativeStarts: 0, nativeStops: 0, nativePCM: null as ((bytes: Uint8Array) => void) | null,
+    microphoneCues: [] as boolean[],
     nativeReject: null as ((reason: unknown) => void) | null, pcmPackets: 0,
     nativeRevision: 0, nativeSession: false, audioConflicts: 0, holdNativeStart: false, holdNativeStop: false,
     releaseNativeStart: null as (() => void) | null, releaseNativeStop: null as (() => void) | null,
@@ -2341,11 +2348,58 @@ test('mute while waiting for ASR ready preserves the request and resumes without
   } finally { await h.close(); }
 });
 
+test('startup microphone cue waits for ASR and real native capture, then resumes after foregrounding', async () => {
+  const h = await mount(true, false, true, true);
+  const settleCue = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 230)); });
+  try {
+    h.n.holdASR = true; h.n.holdNativeStart = true;
+    await act(async () => { h.n.releaseStartupMode!(); h.n.releaseStartupSession!(); });
+    await h.wait(() => h.n.frames.some(frame => frame.type === 'voice.start'));
+    await settleCue(); assert.deepEqual(h.n.microphoneCues, []);
+    const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
+    await act(async () => { h.n.frame({ type: 'voice.ready', requestId: stream.requestId }); });
+    await h.wait(() => !!h.n.releaseNativeStart);
+    await settleCue(); assert.deepEqual(h.n.microphoneCues, [], 'permission or graph startup is still pending');
+    await act(async () => { h.n.holdASR = false; h.n.holdNativeStart = false; h.n.releaseNativeStart!(); });
+    await h.wait(() => h.n.microphoneCues.length === 1);
+    assert.deepEqual(h.n.microphoneCues, [true]);
+    await act(async () => { h.n.appState('background'); });
+    await settleCue(); assert.deepEqual(h.n.microphoneCues, [true]);
+    await act(async () => { h.n.appState('active'); });
+    await h.wait(() => h.n.microphoneCues.length === 2);
+    assert.deepEqual(h.n.microphoneCues, [true, true]);
+  } finally { h.n.holdNativeStart = false; h.n.releaseNativeStart?.(); await h.close(); }
+});
+
+test('classic startup stays silent and legacy microphone cues wait for successful capture', async () => {
+  const h = await mount(false);
+  try {
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 230)); });
+    assert.deepEqual(h.n.microphoneCues, []);
+    await act(async () => { await h.mia.saveAiMode(true); });
+    await h.wait(() => h.n.microphoneCues.length === 1);
+    assert.deepEqual(h.n.microphoneCues, [true]);
+    await act(async () => { await h.mia.toggleMicrophone(); });
+    await h.wait(() => h.n.microphoneCues.length === 2);
+    assert.deepEqual(h.n.microphoneCues, [true, false]);
+  } finally { await h.close(); }
+  const denied = await mount(false);
+  try {
+    denied.n.permissionDenied = true;
+    await act(async () => { await denied.mia.saveAiMode(true); });
+    await denied.wait(() => denied.mia.voiceFault);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 230)); });
+    assert.deepEqual(denied.n.microphoneCues, []);
+  } finally { await denied.close(); }
+});
+
 test('native mute preserves pending work and playback; Stop reply preserves mode and restarts only recognition', async () => {
   const h = await mount(true, true, true);
   try {
     const core = () => h.tree.findAll(node => typeof node.type === 'function' && node.type.name === 'MiaCore')[0]!;
     await h.wait(() => !!h.n.nativePCM);
+    await h.wait(() => h.n.microphoneCues.length === 1);
+    assert.deepEqual(h.n.microphoneCues, [true]);
     const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
     const turn: Turn = { id: 'mute-work', sessionId: 'assistant', userId: 'user', generation: 1, userText: 'Explain messages',
       assistantText: null, status: 'running', clientTurnId: 'client-mute-work', context: stream.context as any };
@@ -2353,6 +2407,8 @@ test('native mute preserves pending work and playback; Stop reply preserves mode
     await act(async () => { h.n.frame({ type: 'voice.interruption', requestId: stream.requestId, clientTurnId: turn.clientTurnId }); h.n.frame({ type: 'turn.accepted', turn }); });
     const stops = h.n.nativeStops, stopRequests = h.n.requests.filter(r => r.path.endsWith('/stop')).length;
     await act(async () => { await h.mia.toggleMicrophone(); });
+    await h.wait(() => h.n.microphoneCues.length === 2);
+    assert.deepEqual(h.n.microphoneCues, [true, false]);
     assert.equal(h.mia.voicePhase, 'thinking'); assert.equal(turn.status, 'running');
     assert.equal(core().props.phase, 'thinking'); assert.equal(core().props.microphoneMuted, true);
     assert.equal(h.n.requests.filter(r => r.path.endsWith('/stop')).length, stopRequests);
@@ -2363,6 +2419,8 @@ test('native mute preserves pending work and playback; Stop reply preserves mode
     const packets = h.n.pcmPackets; await act(async () => { h.n.nativePCM!(new Uint8Array(3840)); });
     assert.equal(h.n.pcmPackets, packets); assert.equal(h.n.nativeStops, stops);
     await act(async () => { await h.mia.toggleMicrophone(); });
+    await h.wait(() => h.n.microphoneCues.length === 3);
+    assert.deepEqual(h.n.microphoneCues, [true, false, true]);
     assert.ok(h.n.playback, 'unmuting does not cancel the reply');
     assert.equal(core().props.phase, 'speaking'); assert.equal(core().props.microphoneMuted, false);
     const inputRevision = (h.n.frames.filter(f => f.type === 'voice.mute').at(-1)!.revision as number);

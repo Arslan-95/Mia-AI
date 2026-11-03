@@ -338,7 +338,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
       }
     }
 
-    async function handle(value: unknown) {
+    async function handle(value: unknown, queuedVoiceEpoch: number) {
       const frame = frameSchema.parse(value);
       if (frame.type === 'auth') {
         if (user || authenticating) throw new AppError(409, 'ALREADY_AUTHENTICATED', 'This connection already has an identity.');
@@ -364,7 +364,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
         return;
       }
       if (!user) { socket.close(1008, 'Authenticate first'); return; }
-      if (!await validateSession()) return;
+      if (!await validateSession() || frame.type === 'voice.start' && queuedVoiceEpoch !== voiceEpoch) return;
       if (frame.type === 'ping') { send({ type: 'pong' }); return; }
       if (frame.type === 'turn') {
         cancelSpeech(); cancelVoice();
@@ -388,23 +388,29 @@ export function registerRealtime(app: FastifyInstance, deps: {
       } else if (frame.type === 'voice.start') {
         const pendingMute = pendingInputMute;
         cancelVoice();
-        await assertContextAccess(db, user.id, frame.context ?? null);
-        recognitionId = frame.requestId;
-        const latestMute = pendingInputMute?.requestId === frame.requestId ? pendingInputMute : pendingMute;
-        inputMuted = latestMute?.requestId === frame.requestId ? latestMute.muted : frame.context?.voice?.microphoneMuted === true;
-        inputRevision = latestMute?.requestId === frame.requestId ? latestMute.revision : frame.context?.voice?.revision ?? 0;
-        inputController = new AbortController();
-        needsAudioEvidence = frame.inputProcessing === 'aec-residual-v1';
-        voiceContext = frame.context;
+        // Cancellation must own the entire startup, including database lookups.
         const controller = new AbortController(); recognitionController = controller;
-        const contacts = await new MessagingService(db).contacts(user.id);
+        const signal = AbortSignal.any([controller.signal, lifetime.signal]);
         try {
-          voiceGeneration = (await assistant.state.requireSession(user.id, sessionId)).generation;
+          await assertContextAccess(db, user.id, frame.context ?? null);
+          throwIfAborted(signal);
+          recognitionId = frame.requestId;
+          const latestMute = pendingInputMute?.requestId === frame.requestId ? pendingInputMute : pendingMute;
+          inputMuted = latestMute?.requestId === frame.requestId ? latestMute.muted : frame.context?.voice?.microphoneMuted === true;
+          inputRevision = latestMute?.requestId === frame.requestId ? latestMute.revision : frame.context?.voice?.revision ?? 0;
+          inputController = new AbortController();
+          needsAudioEvidence = frame.inputProcessing === 'aec-residual-v1';
+          voiceContext = frame.context;
+          const contacts = await new MessagingService(db).contacts(user.id);
+          throwIfAborted(signal);
+          const session = await assistant.state.requireSession(user.id, sessionId);
+          throwIfAborted(signal);
+          voiceGeneration = session.generation;
           const stream = await speech.recognize(contacts.map((contact) => contact.name),
             (event) => onRecognition(frame.requestId, event, controller.signal),
             () => { if (recognitionId === frame.requestId) { send({ type: 'voice.failed', requestId: frame.requestId, code: 'ASR_UNAVAILABLE' }); cancelVoice(); } },
-            AbortSignal.any([controller.signal, lifetime.signal]));
-          if (stopped || recognitionId !== frame.requestId) { stream.close(); return; }
+            signal);
+          if (signal.aborted || stopped || recognitionId !== frame.requestId) { stream.close(); return; }
           recognition = stream; voiceStartedAt = Date.now(); receivedBytes = 0;
           // Meta requires real-time PCM even during silence. Never forward muted
           // microphone bytes; generate silence here without a client audio stream.
@@ -422,8 +428,9 @@ export function registerRealtime(app: FastifyInstance, deps: {
           voiceTimer = setTimeout(() => { const requestId = recognitionId; cancelVoice(); send({ type: 'voice.closed', requestId }); }, 300_000);
           send({ type: 'voice.ready', requestId: frame.requestId, sampleRate: 24000, format: 'pcm_s16le' });
         } catch (error) {
-          const cancelled = controller.signal.aborted;
-          cancelVoice(); if (!cancelled) throw error;
+          const cancelled = signal.aborted;
+          if (recognitionController === controller) cancelVoice();
+          if (!cancelled) throw error;
         }
       } else if (frame.type === 'speech.cancel') {
         cancelSpeech();
@@ -476,7 +483,7 @@ export function registerRealtime(app: FastifyInstance, deps: {
       queue = queue.then(async () => {
         if (stopped || value.type === 'voice.start' && queuedVoiceEpoch !== voiceEpoch
           || value.type === 'speech.request' && queuedSpeechEpoch !== speechEpoch) return;
-        await handle(value);
+        await handle(value, queuedVoiceEpoch);
       }).catch(failure);
     });
   });

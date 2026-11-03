@@ -112,3 +112,17 @@ test('late completion of an older reply cannot end a newer reference', () => {
   gate.begin(voice(1), 'old', 0); gate.begin(reply, 'new', 1000); gate.end('old', 1100);
   assert.ok(silent(feed(gate, mix(delayed(reply, 150), .1).subarray(0, 800 * 48), 1000)));
 });
+
+test('repeated microphone cues cannot evict the echo reference for a longer spoken reply', () => {
+  const gate = new PlaybackEchoGate(), reply = voice(1, 5000);
+  gate.begin(reply, 'reply', 0);
+  for (let i = 0; i < 5; i++) {
+    const at = i * 200;
+    gate.begin(voice(2, 160, .08), `cue-${i}`, at, 'feedback');
+    gate.end(`cue-${i}`, at + 160);
+  }
+  const echo = mix(delayed(reply, 150), .05).subarray(2000 * 48, 4000 * 48);
+  const output = feed(gate, echo, 2000);
+  assert.ok(output.length > 0);
+  assert.ok(silent(output), 'the reply remains protected after every cue and acoustic tail expires');
+});

@@ -96,6 +96,8 @@ export class DuplexAudio {
     finally { this.echo.end(requestId); }
   }
   async stopPlayback() { if (MiaVoice) await MiaVoice.stopPlayback(); }
+  beginFeedback(pcm: Uint8Array, id: string) { if (this.active) this.echo.begin(pcm, id, Date.now(), 'feedback'); }
+  endFeedback(id: string) { this.echo.end(id); }
   setInputMuted(muted: boolean) { this.inputMuted = muted; this.echo.discardInput(); }
   startRecording() {
     if (!this.active) throw new VoiceCaptureUnavailable('Mia’s microphone is not ready yet.');

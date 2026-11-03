@@ -3,6 +3,7 @@
     "name": "Mia",
     "slug": "mia-ai",
     "version": "1.0.0",
+    "icon": "./assets/app-icons/mia-voice-ribbon.png",
     "scheme": "mia",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
