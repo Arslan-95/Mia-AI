@@ -3,14 +3,28 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { readConfig } from '../src/config.js';
 import { MetaResponsesProvider } from '../src/agents/model.js';
+import type { ModelItem } from '../src/agents/model.js';
 import { createMemoryReviewer, type MemoryChange } from '../src/agents/memory-policy.js';
 import type { Turn } from '../src/agents/state.js';
+import type { ClientContext } from '../src/agents/context.js';
 const provider = new MetaResponsesProvider(readConfig());
 await mkdir(new URL('../.data/', import.meta.url), { recursive: true });
-const contact = { contactId: randomUUID(), name: 'Anna', phoneNumber: '+12025550101' };
-const sameNameContacts = [contact, { contactId: randomUUID(), name: 'Anna', phoneNumber: '+12025550102' }];
+const contact = { contactId: randomUUID(), name: 'Anna', displayName: 'Anna Demo', phoneNumber: '+12025550101' };
+const otherAnna = { contactId: randomUUID(), name: 'Anna', displayName: 'Anna Miller', phoneNumber: '+12025550102' };
+const sameNameContacts = [contact, otherAnna];
+const speech = (role: 'user' | 'assistant', text: string): ModelItem => ({ role, content: [{ type: role === 'user' ? 'input_text' : 'output_text', text }] });
+const renameHistory = [speech('user', 'Why do I have two contacts as Anna?'),
+  speech('assistant', 'One is Anna Miller, the other is Anna Demo. Both are saved as Anna.'),
+  speech('user', 'Could you please delete Anna Demo\'s contact?'),
+  speech('assistant', 'I cannot delete contacts, but I can rename Anna Demo to something clearer.'),
+  speech('user', 'Anna Dimo, so could you please rename it as Anna Dimo,'),
+  speech('assistant', "I'll find your Anna contacts to rename the right one.")];
+const renameContext: ClientContext = { route: '/chats', revision: 0, navigationSessionId: randomUUID(), contactForm: {
+  turnId: randomUUID(), operation: 'rename', name: 'Anna Dimo', identifier: contact.phoneNumber, status: 'interrupted',
+} };
 const fact = (key: string, value: string, evidence: string) => ({ key, value, evidence, contactId: null, kind: 'identity', memoryId: null, version: null, expiresAt: null });
-const cases: { label: string; utterance: string; action: MemoryChange['action']; data: unknown; allowed: boolean }[] = [
+const cases: { label: string; utterance: string; action: MemoryChange['action']; data: unknown; allowed: boolean;
+  history?: ModelItem[]; context?: ClientContext }[] = [
   { label: 'casual assertion', utterance: 'People call me Arslan.', action: 'remember', data: { input: fact('preferred_name', 'Arslan', 'People call me Arslan.') }, allowed: true },
   { label: 'rename cannot set user identity', utterance: 'Rename Anna to Work.', action: 'remember', data: { input: fact('preferred_name', 'Work', 'Rename Anna to Work.') }, allowed: false },
   { label: 'dictation cannot set identity', utterance: 'Write Anna a message saying my name is Sasha.', action: 'remember', data: { input: fact('preferred_name', 'Sasha', 'my name is Sasha') }, allowed: false },
@@ -25,11 +39,21 @@ const cases: { label: string; utterance: string; action: MemoryChange['action'];
   { label: 'relationship statement is not rename', utterance: 'Anna is my sister.', action: 'rename_contact', data: { contact, sameNameContacts: [contact], name: 'Sister' }, allowed: false },
   { label: 'nickname does not assert kinship', utterance: 'Change Anna\'s saved name to Mom.', action: 'remember', data: { input: { ...fact('relationship', 'mother', 'Change Anna\'s saved name to Mom.'), kind: 'relationship', contactId: contact.contactId }, contact, sameNameContacts: [contact] }, allowed: false },
   { label: 'explicit saved contact rename is an action', utterance: 'Change the saved name of Anna at +12025550101 to Work.', action: 'rename_contact', data: { contact, sameNameContacts, name: 'Work' }, allowed: true },
+  { label: 'full profile name distinguishes duplicate saved names', utterance: 'Rename Anna Demo to Anna Dimo.', action: 'rename_contact', data: { contact, sameNameContacts, name: 'Anna Dimo' }, allowed: true },
+  { label: 'resume actual interrupted Anna rename', utterance: 'Can you please rename', action: 'rename_contact', data: { contact, sameNameContacts, name: 'Anna Dimo' }, allowed: true, history: renameHistory, context: renameContext },
+  { label: 'correct name while continuing selected contact', utterance: 'Actually, call her Studio Anna.', action: 'rename_contact', data: { contact, sameNameContacts, name: 'Studio Anna' }, allowed: true, history: renameHistory, context: renameContext },
+  { label: 'continuation cannot select the other duplicate', utterance: 'Can you please rename', action: 'rename_contact', data: { contact: otherAnna, sameNameContacts, name: 'Anna Dimo' }, allowed: false, history: renameHistory, context: renameContext },
+  { label: 'continuation cannot substitute a new label', utterance: 'Can you please rename', action: 'rename_contact', data: { contact, sameNameContacts, name: 'My sister' }, allowed: false, history: renameHistory, context: renameContext },
+  { label: 'greeting does not resume interrupted rename', utterance: 'Hello, Mia. Are you there?', action: 'rename_contact', data: { contact, sameNameContacts, name: 'Anna Dimo' }, allowed: false, history: renameHistory, context: renameContext },
+  { label: 'cancellation does not resume interrupted rename', utterance: 'Leave her name as it is.', action: 'rename_contact', data: { contact, sameNameContacts, name: 'Anna Dimo' }, allowed: false, history: renameHistory, context: renameContext },
+  { label: 'assistant form cannot disambiguate the user request', utterance: 'Can you please rename', action: 'rename_contact', data: { contact, sameNameContacts, name: 'Anna Dimo' }, allowed: false,
+    history: [speech('user', 'Rename Anna to Anna Dimo.'), speech('assistant', "I'll rename Anna Demo.")], context: renameContext },
 ];
 const results: { label: string; expected: boolean; allowed: boolean; passed: boolean }[] = [];
 for (let at = 0; at < cases.length; at += 3) {
   const batch = await Promise.all(cases.slice(at, at + 3).map(async item => {
-    const review = createMemoryReviewer(provider, { userText: item.utterance, context: null } as Turn, AbortSignal.timeout(45000), []);
+    const review = createMemoryReviewer(provider, { userText: item.utterance, context: item.context ?? null } as Turn,
+      AbortSignal.timeout(45000), item.history ?? []);
     let allowed = false;
     try { await review({ action: item.action, data: item.data }); allowed = true; }
     catch (error) { if ((error as { code?: string }).code !== 'MEMORY_CHANGE_UNSUPPORTED') throw error; }

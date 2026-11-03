@@ -7,6 +7,7 @@ import { listEvents } from '../src/events.js';
 import { MessagingService } from '../src/messaging.js';
 import { testDatabase } from './helpers.js';
 import { clientContextSchema, sameContext } from '../src/agents/context.js';
+import { AppError } from '../src/errors.js';
 
 test('current contact form context survives request storage, permits older clients, and rejects foreign form ownership', async t => {
   const db = await testDatabase(); t.after(() => db.close());
@@ -61,6 +62,17 @@ test('contact forms show partial data, track committed saves, report rejected ch
   await assert.rejects(execute('rename_contact', { contactId: saved.contactId, name: 'Rejected' }));
   assert.equal((await forms()).at(-1)!.status, 'failed');
   assert.equal((await messaging.contacts(owner))[0]!.name, 'Anna');
+  const beforeClarification = (await forms()).length;
+  context.reviewMemory = async () => { throw new AppError(409, 'MEMORY_CHANGE_UNSUPPORTED', 'Which Anna?'); };
+  await assert.rejects(execute('rename_contact', { contactId: saved.contactId, name: 'Ambiguous' }),
+    (error: unknown) => error instanceof AppError && error.code === 'MEMORY_CHANGE_UNSUPPORTED');
+  assert.deepEqual((await forms()).slice(beforeClarification).map(form => form.status), ['clarification'],
+    'a request for clarification never shows saving or a technical failure');
+  assert.equal((await forms()).at(-1)!.code, 'MEMORY_CHANGE_UNSUPPORTED');
+  assert.equal((await messaging.contacts(owner))[0]!.name, 'Anna');
+  assert.equal(clientContextSchema.parse({ route: '/chats', revision: 0, contactForm: {
+    turnId: turn.id, operation: 'rename', name: 'Ambiguous', identifier: '+12025550101', status: 'clarification',
+  } }).contactForm?.status, 'clarification');
   context.reviewMemory = async () => ({ explicit: true });
   await execute('rename_contact', { contactId: saved.contactId, name: 'Studio Anna' });
   assert.equal((await forms()).at(-1)!.operation, 'rename');

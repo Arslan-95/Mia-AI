@@ -47,6 +47,35 @@ async function fixture(provider: ModelProvider, start = true) {
     }); } };
 }
 
+test('a rejected rename records its reason and asks for clarification without reporting a failed save', async t => {
+  let contactId = '', attempted = false;
+  const provider: ModelProvider = { configured: true, async respond(request) {
+    if (request.tools.some(tool => tool.name === 'memory_verdict')) {
+      const data = JSON.parse((request.input[0]!.content as { text: string }[])[0]!.text);
+      assert.equal(data.proposedChange.data.sameNameContacts.length, 2);
+      assert.ok(data.proposedChange.data.sameNameContacts.every((contact: { displayName?: string }) => contact.displayName));
+      return call('memory_verdict', { allowed: false, explicit: false, reason: 'Two Annas match; the user has not selected one.' });
+    }
+    if (!attempted) { attempted = true; return call('rename_contact', { contactId, name: 'Work' }); }
+    assert.equal((lastResult(request) as { error: string }).error, 'MEMORY_CHANGE_UNSUPPORTED');
+    return answer('Which Anna would you like to rename?');
+  } };
+  const f = await fixture(provider); t.after(() => f.close());
+  const selected = await f.messaging.addContact(f.ids.alice, f.ids.anna, 'Anna');
+  const other = await f.messaging.addContact(f.ids.alice, f.ids.david, 'Anna');
+  contactId = selected.contactId;
+  const { turn } = await f.submit('Rename Anna to Work.');
+  assert.equal((await f.completed(turn.id)).assistantText, 'Which Anna would you like to rename?');
+  const events = await f.db.query<{ type: string; payload: Record<string, unknown> }>(
+    "SELECT type,payload FROM events WHERE user_id=$1 AND payload->>'turnId'=$2 ORDER BY id", [f.ids.alice, turn.id]);
+  const review = events.find(e => e.type === 'agent.change_reviewed')!.payload;
+  assert.equal(review.code, 'MEMORY_CHANGE_UNSUPPORTED');
+  assert.equal(review.reason, 'Two Annas match; the user has not selected one.');
+  assert.deepEqual(events.filter(e => e.type === 'agent.contact_form').map(e => e.payload.status), ['clarification']);
+  assert.equal(events.find(e => e.type === 'agent.tool_completed')!.payload.errorCode, 'MEMORY_CHANGE_UNSUPPORTED');
+  for (const contact of [selected, other]) assert.equal((await f.messaging.contact(f.ids.alice, contact.contactId)).name, 'Anna');
+});
+
 for (const scenario of [
   { name: 'first narration fails', failAt: 0, delegated: false },
   { name: 'second narration fails after a specialist lookup', failAt: 1, delegated: true },
