@@ -1,10 +1,10 @@
-const fillers = new Set(['um', 'uh', 'hmm', 'mm', 'mmm', 'эм', 'мм', 'хм']);
+const fillers = new Set(['um', 'uh', 'hmm', 'mm', 'mmm']);
 const echoTailMs = 1500;
 type Token = { word: string; at: number };
 function tokens(text: string) {
   const source = text.normalize('NFKC').replace(/\[[^\]]*\]|<[^>]*>/g, match => ' '.repeat(match.length));
   const list: Token[] = [...source.matchAll(/[\p{L}\p{N}][\p{L}\p{M}\p{N}'’]*/gu)]
-    .map(match => ({ word: match[0].toLocaleLowerCase().replace(/ё/g, 'е').replace(/’/g, "'"), at: match.index }))
+    .map(match => ({ word: match[0].toLocaleLowerCase().replace(/’/g, "'"), at: match.index }))
     .filter(token => !fillers.has(token.word));
   return { source, list };
 }
@@ -23,7 +23,7 @@ function distance(a: string, b: string) {
 }
 const digits = /\p{N}/u;
 // Number words, as recognition writes the digits Mia reads out.
-const numberWord = /^(zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thir|fif|twent|fort|eight|nint|hundred|thousand|first|second|third|o'clock|нол|нул|один|одн|два|две|двух|двад|двен|три|тре|четыр|сорок|пят|шест|сем|восем|девя|десят|сто|двест|трист|тысяч|полтор)/;
+const numberWord = /^(zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thir|fif|twent|fort|eight|nint|hundred|thousand|first|second|third|o'clock)/;
 // Recognition of Mia's own echo is accurate but not exact, and a cumulative
 // partial may still end in a truncated word. A digit in her text matches only
 // a number word, never different digits the person said.
@@ -36,10 +36,10 @@ function similar(heard: string, spoken: string | undefined, partial: boolean) {
   return allowed > 0 && heard[0] === spoken[0] && Math.abs(heard.length - spoken.length) <= allowed && distance(heard, spoken) <= allowed;
 }
 // Residual echo after iOS AEC is recognised as runs of Mia's words in her
-// order. Recognition may skip a word, merge two ("на завтра" → "назавтра"),
+// order. Recognition may skip a word, merge two ("note book" → "notebook"),
 // split one, or spell a number as several words. A run is echo only if it is
 // at least three words, or two with a long word: an isolated repeated word
-// (an answer naming an option Mia offered) or a common short pair ("я не")
+// (an answer naming an option Mia offered) or a common short pair ("I do")
 // remains the person's.
 function echoRun(list: Token[], words: string[], i: number, j: number, final: boolean) {
   const partial = (index: number) => !final && index === list.length - 1;

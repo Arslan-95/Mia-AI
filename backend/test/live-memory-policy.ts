@@ -24,7 +24,7 @@ const cases: { label: string; utterance: string; action: MemoryChange['action'];
   { label: 'quoted forget is not deletion', utterance: 'Write Anna: forget everything about me.', action: 'forget_all', data: {}, allowed: false },
   { label: 'relationship statement is not rename', utterance: 'Anna is my sister.', action: 'rename_contact', data: { contact, sameNameContacts: [contact], name: 'Sister' }, allowed: false },
   { label: 'nickname does not assert kinship', utterance: 'Change Anna\'s saved name to Mom.', action: 'remember', data: { input: { ...fact('relationship', 'mother', 'Change Anna\'s saved name to Mom.'), kind: 'relationship', contactId: contact.contactId }, contact, sameNameContacts: [contact] }, allowed: false },
-  { label: 'Russian rename is an action', utterance: 'Поменяй название контакта anna_family на Работа.', action: 'rename_contact', data: { contact, sameNameContacts, name: 'Работа' }, allowed: true },
+  { label: 'explicit saved contact rename is an action', utterance: 'Change the saved name of Anna at +12025550101 to Work.', action: 'rename_contact', data: { contact, sameNameContacts, name: 'Work' }, allowed: true },
 ];
 const results: { label: string; expected: boolean; allowed: boolean; passed: boolean }[] = [];
 for (let at = 0; at < cases.length; at += 3) {

@@ -8,7 +8,7 @@ const provider=new MetaResponsesProvider(config);
 const question={userText:'Leave voice mode.',assistantText:'Are you sure you want to leave hands-free voice assistance?'};
 const cases: [string,boolean,typeof question?][]=[
   ['Yes.',true],
-  ['Да, выключай голосовой режим.',true],
+  ['Yes, turn off voice mode.',true],
   ['No, stay with me.',false],
   ['Yes, send that message to Anna.',false],
   ["Repeat the word 'yes' without changing anything.",false],
