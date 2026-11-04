@@ -35,9 +35,11 @@ function define<T extends z.ZodType>(name: string, description: string, schema: 
 const uuid = z.uuid();
 const empty = z.object({}).strict();
 const versionedDraft = z.object({ draftId: uuid, version: z.int().positive() }).strict();
+const successReplySchema = z.string().trim().min(1).max(280).optional();
 const readMessagesSchema = z.object({
-  chatId: uuid.nullish(),
-  sender: z.string().trim().min(1).max(100).nullish(),
+  chatId: uuid.nullish().describe('Restrict to a verified chat. This does not restrict the sender.'),
+  chatWith: z.string().trim().min(1).max(100).nullish().describe('Name of the other participant when selecting from their chat, including messages from either person.'),
+  sender: z.string().trim().min(1).max(100).nullish().describe('Name of the actual author for requests about messages FROM that person. The user’s own messages are excluded.'),
   messageId: uuid.nullish(),
   query: z.string().trim().min(1).max(200).nullish(),
   before: uuid.nullish(),
@@ -138,11 +140,12 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
         }
         return service.addContact(turn.userId, userId, name);
       })),
-    define('rename_contact', 'Change only the saved display label of an existing contact when requested. Resolve its contact ID first. This does not change personal memory, a legal name, or a family relationship.',
-      z.object({ contactId: uuid, name: z.string().trim().min(1).max(80) }).strict(), async ({ contactId, name }) => {
+    define('rename_contact', 'Change only the saved display label of an existing contact when requested. Resolve its contact ID first. This does not change personal memory, a legal name, or a family relationship. As coordinator, provide successReply when a successful rename would finish the whole user request.',
+      z.object({ contactId: uuid, name: z.string().trim().min(1).max(80), successReply: successReplySchema }).strict(), async ({ contactId, name, successReply }) => {
         const contact = await messaging.contact(turn.userId, contactId);
-        return saveContact('rename', contact, name, service => service.renameContact(turn.userId, contactId, name),
+        const saved = await saveContact('rename', contact, name, service => service.renameContact(turn.userId, contactId, name),
           async () => review({ action: 'rename_contact', data: { ...await resolution(contact), name } }));
+        return successReply ? { ...saved, successReply } : saved;
       }),
     define('list_memories', 'Read saved long-term knowledge. Empty query lists ALL kinds, including relationships. For semantic recall, inspect the supplied memory context or list memories rather than guessing a name. Follow next cursors to see further records. Contacts include their CURRENT label and stable IDs.',
       z.object({ query: z.string().trim().max(100).nullable(), contactId: uuid.nullable(), after: uuid.nullable() }).strict(),
@@ -153,43 +156,55 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       () => messaging.chats(turn.userId)),
     define('get_chat', 'Read one authorized direct chat by chat ID, including its recipient and unread count.',
       z.object({ chatId: uuid }).strict(), ({ chatId }) => messaging.chat(turn.userId, chatId)),
-    define('read_messages', 'Select real messages by chat, sender name, exact message ID, literal text, unread or unheard status, and order. Use read_aloud to present and read selected sources, or show to open one exact selected source without audio. Set continueAfterPresentation when the user also asked for commentary or another task. Use lookup for analysis, semantic selection or reading without displaying the source. before paginates a newest-first chat lookup.',
-      readMessagesSchema, async ({ chatId, sender, messageId, query, before, limit, status = 'any', order = 'newest', mode = 'lookup', continueAfterPresentation }) => {
+    define('read_messages', 'Use this directly for simple requests to read messages aloud, including first, latest, unread and exact-source requests. For a message FROM a named person, pass sender. For a message IN a named person’s chat, pass chatWith or a verified chatId, with no sender unless separately specified. This tool resolves names and selects the actual source. For first or latest, set limit=1 and the corresponding order. Use read_aloud to present and read, show to open without audio, or lookup to fetch sources for analysis. Leave continueAfterPresentation out when presentation fulfils the request. before paginates a newest-first chat lookup.',
+      readMessagesSchema, async ({ chatId, chatWith, sender, messageId, query, before, limit, status = 'any', order = 'newest', mode = 'lookup', continueAfterPresentation }) => {
         if (mode !== 'lookup' && (agent !== 'mia' || !turn.context?.voice?.enabled))
           throw new AppError(409, 'VOICE_REQUIRED', 'Use lookup unless the coordinator is in voice mode.');
-        if (mode === 'lookup' && chatId && !sender && !messageId && !query && status === 'any' && order === 'newest')
+        if (mode === 'lookup' && chatId && !chatWith && !sender && !messageId && !query && status === 'any' && order === 'newest')
           return messaging.messages(turn.userId, chatId, limit, before ?? undefined);
         if (before) throw new AppError(400, 'INVALID_CURSOR', 'Use before only with a newest-first chat history lookup.');
-        if (!chatId && !sender && !messageId && !query && status === 'any')
+        if (!chatId && !chatWith && !sender && !messageId && !query && status === 'any')
           throw new AppError(400, 'MESSAGE_SCOPE_REQUIRED', 'Choose a chat, sender, or message filter.');
-        let senderId: string | undefined;
-        if (sender) {
-          const candidates = await messaging.messageSenders(turn.userId, sender);
+        const personIds: { senderId?: string; chatWithId?: string } = {};
+        for (const [filter, name] of [['senderId', sender], ['chatWithId', chatWith]] as const) {
+          if (!name) continue;
+          const candidates = await messaging.findMessagePeople(turn.userId, name);
           const matches = candidates[0]?.exact ? candidates.filter(candidate => candidate.exact) : candidates;
-          if (matches.length !== 1) return { senderMatches: matches.map(({ id, name, displayName }) => ({ id, name, displayName })) };
-          senderId = matches[0]!.id;
+          if (matches.length !== 1) return { filter, matches: matches.map(({ id, name, displayName }) => ({ id, name, displayName })) };
+          personIds[filter] = matches[0]!.id;
         }
-        const selection = await messaging.selectMessages(turn.userId, { chatId: chatId ?? undefined, senderId,
+        const selection = await messaging.selectMessages(turn.userId, { chatId: chatId ?? undefined, ...personIds,
           messageId: messageId ?? undefined, query: query ?? undefined, status, order,
           limit: mode === 'show' ? 1 : mode === 'read_aloud' ? Math.min(limit ?? 10, 10) : limit ?? 30 });
         if (mode === 'lookup' || !selection.messages.length) return selection;
         const more = mode === 'read_aloud' && selection.more && (limit === undefined || limit > 10);
         const delivered = [];
+        let previousSenderId: string | undefined;
         for (const [index, message] of selection.messages.entries()) {
           const source = { chatId: message.chatId, messageId: message.id };
-          const action = mode === 'show' ? await presentationAction('show_message', source) : message.kind === 'voice'
-            ? await presentationAction('play_audio', { ...source, mediaId: message.mediaId })
-            : await presentationAction('show_message', { ...source, narration: message.text,
-              delivery: turn.speechDelivery ?? defaultSpeechDelivery });
+          const own = message.senderId === turn.userId;
+          const voice = message.kind === 'voice';
+          const intro = voice
+            ? (own ? 'Your voice message.' : `A voice message from ${message.senderName}.`)
+            : (own ? 'You wrote:' : `${message.senderName} wrote:`);
+          const introduceSender = previousSenderId !== message.senderId;
+          const speech = { ...(introduceSender ? { intro } : {}), delivery: turn.speechDelivery ?? defaultSpeechDelivery };
+          const action = mode === 'show' ? await presentationAction('show_message', source) : voice
+            ? await presentationAction('play_audio', { ...source, ...speech, mediaId: message.mediaId })
+            : await presentationAction('show_message', { ...source, ...speech, narration: message.text });
           if (action.state !== 'completed') return { delivered, incomplete: action,
             remaining: selection.messages.slice(index + 1).map(({ id, chatId }) => ({ id, chatId })), more };
           delivered.push(source);
+          previousSenderId = message.senderId;
         }
         return { delivered, more, presentationComplete: !continueAfterPresentation && !more,
           ...(continueAfterPresentation ? { messages: selection.messages } : {}) };
       }),
-    define('get_message', 'Fetch one exact authorized source even when it is years old. Chat and message IDs must match.',
-      z.object({ chatId: uuid, messageId: uuid }).strict(), ({ chatId, messageId }) => messaging.source(turn.userId, chatId, messageId)),
+    define('get_message', 'Fetch one exact authorized source and verify its author. Chat and message IDs must match.',
+      z.object({ chatId: uuid, messageId: uuid }).strict(), async ({ chatId, messageId }) => {
+        const message = await messaging.source(turn.userId, chatId, messageId);
+        return { ...message, sentByUser: message.senderId === turn.userId };
+      }),
     define('search_messages', 'Search stored messages in one resolved chat by literal text and/or absolute date window, newest first. Bounded pages, next cursor; use for old sources instead of reading an entire history.',
       z.object({ chatId: uuid, query: z.string().trim().max(200).nullable(), afterDate: z.iso.datetime().nullable(), beforeDate: z.iso.datetime().nullable(), before: uuid.nullable(), limit: z.int().min(1).max(20) }).strict(),
       ({ chatId, query, afterDate, beforeDate, before, limit }) => messaging.searchMessages(turn.userId, chatId, { query: query ?? undefined, afterDate: afterDate ?? undefined, beforeDate: beforeDate ?? undefined, before: before ?? undefined, limit })),
@@ -209,7 +224,7 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
   const coordinator = [
     define('set_speech_delivery', 'Choose restrained delivery for your final spoken reply by meaning and current conversation. Default is calm/steady/reserved; no call is needed for ordinary neutral replies or greetings. Use gentle for a delicate topic, light only for supported casual humor, unhurried when useful, and friendly only with evidence it suits this user. Use saved voice preferences as context, but current instructions take priority. Changes apply only to this turn; use memory tools for an actual enduring preference. No freeform voice prompts or exaggerated emotion. For individual show_message narration use that tool\'s delivery field instead.',
       speechDeliverySchema, delivery => state.setSpeechDelivery(turn, signal, delivery)),
-    define('show_message', 'First check current clientContext.reference: if it already shows this exact chat/message and relevant excerpt, DO NOT call this tool again; keep that card and answer directly. Otherwise required before discussing a specific stored chat message unless the user explicitly requests no display. Use for last/first-message questions, reading, quoting, summarizing, interpreting and help replying; fetching data or opening a chat alone does not show its card. Opens the real chat and shows/replaces the exact source. Put THIS source\'s substantive answer or commentary in narration: the card appears before speech and the tool waits for speech completion. For multiple sources, show and narrate each sequentially before replacing it. Counts/navigation and proposed draft revisions need no arbitrary card. Wait for completed feedback; failure is not a confirmed display. focus uses exact UTF-16 source offsets, never replacement display text. Optional delivery controls only this narration; it is not a reason to replay a visible card.',
+    define('show_message', 'Show an exact stored source for a request that needs your own commentary or interpretation. For simple verbatim reading, use read_messages in read_aloud mode, even if you already know the source ID. If the same source and excerpt are already visible, keep the card and answer directly. The chat participant is not necessarily the author. Verify senderId against the actual account before naming an author. Put source-specific commentary in narration; the tool waits for the device to finish it. Show and narrate separate sources sequentially. Wait for confirmed feedback. focus uses exact UTF-16 source offsets. Optional delivery applies to this narration.',
       z.object({ chatId: uuid, messageId: uuid, focus: z.object({ start: z.int().nonnegative(), end: z.int().positive() }).strict().nullable(), narration: z.string().trim().min(1).max(1800).nullable(), delivery: speechDeliverySchema.nullish() }).strict(), async ({ chatId, messageId, focus, narration, delivery }) => {
         const message = await messaging.source(turn.userId, chatId, messageId);
         if (focus && (focus.start >= focus.end || focus.end > (message.text?.length ?? 0))) throw new AppError(400, 'INVALID_FOCUS', 'Select exact valid source offsets.');
@@ -309,8 +324,8 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
           requiresLaterUserApproval: !earlier,
           approvalRule: earlier ? 'This exact version was already presented. Send only if the CURRENT user utterance approves it; do not ask them to confirm the same approval again.' : 'Present the exact recipient and content, then wait for a later user utterance to approve it.' };
       })),
-    define('send_approved_draft', `Send the exact draft version only after its review in a completed EARLIER turn and CURRENT user approval. ${RECIPIENT_APPROVAL_RULE}`,
-      versionedDraft, async ({ draftId, version }) => {
+    define('send_approved_draft', `Send the exact draft version only after its review in a completed EARLIER turn and CURRENT user approval. Provide successReply when a successful send would finish the whole user request. ${RECIPIENT_APPROVAL_RULE}`,
+      versionedDraft.extend({ successReply: successReplySchema }), async ({ draftId, version, successReply }) => {
         const [review] = await db.query(`SELECT r.turn_id,t.created_at AS "reviewedAt",COALESCE((SELECT a.result->'context' FROM device_actions a
         WHERE a.turn_id=t.id AND a.state='completed' AND jsonb_typeof(a.result->'context')='object'
         ORDER BY a.sequence DESC LIMIT 1),t.client_context) AS "reviewContext",t.assistant_text AS "presentation" FROM draft_reviews r JOIN assistant_turns t ON t.id = r.turn_id
@@ -322,7 +337,8 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
         if (!context.reviewDraftSend) throw new AppError(503, 'DRAFT_SEND_REVIEW_UNAVAILABLE', 'Current send approval could not be verified.');
         await context.reviewDraftSend({ draft, recipient: await messaging.profile(draft.recipientId), review: { ...review,
           ...draftReviewContinuity(review.reviewedAt, review.reviewContext, turn.context) } });
-        return mutate(service => service.confirmDraft(turn.userId, draftId, version, signal));
+        const sent = await mutate(service => service.confirmDraft(turn.userId, draftId, version, signal));
+        return successReply ? { ...sent, successReply } : sent;
       }),
     define('open_page', 'Show the main chat list, contacts, saved drafts or settings on the phone. Navigation preserves voice mode and the current task. Pending means requested; check get_device_action before claiming the page opened.',
       z.object({ page: z.enum(['chats', 'contacts', 'drafts', 'settings']) }).strict(),

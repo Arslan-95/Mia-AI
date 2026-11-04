@@ -146,7 +146,7 @@ export class MessagingService {
       chats: chats.map(({ chatId, sender, unreadCount }) => ({ chatId, sender, unreadCount })) };
   }
 
-  async messageSenders(ownerId: string, name: string) {
+  async findMessagePeople(ownerId: string, name: string) {
     return this.db.query<{ id: string; name: string; displayName: string; exact: boolean }>(`
       SELECT u.id, COALESCE(c.name,u.display_name) AS name, u.display_name AS "displayName",
         (lower(u.display_name) = lower($2) OR COALESCE(lower(c.name) = lower($2),false)) AS exact
@@ -159,23 +159,28 @@ export class MessagingService {
   }
 
   async selectMessages(ownerId: string, filters: {
-    chatId?: string; senderId?: string; messageId?: string; query?: string;
+    chatId?: string; chatWithId?: string; senderId?: string; messageId?: string; query?: string;
     status: 'any' | 'unread' | 'unheard'; order: 'newest' | 'oldest'; limit: number;
   }) {
     if (filters.chatId) await this.assertMember(ownerId, filters.chatId);
     const direction = filters.order === 'oldest' ? 'ASC' : 'DESC';
-    const items = await this.db.query<Message>(`
-      SELECT ${messageColumns} FROM messages m
+    const items = await this.db.query<Message & { senderName: string }>(`
+      SELECT ${messageColumns}, (
+        SELECT COALESCE(c.name, u.display_name) FROM users u
+        LEFT JOIN contacts c ON c.owner_id = $1 AND c.user_id = u.id
+        WHERE u.id = m.sender_id
+      ) AS "senderName" FROM messages m
       WHERE EXISTS (SELECT 1 FROM chat_members own WHERE own.chat_id = m.chat_id AND own.user_id = $1
         AND ($2::uuid IS NULL OR own.chat_id = $2)
         AND ($3::uuid IS NULL OR m.sender_id = $3)
         AND ($4::uuid IS NULL OR m.id = $4)
         AND ($5::text IS NULL OR m.text ILIKE $5 ESCAPE '\\')
+        AND ($8::uuid IS NULL OR EXISTS (SELECT 1 FROM chat_members other WHERE other.chat_id = own.chat_id AND other.user_id = $8))
         AND ($6 = 'any' OR (m.sender_id <> own.user_id AND
           (($6 = 'unread' AND ${unread}) OR ($6 = 'unheard' AND ${notHeard})))))
       ORDER BY m.created_at ${direction}, m.id ${direction} LIMIT $7`,
     [ownerId, filters.chatId ?? null, filters.senderId ?? null, filters.messageId ?? null,
-      filters.query ? `%${escapeLike(filters.query)}%` : null, filters.status, filters.limit + 1]);
+      filters.query ? `%${escapeLike(filters.query)}%` : null, filters.status, filters.limit + 1, filters.chatWithId ?? null]);
     return { messages: items.slice(0, filters.limit), more: items.length > filters.limit };
   }
 

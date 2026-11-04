@@ -500,7 +500,7 @@ test('original recording reports real completion and stop or mute bypass the pre
     const command = async (id: string, kind: string, payload: Record<string, unknown>) => {
       await act(async () => { await h.n.event({ id, type: 'device.action_requested', createdAt: new Date().toISOString(), payload: { actionId: id, sessionId: 'assistant', turnId: turn.id, kind, payload, expiresIn: 180000, context: turn.context } }, 0); });
     };
-    await command('original-one', 'play_audio', { mediaId: 'voice-source', messageId: 'voice-message', chatId: 'anna' });
+    await command('original-one', 'play_audio', { mediaId: 'voice-source', messageId: 'voice-message', chatId: 'anna', intro: 'A voice message from Anna.' });
     await h.wait(() => h.mia.messageReference?.messageId === 'voice-message');
     assert.equal(h.n.playbacks, 0, 'the real source card must appear before original playback');
     const region = h.tree.findAll(node => node.props.testID === 'message-reference-region')[0]!;
@@ -508,6 +508,10 @@ test('original recording reports real completion and stop or mute bypass the pre
     const card = h.tree.findAll(node => node.type === 'AnimatedView' as any && node.props.testID === 'message-reference-card')[0]!;
     await act(async () => { card.props.onLayout({ nativeEvent: { layout: { width: 358, height: 250 } } }); });
     await h.wait(() => h.n.playbacks === 1);
+    assert.equal(h.n.frames.find(frame => frame.type === 'speech.request')?.actionId, 'original-one');
+    assert.equal(h.mia.originalPlayback?.operationId === 'original-one', false, 'play the introduction before the recording');
+    await act(async () => { h.n.playback!(); });
+    await h.wait(() => h.n.playbacks === 2);
     assert.equal(h.mia.originalPlayback?.state, 'playing');
     assert.equal(h.mia.originalPlayback?.state, 'playing');
     assert.equal(h.tree.findAll(node => node.type === 'Text' as any && node.props.children === 'Playing voice message').length, 0);
@@ -538,8 +542,9 @@ test('original recording reports real completion and stop or mute bypass the pre
     assert.equal(h.mia.originalPlayback?.state, 'finished');
     assert.equal(label('voice-message-status'), 'Finished'); assert.equal(label('voice-message-position'), '0:10');
     assert.equal(h.n.requests.find(r => r.path === '/v1/device-actions/original-one/result')!.body.success, true);
-    await command('original-two', 'play_audio', { mediaId: 'voice-source', messageId: 'voice-message', chatId: 'anna' });
-    await h.wait(() => h.n.playbacks === 2);
+    h.n.failSpeech = true;
+    await command('original-two', 'play_audio', { mediaId: 'voice-source', messageId: 'voice-message', chatId: 'anna', intro: 'A voice message from Anna.' });
+    await h.wait(() => h.n.playbacks === 3);
     await command('stop-now', 'stop_audio', {});
     await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/stop-now/result'));
     await h.wait(() => h.n.requests.some(r => r.path === '/v1/device-actions/original-two/result'));

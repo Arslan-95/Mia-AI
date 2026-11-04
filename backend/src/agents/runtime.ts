@@ -19,6 +19,7 @@ import { readingProgress, reviewReadingReply } from './reading-recovery.js';
 
 type Budget = { calls: number; delegations: number; narrations?: Set<string> };
 const prompts = { mia: COORDINATOR_PROMPT, messaging: MESSAGING_PROMPT, contacts: CONTACTS_PROMPT };
+const successReplyTools = new Set(['send_approved_draft', 'rename_contact']);
 
 export class AssistantRuntime {
   readonly state: AssistantState;
@@ -180,8 +181,9 @@ export class AssistantRuntime {
       }
       const narration = response.text.trim();
       const narrations = budget.narrations ??= new Set();
-      const audibleAction = response.calls.some(call => ['read_messages', 'show_message', 'announce_message_skip', 'play_audio', 'stop_audio', 'set_voice_mode', 'set_microphone_muted'].includes(call.name));
-      if (agent === 'mia' && turn.context?.voice?.enabled && !reading.needsNotice && !audibleAction
+      const waitForOutcome = response.calls.some(call => successReplyTools.has(call.name) ||
+        ['read_messages', 'show_message', 'announce_message_skip', 'play_audio', 'stop_audio', 'set_voice_mode', 'set_microphone_muted'].includes(call.name));
+      if (agent === 'mia' && turn.context?.voice?.enabled && !reading.needsNotice && !waitForOutcome
         && narration && narration.length <= 280 && narrations.size < 3 && !narrations.has(narration)) {
         narrations.add(narration);
         await this.state.action(turn, signal, 'speak_progress', { narration, delivery: turn.speechDelivery ?? defaultSpeechDelivery });
@@ -232,6 +234,10 @@ export class AssistantRuntime {
         if (action?.kind === 'announce_message_skip' && action.state !== 'completed')
           throw new AppError(503, 'READING_NOTICE_FAILED', 'The reading failure could not be announced.');
         if (agent === 'mia' && call.name === 'read_messages' && response.calls.length === 1 && action?.presentationComplete === true) return '';
+        if (agent === 'mia' && success && response.calls.length === 1 && !reading.failures.length && successReplyTools.has(call.name)) {
+          const reply = (result as { successReply?: string } | null)?.successReply;
+          if (reply) return reply;
+        }
         const serialized = JSON.stringify(result ?? null);
         input.push({ type: 'function_call_output', call_id: call.callId,
           output: serialized.length <= 32_000 ? serialized : JSON.stringify({ error: 'RESULT_TOO_LARGE', message: 'Request fewer messages or a narrower result.' }) });

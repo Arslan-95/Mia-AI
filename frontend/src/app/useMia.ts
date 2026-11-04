@@ -609,6 +609,15 @@ export function useMia() {
         const operationId = action.actionId;
         if (typeof action.payload.chatId !== 'string' || typeof action.payload.messageId !== 'string') throw new DeviceActionError('SOURCE_REQUIRED', 'The original recording needs its source message.');
         await presentSource(action.payload.chatId, action.payload.messageId, undefined, mediaId);
+        if (typeof action.payload.intro === 'string' && action.payload.intro) {
+          stage = 'narration';
+          try { await speak({ id: action.turnId, status: 'running' } as Turn, undefined, action.actionId); }
+          catch (reason) {
+            // A failed spoken introduction must not prevent the original note from playing.
+            if (reason instanceof CancelledError) throw reason;
+          }
+          assertValid();
+        }
         stage = 'execution';
         const captureActive = !duplex.available && (state.current.voicePhase === 'listening' || state.current.voicePhase === 'transcribing');
         if (captureActive) { setManualAudio(true); await conversation.stop(); }

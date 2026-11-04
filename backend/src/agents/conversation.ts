@@ -18,7 +18,7 @@ export async function conversationInput(db: Database, state: AssistantState, tur
   // The final answer is only part of what the user heard. Replay narration in
   // its original turn, and only after the phone confirmed playback completed.
   const narrations = history.length ? await db.query<{ turnId: string; narration: string }>(`SELECT
-    turn_id AS "turnId",payload->>'narration' AS narration FROM device_actions
+    turn_id AS "turnId",concat_ws(' ',payload->>'intro',payload->>'narration') AS narration FROM device_actions
     WHERE user_id=$1 AND session_id=$2 AND turn_id=ANY($3::uuid[])
     AND kind IN ('show_message','announce_message_skip','speak_progress') AND state='completed' AND payload->>'narration' IS NOT NULL
     ORDER BY sequence`, [turn.userId, turn.sessionId, history.map(entry => entry.id)]) : [];
