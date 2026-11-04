@@ -5,6 +5,7 @@ import { AppError, throwIfAborted } from '../errors.js';
 import { inspectWav } from '../media.js';
 import { googleSpeechEndpoint, googleSpeechHeaders, type GoogleSpeechHeaders } from './google-auth.js';
 import { speechPrompt, type SpeechOptions } from './delivery.js';
+import type { GoogleSpeechStream } from './google-tts-stream.js';
 
 const sampleRate = 24_000;
 const maxPcmBytes = sampleRate * 2 * 180;
@@ -53,8 +54,7 @@ export class SpeechSynthesisError extends AppError {
   }
 }
 
-// Retry only before a segment is yielded. The phone buffers the entire request
-// before playback, so these retries cannot repeat words the user already heard.
+// Retry the unary request only before any audio from this segment is yielded.
 async function requestAudio(fetcher: typeof fetch, body: string, authorize: GoogleSpeechHeaders, signal: AbortSignal, sourceText: string, report?: SpeechDiagnosticReporter) {
   for (let attempt = 1; ; attempt++) {
     throwIfAborted(signal);
@@ -150,7 +150,8 @@ async function readAudio(response: Response, signal: AbortSignal) {
 }
 
 export async function* synthesizeGoogleSpeech(config: Config, fetcher: typeof fetch,
-  text: string, signal: AbortSignal, authorize: GoogleSpeechHeaders = googleSpeechHeaders(config), options: SpeechOptions = {}, report?: SpeechDiagnosticReporter): AsyncIterable<Uint8Array> {
+  text: string, signal: AbortSignal, authorize: GoogleSpeechHeaders = googleSpeechHeaders(config),
+  options: SpeechOptions = {}, report?: SpeechDiagnosticReporter, stream?: GoogleSpeechStream): AsyncIterable<Uint8Array> {
   const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(90_000)]);
   throwIfAborted(requestSignal);
   let total = 0;
@@ -164,6 +165,27 @@ export async function* synthesizeGoogleSpeech(config: Config, fetcher: typeof fe
   if (gemini && Buffer.byteLength(prompt, 'utf8') > 4000) throw new AppError(503, 'TTS_PROMPT_LIMIT', 'The speech delivery configuration is too long.');
   for (const part of textParts(text, maximumBytes, encode)) {
     throwIfAborted(requestSignal);
+    if (gemini && stream) {
+      const before = total;
+      try {
+        for await (const pcm of stream(part, prompt, requestSignal)) {
+          throwIfAborted(requestSignal);
+          if (pcm.length % 2) throw invalidAudio();
+          if (!pcm.length) continue;
+          total += pcm.length;
+          if (total > maxPcmBytes) throw new AppError(503, 'TTS_LIMIT', 'The spoken response exceeded its duration limit.');
+          for (let offset = 0; offset < pcm.length; offset += 12_000) {
+            throwIfAborted(requestSignal);
+            yield pcm.subarray(offset, offset + 12_000);
+          }
+        }
+        if (total > before) continue;
+      } catch (error) {
+        throwIfAborted(requestSignal);
+        // Restarting this segment after playback begins would repeat words.
+        if (total > before) throw error instanceof AppError ? error : new SpeechSynthesisError('TTS_STREAM_INTERRUPTED', undefined, 1);
+      }
+    }
     const pcm = await requestAudio(fetcher, JSON.stringify({ input: gemini ? { text: part, prompt } : styled ? { ssml: opening + encode(part) + closing } : { text: part },
         voice: { languageCode: 'en-US', name: config.googleTtsVoice, ...(gemini ? { modelName: config.googleTtsModel } : {}) },
         audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: sampleRate } }), authorize, requestSignal, part, report);

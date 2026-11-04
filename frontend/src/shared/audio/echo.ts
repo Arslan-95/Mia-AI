@@ -25,7 +25,7 @@ const initialCouplingDb = -15;
 const minCouplingDb = -35;
 const maxCouplingDb = 10;
 const packetBytes = 3840; // the server accepts at most 8192 bytes per frame
-type Reference = { id: string; levels: Float32Array; start: number; end: number; channel: 'speech' | 'feedback' };
+type Reference = { id: string; levels: Float32Array; start: number; end: number; channel: 'speech' | 'feedback' | 'stream' };
 type Frame = { index: number; bytes: Uint8Array; guarded: boolean };
 
 function decibels(bytes: Uint8Array, offset = 0, samples = bytes.length / 2) {
@@ -56,9 +56,10 @@ export class PlaybackEchoGate {
   private openFrames = 0;
   coupling = initialCouplingDb;
   readonly stats = { passedFrames: 0, gatedFrames: 0, openings: 0 };
-  begin(bytes: Uint8Array, id: string, now = Date.now(), channel: 'speech' | 'feedback' = 'speech') {
+  begin(bytes: Uint8Array, id: string, now = Date.now(), channel: Reference['channel'] = 'speech', start = now) {
     this.prune(now);
-    this.references.push({ id, levels: levels(bytes), start: now, end: now + bytes.length / 2 / rate * 1000 + 1000, channel });
+    this.references.push({ id, levels: levels(bytes), start, end: start + bytes.length / 2 / rate * 1000 + 1000, channel });
+    if (channel === 'stream') return; // Keep references for both queued batches and their audible tails.
     // Rapid feedback must not evict the reference for a longer spoken reply.
     const kept = this.references.filter(ref => ref.channel === channel).slice(-2);
     this.references = this.references.filter(ref => ref.channel !== channel || kept.includes(ref));

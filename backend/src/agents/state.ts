@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Database, Sql } from '../db/database.js';
 import { AppError, conflict, notFound, throwIfAborted } from '../errors.js';
 import { publish } from '../events.js';
+import { MessagingService } from '../messaging.js';
 import { assertContextAccess, clientContextSchema, deviceResultSchema, sameContext, type ClientContext } from './context.js';
 import { speechDeliverySchema, defaultSpeechDelivery, type SpeechDelivery } from '../speech/delivery.js';
 
@@ -222,9 +223,16 @@ export class AssistantState {
         if (!route || feedback.context?.route !== route) throw conflict('Confirm the exact requested screen before reporting navigation success.');
       }
       if (success && action.kind === 'show_message') {
-        const source = action.payload as { chatId: string; messageId: string };
+        const source = action.payload as { chatId: string; messageId: string; narration?: string };
         if (feedback.reference?.chatId !== source.chatId || feedback.reference.messageId !== source.messageId || feedback.context?.route !== `/chat/${source.chatId}`)
           throw conflict('Confirm the exact visible source and its opened chat.');
+        if (source.narration)
+          await new MessagingService(this.db).markHeard(sql, userId, source.chatId, source.messageId, { narration: source.narration });
+      }
+      if (success && action.kind === 'play_audio') {
+        const { chatId, messageId, mediaId } = action.payload as { chatId?: string; messageId?: string; mediaId?: string };
+        if (chatId && messageId && mediaId)
+          await new MessagingService(this.db).markHeard(sql, userId, chatId, messageId, { mediaId });
       }
       if (success && action.kind === 'dismiss_message' && feedback.context?.reference) throw conflict('The reference is still visible.');
       if (success && ['set_voice_mode', 'set_microphone_muted'].includes(action.kind)) {

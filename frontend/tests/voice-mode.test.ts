@@ -125,7 +125,7 @@ const sources: Record<string, string> = {
     const listeners = new Map();
     let heldStop;
     const native = {
-      apiVersion: 3,
+      apiVersion: n.nativeApiVersion,
       addListener(name, callback) { listeners.set(name, callback); return { remove() { if (listeners.get(name) === callback) listeners.delete(name); } }; },
       async start() {
         const revision = ++n.nativeRevision; n.nativeStarts++;
@@ -145,6 +145,7 @@ const sources: Record<string, string> = {
       },
       async stopPlayback() { const reject = n.nativeReject; n.nativeReject = null; if (reject) { n.playback = null; reject({ code: 'CANCELLED' }); } },
       async play() { n.playbacks++; await new Promise((resolve, reject) => { n.nativeReject = reject; n.playback = () => { n.nativeReject = null; resolve(); }; }); },
+      async enqueue() { n.streamBatches++; await native.play(); },
     };
     export default n.nativeAvailable ? native : null;`,
   '../shared/api/realtime': `const n = globalThis.__miaNative;
@@ -185,6 +186,7 @@ test('retained cards allow subsequent reordered-context actions, same-source reu
     const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
     h.n.referenceSources.push(...['first', 'second'].map(id => ({ id, chatId: 'anna', senderId: 'recipient', kind: 'text' as const,
       text: `The ${id} notebook.`, mediaId: null, createdAt: '2026-10-30T12:00:00Z' })));
+    h.n.history = [...h.n.referenceSources].reverse();
     const jsonb = (value: unknown): any => JSON.parse(JSON.stringify(value, (_key, part) => part && typeof part === 'object' && !Array.isArray(part)
       ? Object.fromEntries(Object.keys(part).sort((a, b) => a.length - b.length || a.localeCompare(b)).map(key => [key, part[key]])) : part));
     const accept = async (id: string) => {
@@ -213,6 +215,7 @@ test('retained cards allow subsequent reordered-context actions, same-source reu
     await h.wait(() => h.mia.messageReference?.messageId === 'first');
     const original = await layout(); await h.wait(() => !!result('first-card'));
     assert.equal(result('first-card').success, true);
+    assert.equal(h.n.requests.some(request => request.path === '/v1/chats/anna/read'), false);
 
     const followUp = await accept('follow-up');
     assert.ok(followUp.context?.reference);
@@ -551,7 +554,7 @@ const session = { token: 'token', expiresAt: '2099-01-01', user: { id: 'user', d
 const assistantSession = { id: 'assistant', generation: 0, activeChatId: null };
 const chat = { id: 'anna', recipient: { id: 'recipient', phoneNumber: '+12025550101', displayName: 'Anna' }, unreadCount: 0, lastMessage: null };
 
-async function mount(mode = false, renderApp = false, nativeAvailable = false, holdStartup = false) {
+async function mount(mode = false, renderApp = false, nativeAvailable = false, holdStartup = false, nativeApiVersion = 3) {
   const code = (await bundle).outputFiles[0]!.text;
   const n = {
     session, preferences: new Map([['mia.ai_mode', String(mode)]]), captures: 0, playbacks: 0, deleted: [] as string[],
@@ -561,7 +564,7 @@ async function mount(mode = false, renderApp = false, nativeAvailable = false, h
     appState: (_state: string) => {}, event: async (_event: ServerEvent, _time: number, _replayed?: boolean) => {}, frame: (_frame: Frame) => {},
     connection: (_status: string) => {}, offline: false, holdHealth: false, healthHeld: false, healthCancelled: false,
     noteRecording: false, noteStarts: 0, noteDuration: 1000, complete: true, text: 'Open Anna', holdRecognition: false, recognitionCancelled: false, failSpeech: false, permissionDenied: false, dropAcceptedTurn: false,
-    nativeAvailable, nativeStarts: 0, nativeStops: 0, nativePCM: null as ((bytes: Uint8Array) => void) | null,
+    nativeAvailable, nativeApiVersion, streamBatches: 0, nativeStarts: 0, nativeStops: 0, nativePCM: null as ((bytes: Uint8Array) => void) | null,
     microphoneCues: [] as boolean[],
     messageCues: 0, messageCueStops: 0,
     nativeReject: null as ((reason: unknown) => void) | null, pcmPackets: 0,
@@ -740,8 +743,8 @@ test('incoming cues preserve native listening and stop before voice-note capture
   } finally { await h.close(); }
 });
 
-async function mountProgress() {
-  const h = await mount(true, false, true);
+async function mountProgress(nativeApiVersion = 3) {
+  const h = await mount(true, false, true, false, nativeApiVersion);
   await h.wait(() => !!h.n.nativePCM);
   await act(async () => { h.n.nativePCM!(new Uint8Array(4800)); });
   const stream = h.n.frames.find(frame => frame.type === 'voice.start')!;
@@ -757,6 +760,31 @@ async function mountProgress() {
   });
   return { ...h, get mia() { return h.mia; }, turn, action };
 }
+
+test('assistant completion starts synthesis without polling and native playback starts before speech completion', async () => {
+  const h = await mountProgress(4);
+  try {
+    h.n.holdSpeech = true;
+    await act(async () => {
+      await h.n.event({ id: 'completed-turn', type: 'assistant.completed', createdAt: new Date().toISOString(),
+        payload: { turnId: h.turn.id, sessionId: h.turn.sessionId, text: 'Your draft is ready.' } }, 0);
+    });
+    const request = h.n.frames.find(frame => frame.type === 'speech.request')!;
+    assert.ok(request);
+    assert.equal(h.n.requests.some(r => r.path.endsWith('/turns/' + h.turn.id)), false);
+    await act(async () => {
+      h.n.frame({ type: 'speech.chunk', requestId: request.requestId, sequence: 0, audio: Buffer.alloc(12000).toString('base64') });
+    });
+    assert.equal(h.n.streamBatches, 1);
+    assert.equal(h.mia.audioState, 'playing');
+    await act(async () => { h.n.playback!(); });
+    assert.equal(h.mia.audioState, 'playing', 'synthesis is still open');
+    await act(async () => {
+      h.n.frame({ type: 'speech.completed', requestId: request.requestId, chunks: 1, totalBytes: 12000 });
+    });
+    assert.equal(h.mia.audioState, 'idle');
+  } finally { await h.close(); }
+});
 
 test('incoming message feedback stays silent during Mia speech', async () => {
   const h = await mountProgress();

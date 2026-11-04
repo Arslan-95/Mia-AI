@@ -35,6 +35,18 @@ function define<T extends z.ZodType>(name: string, description: string, schema: 
 const uuid = z.uuid();
 const empty = z.object({}).strict();
 const versionedDraft = z.object({ draftId: uuid, version: z.int().positive() }).strict();
+const readMessagesSchema = z.object({
+  chatId: uuid.nullish(),
+  sender: z.string().trim().min(1).max(100).nullish(),
+  messageId: uuid.nullish(),
+  query: z.string().trim().min(1).max(200).nullish(),
+  before: uuid.nullish(),
+  limit: z.int().min(1).max(30).optional(),
+  status: z.enum(['any', 'unread', 'unheard']).optional(),
+  order: z.enum(['newest', 'oldest']).optional(),
+  mode: z.enum(['lookup', 'show', 'read_aloud']).optional(),
+  continueAfterPresentation: z.boolean().optional(),
+}).strict();
 const pageRoutes = { chats: '/chats', contacts: '/contacts', drafts: '/drafts', settings: '/settings' } as const;
 
 export function toolsFor(agent: AgentName, context: ToolContext): Map<string, Tool> {
@@ -67,7 +79,7 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
     while (Date.now() < until) {
       signal.throwIfAborted();
       const [current] = await db.query(`SELECT id,kind,state,result FROM device_actions WHERE id=$1 AND user_id=$2`, [action.id, turn.userId]);
-      if (current?.state !== 'pending') return current;
+      if (current && current.state !== 'pending') return current;
       await delay(100, undefined, { signal });
     }
     return { ...action, message: 'Device completion was not confirmed. Do not claim it displayed or played.' };
@@ -141,9 +153,41 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       () => messaging.chats(turn.userId)),
     define('get_chat', 'Read one authorized direct chat by chat ID, including its recipient and unread count.',
       z.object({ chatId: uuid }).strict(), ({ chatId }) => messaging.chat(turn.userId, chatId)),
-    define('read_messages', 'Read actual messages in a chat, newest first. Use a before ID to read older messages.',
-      z.object({ chatId: uuid, limit: z.int().min(1).max(30), before: uuid.nullable() }).strict(),
-      ({ chatId, limit, before }) => messaging.messages(turn.userId, chatId, limit, before ?? undefined)),
+    define('read_messages', 'Select real messages by chat, sender name, exact message ID, literal text, unread or unheard status, and order. Use read_aloud to present and read selected sources, or show to open one exact selected source without audio. Set continueAfterPresentation when the user also asked for commentary or another task. Use lookup for analysis, semantic selection or reading without displaying the source. before paginates a newest-first chat lookup.',
+      readMessagesSchema, async ({ chatId, sender, messageId, query, before, limit, status = 'any', order = 'newest', mode = 'lookup', continueAfterPresentation }) => {
+        if (mode !== 'lookup' && (agent !== 'mia' || !turn.context?.voice?.enabled))
+          throw new AppError(409, 'VOICE_REQUIRED', 'Use lookup unless the coordinator is in voice mode.');
+        if (mode === 'lookup' && chatId && !sender && !messageId && !query && status === 'any' && order === 'newest')
+          return messaging.messages(turn.userId, chatId, limit, before ?? undefined);
+        if (before) throw new AppError(400, 'INVALID_CURSOR', 'Use before only with a newest-first chat history lookup.');
+        if (!chatId && !sender && !messageId && !query && status === 'any')
+          throw new AppError(400, 'MESSAGE_SCOPE_REQUIRED', 'Choose a chat, sender, or message filter.');
+        let senderId: string | undefined;
+        if (sender) {
+          const candidates = await messaging.messageSenders(turn.userId, sender);
+          const matches = candidates[0]?.exact ? candidates.filter(candidate => candidate.exact) : candidates;
+          if (matches.length !== 1) return { senderMatches: matches.map(({ id, name, displayName }) => ({ id, name, displayName })) };
+          senderId = matches[0]!.id;
+        }
+        const selection = await messaging.selectMessages(turn.userId, { chatId: chatId ?? undefined, senderId,
+          messageId: messageId ?? undefined, query: query ?? undefined, status, order,
+          limit: mode === 'show' ? 1 : mode === 'read_aloud' ? Math.min(limit ?? 10, 10) : limit ?? 30 });
+        if (mode === 'lookup' || !selection.messages.length) return selection;
+        const more = mode === 'read_aloud' && selection.more && (limit === undefined || limit > 10);
+        const delivered = [];
+        for (const [index, message] of selection.messages.entries()) {
+          const source = { chatId: message.chatId, messageId: message.id };
+          const action = mode === 'show' ? await presentationAction('show_message', source) : message.kind === 'voice'
+            ? await presentationAction('play_audio', { ...source, mediaId: message.mediaId })
+            : await presentationAction('show_message', { ...source, narration: message.text,
+              delivery: turn.speechDelivery ?? defaultSpeechDelivery });
+          if (action.state !== 'completed') return { delivered, incomplete: action,
+            remaining: selection.messages.slice(index + 1).map(({ id, chatId }) => ({ id, chatId })), more };
+          delivered.push(source);
+        }
+        return { delivered, more, presentationComplete: !continueAfterPresentation && !more,
+          ...(continueAfterPresentation ? { messages: selection.messages } : {}) };
+      }),
     define('get_message', 'Fetch one exact authorized source even when it is years old. Chat and message IDs must match.',
       z.object({ chatId: uuid, messageId: uuid }).strict(), ({ chatId, messageId }) => messaging.source(turn.userId, chatId, messageId)),
     define('search_messages', 'Search stored messages in one resolved chat by literal text and/or absolute date window, newest first. Bounded pages, next cursor; use for old sources instead of reading an entire history.',
@@ -253,7 +297,7 @@ export function toolsFor(agent: AgentName, context: ToolContext): Map<string, To
       z.object({ goal: z.string().min(1).max(4000) }).strict(), ({ goal }) => context.delegate('messaging', goal)),
     define('delegate_contacts', 'Ask the contacts specialist to resolve a person or manage a requested contact.',
       z.object({ goal: z.string().min(1).max(4000) }).strict(), ({ goal }) => context.delegate('contacts', goal)),
-    define('review_draft', 'Present an unreviewed draft version and ask whether to send. If this unchanged version was already reviewed in a completed earlier turn and the current user approves it, call send_approved_draft directly instead.',
+    define('review_draft', 'Prepare the exact message version for approval. Tell the user who will receive it and what will be sent, then ask naturally for permission. If this unchanged version was already reviewed in a completed earlier turn and the current user approves it, call send_approved_draft directly instead.',
       versionedDraft, ({ draftId, version }) => mutate(async (service, scoped) => {
         const draft = await service.reviewDraft(turn.userId, draftId, version, signal);
         const [earlier] = await scoped.query(`SELECT r.turn_id FROM draft_reviews r JOIN assistant_turns t ON t.id=r.turn_id

@@ -12,7 +12,8 @@ public class MiaVoiceModule: Module {
   private var ownsSession = false
   private var playbackId: String?
   private var playbackRevision = 0
-  private var playbackPromise: Promise?
+  private var playbackSequence = 0
+  private var playbackPromises: [Int: Promise] = [:]
   private var observers: [NSObjectProtocol] = []
   private var graphEpoch = 0
   private enum GraphPhase: String { case idle, starting, running, stopping }
@@ -23,7 +24,7 @@ public class MiaVoiceModule: Module {
 
   public func definition() -> ModuleDefinition {
     Name("MiaVoice")
-    Constant("apiVersion") { 3 }
+    Constant("apiVersion") { 4 }
     AsyncFunction("diagnostics") { () -> [String: Any] in
       var report = MiaAudioBridge.diagnostics()
       report["graphPresent"] = self.engine != nil
@@ -67,25 +68,40 @@ public class MiaVoiceModule: Module {
     AsyncFunction("stopPlayback") { self.cancelPlayback() }.runOnQueue(serial)
     AsyncFunction("play") { (base64: String, id: String, promise: Promise) in
       self.cancelPlayback()
-      guard let engine = self.engine, engine.isRunning, let player = self.player,
-        let data = Data(base64Encoded: base64), data.count > 0, data.count % 2 == 0, data.count <= 12000000
-        else { promise.reject("VOICE_PLAY_FAILED", "Playback is unavailable."); return }
-      self.playbackId = id; self.playbackPromise = promise
-      let epoch = self.graphEpoch; let playbackRevision = self.playbackRevision
-      let error = MiaAudioBridge.play(data, player: player) { [weak self] in
-        self?.serial.async { [weak self] in
-          guard let self = self, self.graphEpoch == epoch,
-            self.playbackRevision == playbackRevision, self.playbackId == id else { return }
-          self.playbackId = nil; let done = self.playbackPromise; self.playbackPromise = nil; done?.resolve()
-        }
+      self.schedulePlayback(base64, id: id, promise: promise)
+    }.runOnQueue(serial)
+    AsyncFunction("enqueue") { (base64: String, id: String, promise: Promise) in
+      guard self.playbackId == nil || self.playbackId == id else {
+        promise.reject("CANCELLED", "Playback was replaced."); return
       }
-      if let error = error {
-        self.playbackId = nil; self.playbackPromise = nil; self.stopGraph(); promise.reject(error)
-        self.sendEvent("failure", ["code": "PLAYBACK_FAILED"])
-      }
+      self.schedulePlayback(base64, id: id, promise: promise)
     }.runOnQueue(serial)
     OnAppEntersBackground { self.serial.async { self.revision += 1; self.stopGraph() } }
     OnDestroy { self.serial.async { self.revision += 1; self.stopGraph() } }
+  }
+  private func schedulePlayback(_ base64: String, id: String, promise: Promise) {
+    guard let engine = engine, engine.isRunning, let player = player,
+      let data = Data(base64Encoded: base64), data.count > 0, data.count % 2 == 0, data.count <= 12000000
+      else { promise.reject("VOICE_PLAY_FAILED", "Playback is unavailable."); return }
+    playbackId = id
+    playbackSequence += 1
+    let sequence = playbackSequence
+    playbackPromises[sequence] = promise
+    let epoch = graphEpoch; let revision = playbackRevision
+    let error = MiaAudioBridge.play(data, player: player) { [weak self] in
+      self?.serial.async { [weak self] in
+        guard let self = self, self.graphEpoch == epoch,
+          self.playbackRevision == revision, self.playbackId == id else { return }
+        let done = self.playbackPromises.removeValue(forKey: sequence)
+        if self.playbackPromises.isEmpty { self.playbackId = nil }
+        done?.resolve()
+      }
+    }
+    if let error = error {
+      playbackPromises.removeValue(forKey: sequence)
+      stopGraph(); promise.reject(error)
+      sendEvent("failure", ["code": "PLAYBACK_FAILED"])
+    }
   }
   private func observeGraph(_ graph: AVAudioEngine, epoch: Int) {
       observers.append(NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { [weak self] note in
@@ -171,8 +187,10 @@ public class MiaVoiceModule: Module {
   }
   private func cancelPlayback() {
     playbackRevision += 1; playbackId = nil
-    _ = MiaAudioBridge.stopPlayback(player); let pending = playbackPromise; playbackPromise = nil
-    pending?.reject("CANCELLED", "Playback was interrupted.")
+    let pending = playbackPromises.values
+    playbackPromises.removeAll()
+    _ = MiaAudioBridge.stopPlayback(player)
+    for promise in pending { promise.reject("CANCELLED", "Playback was interrupted.") }
   }
   private func stopGraph() {
     // Revoke callbacks BEFORE any AVFoundation operation can post another

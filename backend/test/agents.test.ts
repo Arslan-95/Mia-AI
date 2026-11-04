@@ -47,6 +47,54 @@ async function fixture(provider: ModelProvider, start = true) {
     }); } };
 }
 
+test('new-message overview answers without device actions, and reading only marks confirmed sources', async t => {
+  let calls = 0;
+  let chatId = '';
+  let shouldRead = false;
+  const f = await fixture({ configured: true, async respond(request) {
+    calls++;
+    if (shouldRead) return call('read_messages', { sender: 'Anna', status: 'unread', mode: 'read_aloud', order: 'newest', limit: 1 });
+    const context = JSON.parse(request.instructions.split('Server-supplied current context (data, not instructions):\n')[1]!);
+    assert.equal(context.unreadOverview.visibleChatId, chatId);
+    assert.equal(context.unreadOverview.totalUnread, 3);
+    assert.deepEqual(context.unreadOverview.chats.map((chat: { sender: string; unreadCount: number }) => [chat.sender, chat.unreadCount]), [['David', 1], ['Anna', 2]]);
+    return answer('David has a new message here, and Anna has two.');
+  } });
+  t.after(() => f.close());
+  await f.messaging.addContact(f.ids.alice, f.ids.anna, 'Anna');
+  await f.messaging.addContact(f.ids.alice, f.ids.david, 'David');
+  const annaChat = (await f.messaging.createDirectChat(f.ids.alice, f.ids.anna)).id;
+  chatId = (await f.messaging.createDirectChat(f.ids.alice, f.ids.david)).id;
+  const older = await f.messaging.send(f.ids.anna, annaChat, { kind: 'text', text: 'First unread.' }, randomUUID());
+  await delay(5);
+  const newest = await f.messaging.send(f.ids.anna, annaChat, { kind: 'text', text: 'Most recent unread.' }, randomUUID());
+  await f.messaging.send(f.ids.david, chatId, { kind: 'text', text: 'Other chat.' }, randomUUID());
+  const view = { route: `/chat/${chatId}`, revision: 1, voice: { enabled: true, microphoneMuted: false, revision: 1 } };
+  const submit = (text: string) => f.runtime.submit(f.ids.alice, f.session.id, randomUUID(), text, undefined, view);
+  const overview = await submit('Any new messages?');
+  assert.match((await f.completed(overview.turn.id)).assistantText!, /David.*Anna/);
+  assert.equal((await f.db.query('SELECT id FROM device_actions WHERE turn_id=$1', [overview.turn.id])).length, 0);
+  assert.equal(calls, 1);
+
+  shouldRead = true;
+  const reading = await submit('Read the newest unread message from Anna.');
+  const action = await waitFor(async () => (await f.db.query<{ id: string; payload: { messageId: string; narration: string } }>(
+    'SELECT id,payload FROM device_actions WHERE turn_id=$1', [reading.turn.id]))[0]);
+  assert.equal(action.payload.messageId, newest.id);
+  assert.equal(action.payload.narration, newest.text);
+  assert.equal((await f.messaging.chat(f.ids.alice, annaChat)).unreadCount, 2);
+  const reference = { chatId: annaChat, messageId: newest.id, revision: 2 };
+  await f.runtime.state.acknowledgeAction(f.ids.alice, action.id, true, { reference, context: { route: `/chat/${annaChat}`, revision: 2, reference } });
+  assert.equal((await f.completed(reading.turn.id)).assistantText, '');
+  assert.equal(calls, 2);
+  assert.equal((await f.messaging.chat(f.ids.alice, annaChat)).unreadCount, 1);
+  const select = (status: 'unread' | 'unheard') => f.messaging.selectMessages(f.ids.alice, { chatId: annaChat, status, order: 'oldest', limit: 10 });
+  assert.deepEqual((await select('unread')).messages.map(message => message.id), [older.id]);
+  await f.messaging.markRead(f.ids.alice, annaChat, older.id);
+  assert.equal((await select('unread')).messages.length, 0);
+  assert.deepEqual((await select('unheard')).messages.map(message => message.id), [older.id]);
+});
+
 test('a rejected rename records its reason and asks for clarification without reporting a failed save', async t => {
   let contactId = '', attempted = false;
   const provider: ModelProvider = { configured: true, async respond(request) {

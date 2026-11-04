@@ -11,5 +11,6 @@ declare class MiaVoiceModule extends NativeModule<Events> {
   stop(): Promise<void>;
   stopPlayback(): Promise<void>;
   play(audio: string, requestId: string): Promise<void>;
+  enqueue(audio: string, requestId: string): Promise<void>;
 }
 export default requireOptionalNativeModule<MiaVoiceModule>('MiaVoice');

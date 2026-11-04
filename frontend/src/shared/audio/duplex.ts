@@ -5,6 +5,7 @@ import { concatBytes } from './wav';
 
 export class DuplexAudio {
   readonly available = Boolean(MiaVoice && MiaVoice.apiVersion >= 3);
+  readonly streamingAvailable = Boolean(MiaVoice && MiaVoice.apiVersion >= 4);
   active = false;
   hasInput = false;
   ownsSession = false;
@@ -14,6 +15,7 @@ export class DuplexAudio {
   private subscriptions: { remove(): void }[] = [];
   private inputWatchdog?: ReturnType<typeof setTimeout>;
   private echo = new PlaybackEchoGate();
+  private stream?: { id: string; sequence: number; nextStart: number };
   private recording?: { parts: Uint8Array[]; bytes: number; startedAt: number };
   constructor(private prepareSession: () => Promise<void> = async () => {}) {}
   async start(onPCM: (bytes: Uint8Array) => void, onInterrupted: () => void, onFailure: (error: unknown) => void) {
@@ -81,21 +83,32 @@ export class DuplexAudio {
       throw new UserFacingError('Mia could not start listening. Try turning voice mode off and on again.');
     }
   }
-  async playPcm(bytes: Uint8Array, requestId: string) {
+  async playPcm(bytes: Uint8Array, requestId: string, enqueue = false) {
     if (!MiaVoice || !this.active) throw new CancelledError();
     let binary = '';
     for (let offset = 0; offset < bytes.length; offset += 16384) binary += String.fromCharCode(...bytes.subarray(offset, offset + 16384));
     // Encoding a long reply takes time; the reference starts with playback.
     const audio = btoa(binary);
-    this.echo.begin(bytes, requestId);
-    try { await MiaVoice.play(audio, requestId); }
+    let referenceId = requestId;
+    if (enqueue) {
+      const now = Date.now();
+      if (this.stream?.id !== requestId) this.stream = { id: requestId, sequence: 0, nextStart: now };
+      const start = Math.max(now, this.stream.nextStart);
+      this.stream.nextStart = start + bytes.length / 48;
+      referenceId = `${requestId}:${this.stream.sequence++}`;
+      this.echo.begin(bytes, referenceId, now, 'stream', start);
+    } else this.echo.begin(bytes, referenceId);
+    try {
+      if (enqueue) await MiaVoice.enqueue(audio, requestId);
+      else await MiaVoice.play(audio, requestId);
+    }
     catch (error) {
       if ((error as { code?: string }).code === 'CANCELLED') throw new CancelledError();
       throw new UserFacingError('Mia could not play that response. Please try again.');
     }
-    finally { this.echo.end(requestId); }
+    finally { this.echo.end(referenceId); }
   }
-  async stopPlayback() { if (MiaVoice) await MiaVoice.stopPlayback(); }
+  async stopPlayback() { this.stream = undefined; if (MiaVoice) await MiaVoice.stopPlayback(); }
   beginFeedback(pcm: Uint8Array, id: string) { if (this.active) this.echo.begin(pcm, id, Date.now(), 'feedback'); }
   endFeedback(id: string) { this.echo.end(id); }
   setInputMuted(muted: boolean) { this.inputMuted = muted; this.echo.discardInput(); }

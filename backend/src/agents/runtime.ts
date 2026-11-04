@@ -117,7 +117,11 @@ export class AssistantRuntime {
     const drafts = await Promise.all((await messaging.drafts(turn.userId)).slice(0, 8).map(async draft =>
       ({ id: draft.id, version: draft.version, kind: draft.kind, state: draft.state, recipient: await recipientProfile(draft.recipientId) })));
     const visibleChatId = /^\/chat\/([^/]+)$/.exec(turn.context?.route ?? '')?.[1];
-    const visibleRecipient = visibleChatId ? (await messaging.chat(turn.userId, visibleChatId)).recipient : undefined;
+    const [unreadOverview, visibleChat] = await Promise.all([
+      agent === 'mia' ? messaging.unreadOverview(turn.userId, visibleChatId) : undefined,
+      visibleChatId ? messaging.chat(turn.userId, visibleChatId) : undefined,
+    ]);
+    const visibleRecipient = visibleChat?.recipient;
     const clientContext = turn.context ? { ...turn.context,
       ...(visibleRecipient ? { visibleRecipient } : {}),
       ...(turn.context.voiceNote ? { voiceNote: { ...turn.context.voiceNote, recipient: await recipientProfile(turn.context.voiceNote.recipientId) } } : {}),
@@ -154,7 +158,7 @@ export class AssistantRuntime {
       const recentDeviceActions = await this.db.query(`SELECT id,kind,payload,state,result FROM device_actions
         WHERE user_id=$1 AND session_id=$2 AND turn_id=$3 ORDER BY sequence DESC LIMIT 5`, [turn.userId, turn.sessionId, turn.id]);
       const instructions = prefix + JSON.stringify({ currentTurnId: turn.id, currentTime: new Date().toISOString(),
-        clientContext, savedDraftInventory: drafts, completedDraftReviews: completedDraftReviews.map(review => ({ ...review,
+        clientContext, unreadOverview, savedDraftInventory: drafts, completedDraftReviews: completedDraftReviews.map(review => ({ ...review,
           ...draftReviewContinuity(review.reviewedAt, review.reviewContext, turn.context) })), recentDeviceActions,
         speechDelivery: turn.speechDelivery ?? defaultSpeechDelivery, readingProgress: reading,
         personalMemory: await new AgentMemory(this.db).context(turn.userId) });
@@ -176,7 +180,7 @@ export class AssistantRuntime {
       }
       const narration = response.text.trim();
       const narrations = budget.narrations ??= new Set();
-      const audibleAction = response.calls.some(call => ['show_message', 'announce_message_skip', 'play_audio', 'stop_audio', 'set_voice_mode', 'set_microphone_muted'].includes(call.name));
+      const audibleAction = response.calls.some(call => ['read_messages', 'show_message', 'announce_message_skip', 'play_audio', 'stop_audio', 'set_voice_mode', 'set_microphone_muted'].includes(call.name));
       if (agent === 'mia' && turn.context?.voice?.enabled && !reading.needsNotice && !audibleAction
         && narration && narration.length <= 280 && narrations.size < 3 && !narrations.has(narration)) {
         narrations.add(narration);
@@ -218,14 +222,16 @@ export class AssistantRuntime {
           else throw error;
         }
         throwIfAborted(signal);
-        const action = result as { kind?: string; state?: string; result?: { stage?: string; presentationConfirmed?: boolean } } | null;
-        const deliveryIncomplete = ['show_message','announce_message_skip'].includes(call.name) && action?.kind === call.name && action.state !== 'completed';
+        const action = result as { kind?: string; state?: string; incomplete?: unknown; presentationComplete?: boolean } | null;
+        const deliveryIncomplete = (['show_message','announce_message_skip'].includes(call.name) && action?.kind === call.name && action.state !== 'completed')
+          || (call.name === 'read_messages' && Boolean(action?.incomplete));
         const failure = !success ? result as { error: string } : undefined;
         await this.state.emit(turn, signal, 'agent.tool_completed', { agent, tool: call.name, success: success && !deliveryIncomplete,
           ...(failure ? { errorCode: failure.error } : {}),
         });
         if (action?.kind === 'announce_message_skip' && action.state !== 'completed')
           throw new AppError(503, 'READING_NOTICE_FAILED', 'The reading failure could not be announced.');
+        if (agent === 'mia' && call.name === 'read_messages' && response.calls.length === 1 && action?.presentationComplete === true) return '';
         const serialized = JSON.stringify(result ?? null);
         input.push({ type: 'function_call_output', call_id: call.callId,
           output: serialized.length <= 32_000 ? serialized : JSON.stringify({ error: 'RESULT_TOO_LARGE', message: 'Request fewer messages or a narrower result.' }) });
