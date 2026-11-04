@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Database, Sql } from '../db/database.js';
 import { AppError, conflict, notFound, throwIfAborted } from '../errors.js';
 import { publish } from '../events.js';
+import { MessagingService } from '../messaging.js';
 import { assertContextAccess, clientContextSchema, deviceResultSchema, sameContext, type ClientContext } from './context.js';
 import { speechDeliverySchema, defaultSpeechDelivery, type SpeechDelivery } from '../speech/delivery.js';
 
@@ -189,11 +190,14 @@ export class AssistantState {
   async actionSpeech(userId: string, sessionId: string, turnId: string, actionId: string) {
     const turn = await this.turn(userId, sessionId, turnId);
     const session = await this.requireSession(userId, sessionId);
-    const [action] = await this.db.query<{ kind: string; payload: { narration?: string; delivery?: unknown }; state: string; current: boolean }>(`SELECT kind,payload,state,expires_at>now() AS current FROM device_actions
-      WHERE id=$1 AND user_id=$2 AND session_id=$3 AND turn_id=$4 AND generation=$5 AND kind IN ('show_message','announce_message_skip','speak_progress')`,
+    const [action] = await this.db.query<{ kind: string; payload: { intro?: string; narration?: string; delivery?: unknown }; state: string; current: boolean }>(`SELECT kind,payload,state,expires_at>now() AS current FROM device_actions
+      WHERE id=$1 AND user_id=$2 AND session_id=$3 AND turn_id=$4 AND generation=$5 AND kind IN ('show_message','play_audio','announce_message_skip','speak_progress')`,
       [actionId,userId,sessionId,turnId,session.generation]);
-    if (!action?.current || action.state !== 'pending' || !['running','completed'].includes(turn.status) || turn.generation !== session.generation || !action.payload.narration)
+    if (!action?.current || action.state !== 'pending' || !['running','completed'].includes(turn.status) || turn.generation !== session.generation)
       throw new AppError(409, 'STALE_SPEECH', 'This narration is no longer current.');
+    const { intro, narration, delivery } = action.payload;
+    const text = action.kind === 'play_audio' ? intro : narration && (intro ? `${intro} ${narration}` : narration);
+    if (!text) throw new AppError(409, 'STALE_SPEECH', 'This narration is no longer current.');
     if (action.kind === 'speak_progress' && turn.status !== 'running')
       throw new AppError(409, 'STALE_SPEECH', 'This progress update is no longer current.');
     const claimed = await this.db.query(`UPDATE device_actions a SET narration_requested=true FROM assistant_sessions s,assistant_turns t
@@ -201,7 +205,7 @@ export class AssistantState {
       AND t.status IN ('running','completed') AND (a.kind <> 'speak_progress' OR t.status='running')
       AND a.state='pending' AND a.expires_at>now() AND NOT a.narration_requested RETURNING a.id`, [actionId]);
     if (!claimed.length) throw new AppError(409, 'STALE_SPEECH', 'This narration was already requested or cancelled.');
-    return { turn, kind: action.kind, text: action.payload.narration, delivery: speechDeliverySchema.safeParse(action.payload.delivery).data ?? defaultSpeechDelivery };
+    return { turn, kind: action.kind, text, delivery: speechDeliverySchema.safeParse(delivery).data ?? defaultSpeechDelivery };
   }
 
   async acknowledgeAction(userId: string, actionId: string, success: boolean, result: unknown) {
@@ -222,9 +226,16 @@ export class AssistantState {
         if (!route || feedback.context?.route !== route) throw conflict('Confirm the exact requested screen before reporting navigation success.');
       }
       if (success && action.kind === 'show_message') {
-        const source = action.payload as { chatId: string; messageId: string };
+        const source = action.payload as { chatId: string; messageId: string; narration?: string };
         if (feedback.reference?.chatId !== source.chatId || feedback.reference.messageId !== source.messageId || feedback.context?.route !== `/chat/${source.chatId}`)
           throw conflict('Confirm the exact visible source and its opened chat.');
+        if (source.narration)
+          await new MessagingService(this.db).markHeard(sql, userId, source.chatId, source.messageId, { narration: source.narration });
+      }
+      if (success && action.kind === 'play_audio') {
+        const { chatId, messageId, mediaId } = action.payload as { chatId?: string; messageId?: string; mediaId?: string };
+        if (chatId && messageId && mediaId)
+          await new MessagingService(this.db).markHeard(sql, userId, chatId, messageId, { mediaId });
       }
       if (success && action.kind === 'dismiss_message' && feedback.context?.reference) throw conflict('The reference is still visible.');
       if (success && ['set_voice_mode', 'set_microphone_muted'].includes(action.kind)) {

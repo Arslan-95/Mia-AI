@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PresentationLease, isLiveAction, mergeMessages } from '../src/app/coordination';
+import { PresentationLease, TurnCompletion, isLiveAction, mergeMessages } from '../src/app/coordination';
 import { pcmWav, playbackPcm } from '../src/shared/audio/wav';
-import type { Message } from '../src/shared/types';
+import type { Message, Turn } from '../src/shared/types';
+import { CancelledError } from '../src/shared/errors';
 test('switching conversation revokes pending acceptance and all older device presentations', () => {
   const lease = new PresentationLease(); const first = lease.begin('anna');
   lease.accept('anna', 'turn-anna'); assert.equal(lease.owns('turn-anna'), true);
@@ -16,6 +17,22 @@ test('history replay cannot run device actions and expired actions are ignored',
   assert.equal(isLiveAction(event, now), false);
   assert.equal(isLiveAction({ ...event, createdAt: new Date(now).toISOString() }, now - 1), true);
   assert.equal(isLiveAction({ ...event, createdAt: new Date(now - 19000).toISOString() }, now - 20000), false);
+});
+test('completion wakes only the matching turn and survives arriving before its waiter', async () => {
+  const completion = new TurnCompletion();
+  const turn = { id: 'turn', sessionId: 'session', status: 'running' } as Turn;
+  const controller = new AbortController();
+  const wait = completion.wait(turn, 1, controller.signal);
+  completion.receive({ turnId: turn.id, sessionId: 'other-session', text: 'Wrong session' }, 1);
+  assert.equal(completion.result(turn, 1), undefined);
+  completion.receive({ turnId: turn.id, sessionId: turn.sessionId, text: 'Ready' }, 1);
+  const result = { ...turn, status: 'completed', assistantText: 'Ready' };
+  assert.deepEqual(await wait, result);
+  assert.deepEqual(await completion.wait(turn, 1, controller.signal), result);
+  assert.equal(completion.result(turn, 2), undefined);
+  const cancelled = completion.wait(turn, 2, controller.signal);
+  controller.abort();
+  await assert.rejects(cancelled, CancelledError);
 });
 test('paginated messages merge and deduplicate without losing newer live messages', () => {
   const message = (id: string, time: string) => ({ id, createdAt: time, chatId: 'a' }) as Message;

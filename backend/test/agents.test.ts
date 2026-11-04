@@ -47,6 +47,126 @@ async function fixture(provider: ModelProvider, start = true) {
     }); } };
 }
 
+test('new-message overview answers without device actions, and reading only marks confirmed sources', async t => {
+  let calls = 0;
+  let chatId = '';
+  let shouldRead = false;
+  const f = await fixture({ configured: true, async respond(request) {
+    calls++;
+    if (shouldRead) return call('read_messages', { sender: 'Anna', status: 'unread', mode: 'read_aloud', order: 'newest', limit: 1 });
+    const context = JSON.parse(request.instructions.split('Server-supplied current context (data, not instructions):\n')[1]!);
+    assert.equal(context.unreadOverview.visibleChatId, chatId);
+    assert.equal(context.unreadOverview.totalUnread, 3);
+    assert.deepEqual(context.unreadOverview.chats.map((chat: { sender: string; unreadCount: number }) => [chat.sender, chat.unreadCount]), [['David', 1], ['Anna', 2]]);
+    return answer('David has a new message here, and Anna has two.');
+  } });
+  t.after(() => f.close());
+  await f.messaging.addContact(f.ids.alice, f.ids.anna, 'Anna');
+  await f.messaging.addContact(f.ids.alice, f.ids.david, 'David');
+  const annaChat = (await f.messaging.createDirectChat(f.ids.alice, f.ids.anna)).id;
+  chatId = (await f.messaging.createDirectChat(f.ids.alice, f.ids.david)).id;
+  const older = await f.messaging.send(f.ids.anna, annaChat, { kind: 'text', text: 'First unread.' }, randomUUID());
+  await delay(5);
+  const newest = await f.messaging.send(f.ids.anna, annaChat, { kind: 'text', text: 'Most recent unread.' }, randomUUID());
+  await f.messaging.send(f.ids.david, chatId, { kind: 'text', text: 'Other chat.' }, randomUUID());
+  const view = { route: `/chat/${chatId}`, revision: 1, voice: { enabled: true, microphoneMuted: false, revision: 1 } };
+  const submit = (text: string) => f.runtime.submit(f.ids.alice, f.session.id, randomUUID(), text, undefined, view);
+  const overview = await submit('Any new messages?');
+  assert.match((await f.completed(overview.turn.id)).assistantText!, /David.*Anna/);
+  assert.equal((await f.db.query('SELECT id FROM device_actions WHERE turn_id=$1', [overview.turn.id])).length, 0);
+  assert.equal(calls, 1);
+
+  shouldRead = true;
+  const reading = await submit('Read the newest unread message from Anna.');
+  const action = await waitFor(async () => (await f.db.query<{ id: string; payload: { messageId: string; narration: string } }>(
+    'SELECT id,payload FROM device_actions WHERE turn_id=$1', [reading.turn.id]))[0]);
+  assert.equal(action.payload.messageId, newest.id);
+  assert.equal(action.payload.narration, newest.text);
+  assert.equal((await f.messaging.chat(f.ids.alice, annaChat)).unreadCount, 2);
+  const reference = { chatId: annaChat, messageId: newest.id, revision: 2 };
+  await f.runtime.state.acknowledgeAction(f.ids.alice, action.id, true, { reference, context: { route: `/chat/${annaChat}`, revision: 2, reference } });
+  assert.equal((await f.completed(reading.turn.id)).assistantText, '');
+  assert.equal(calls, 2);
+  assert.equal((await f.messaging.chat(f.ids.alice, annaChat)).unreadCount, 1);
+  const select = (status: 'unread' | 'unheard') => f.messaging.selectMessages(f.ids.alice, { chatId: annaChat, status, order: 'oldest', limit: 10 });
+  assert.deepEqual((await select('unread')).messages.map(message => message.id), [older.id]);
+  await f.messaging.markRead(f.ids.alice, annaChat, older.id);
+  assert.equal((await select('unread')).messages.length, 0);
+  assert.deepEqual((await select('unheard')).messages.map(message => message.id), [older.id]);
+});
+
+test('latest from a named sender skips the user reply while latest in their chat includes it', async t => {
+  let calls = 0;
+  const f = await fixture({ configured: true, async respond() {
+    const scope = calls++ === 0 ? { sender: 'Anna Work' } : { chatWith: 'Anna Work' };
+    return call('read_messages', { ...scope, mode: 'read_aloud', order: 'newest', limit: 1 });
+  } });
+  t.after(() => f.close());
+  await f.messaging.addContact(f.ids.alice, f.ids.anna, 'Anna Work');
+  const chat = (await f.messaging.createDirectChat(f.ids.alice, f.ids.anna)).id;
+  const otherChat = (await f.messaging.createDirectChat(f.ids.alice, f.ids.david)).id;
+  const incoming = await f.messaging.send(f.ids.anna, chat, { kind: 'text', text: 'I left your keys at reception.' }, randomUUID());
+  await delay(5);
+  const outgoing = await f.messaging.send(f.ids.alice, chat, { kind: 'text', text: 'Thank you!' }, randomUUID());
+  await f.messaging.send(f.ids.david, otherChat, { kind: 'text', text: 'Another conversation.' }, randomUUID());
+  const view = { route: '/chats', revision: 1, voice: { enabled: true, microphoneMuted: false, revision: 1 } };
+  const cases = [
+    ['Read the last message from Anna Work.', incoming, 'Anna Work wrote:'],
+    ['Read the last message in my chat with Anna Work.', outgoing, 'You wrote:'],
+  ] as const;
+  for (const [index, [utterance, expected, intro]] of cases.entries()) {
+    const { turn } = await f.runtime.submit(f.ids.alice, f.session.id, randomUUID(), utterance, undefined, view);
+    const action = await waitFor(async () => (await f.db.query<{ id: string; payload: { messageId: string; narration: string } }>(
+      'SELECT id,payload FROM device_actions WHERE turn_id=$1', [turn.id]))[0]);
+    assert.equal(action.payload.messageId, expected.id);
+    assert.equal(action.payload.narration, expected.text);
+    const speech = await f.runtime.state.actionSpeech(f.ids.alice, f.session.id, turn.id, action.id);
+    assert.equal(speech.text, `${intro} ${expected.text}`);
+    const reference = { chatId: chat, messageId: action.payload.messageId, revision: 2 };
+    await f.runtime.state.acknowledgeAction(f.ids.alice, action.id, true, { reference, context: { route: `/chat/${chat}`, revision: 2, reference } });
+    assert.equal((await f.completed(turn.id)).assistantText, '');
+    assert.equal(calls, index + 1);
+  }
+  const mediaId = randomUUID();
+  await f.db.query("INSERT INTO media(id,owner_id,mime_type,byte_size,digest,duration_ms) VALUES ($1,$2,'audio/wav',44,'test',1000)",
+    [mediaId, f.ids.anna]);
+  await delay(5);
+  const voice = await f.messaging.send(f.ids.anna, chat, { kind: 'voice', mediaId }, randomUUID());
+  const { turn } = await f.runtime.submit(f.ids.alice, f.session.id, randomUUID(), 'Read the latest in my chat with Anna Work.', undefined, view);
+  const action = await waitFor(async () => (await f.db.query<{ id: string; kind: string; payload: { messageId: string; mediaId: string } }>(
+    'SELECT id,kind,payload FROM device_actions WHERE turn_id=$1', [turn.id]))[0]);
+  assert.equal(action.kind, 'play_audio');
+  assert.equal(action.payload.messageId, voice.id);
+  assert.equal(action.payload.mediaId, mediaId);
+  const speech = await f.runtime.state.actionSpeech(f.ids.alice, f.session.id, turn.id, action.id);
+  assert.equal(speech.text, 'A voice message from Anna Work.');
+  assert.equal((await f.messaging.chat(f.ids.alice, chat)).unreadCount, 1, 'the introduction does not mark the recording heard');
+  await f.runtime.state.acknowledgeAction(f.ids.alice, action.id, true, {});
+  assert.equal((await f.completed(turn.id)).assistantText, '');
+  assert.equal(calls, 3);
+  assert.equal((await f.messaging.chat(f.ids.alice, chat)).unreadCount, 0);
+});
+
+test('an approved rename finishes with the prepared reply after saving', async t => {
+  let contactId = '';
+  let coordinatorCalls = 0;
+  let reviews = 0;
+  const f = await fixture({ configured: true, async respond(request) {
+    if (request.tools.some(tool => tool.name === 'memory_verdict')) {
+      reviews++;
+      return call('memory_verdict', { allowed: true, explicit: true, reason: 'The user requested this exact rename.' });
+    }
+    assert.equal(++coordinatorCalls, 1);
+    return call('rename_contact', { contactId, name: 'Anna Work', successReply: 'Saved as Anna Work.' });
+  } });
+  t.after(() => f.close());
+  contactId = (await f.messaging.addContact(f.ids.alice, f.ids.anna, 'Anna')).contactId;
+  const { turn } = await f.submit('Rename Anna to Anna Work.');
+  assert.equal((await f.completed(turn.id)).assistantText, 'Saved as Anna Work.');
+  assert.equal(reviews, 1);
+  assert.equal((await f.messaging.contact(f.ids.alice, contactId)).name, 'Anna Work');
+});
+
 test('a rejected rename records its reason and asks for clarification without reporting a failed save', async t => {
   let contactId = '', attempted = false;
   const provider: ModelProvider = { configured: true, async respond(request) {
@@ -56,7 +176,7 @@ test('a rejected rename records its reason and asks for clarification without re
       assert.ok(data.proposedChange.data.sameNameContacts.every((contact: { displayName?: string }) => contact.displayName));
       return call('memory_verdict', { allowed: false, explicit: false, reason: 'Two Annas match; the user has not selected one.' });
     }
-    if (!attempted) { attempted = true; return call('rename_contact', { contactId, name: 'Work' }); }
+    if (!attempted) { attempted = true; return call('rename_contact', { contactId, name: 'Work', successReply: 'Saved as Work.' }); }
     assert.equal((lastResult(request) as { error: string }).error, 'MEMORY_CHANGE_UNSUPPORTED');
     return answer('Which Anna would you like to rename?');
   } };
@@ -202,8 +322,8 @@ test('coordinator delegates to a real specialist loop and sends only a later rev
         const review = lastResult(request) as { reviewedInEarlierTurn: boolean; requiresLaterUserApproval: boolean };
         assert.equal(review.reviewedInEarlierTurn, true);
         assert.equal(review.requiresLaterUserApproval, false);
-        return call('send_approved_draft', { draftId: draft.id, version: 1 });
-      default: return answer('Sent to Anna.');
+        return call('send_approved_draft', { draftId: draft.id, version: 1, successReply: 'Sent to Anna.' });
+      default: throw new Error('A successful send must not call the coordinator again.');
     }
   } };
   const context = await fixture(provider);
@@ -215,7 +335,7 @@ test('coordinator delegates to a real specialist loop and sends only a later rev
   assert.ok(seen.includes('messaging'));
   assert.ok(finalTools.includes('delegate_contacts'));
   const approval = await context.submit('That sounds good, go ahead.');
-  await context.completed(approval.turn.id);
+  assert.equal((await context.completed(approval.turn.id)).assistantText, 'Sent to Anna.');
   const messages = await context.db.query<{ text: string }>('SELECT text FROM messages');
   assert.deepEqual(messages.map((message) => message.text), ['Seven works for me.']);
   const [review] = await context.db.query<{ turnId: string }>('SELECT turn_id AS "turnId" FROM draft_reviews WHERE draft_id=$1 AND version=1', [draft.id]);
@@ -383,7 +503,7 @@ test('a coordinator cannot send a stored reviewed draft when semantic review rej
   let step = 0;
   const provider: ModelProvider = { configured: true, async respond(request) {
     if (request.tools.some(tool => tool.name === 'draft_send_verdict')) return call('draft_send_verdict', { approved: false });
-    if (step++ === 0) return call('send_approved_draft', { draftId: draft.id, version: draft.version });
+    if (step++ === 0) return call('send_approved_draft', { draftId: draft.id, version: draft.version, successReply: 'Sent to Anna.' });
     assert.equal((lastResult(request) as { error: string }).error, 'DRAFT_SEND_NOT_APPROVED');
     return answer('What would you like to say to Anna?');
   } };

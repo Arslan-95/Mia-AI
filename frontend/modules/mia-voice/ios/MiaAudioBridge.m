@@ -115,7 +115,7 @@ static AVAudioPCMBuffer *MiaCopyRejected(unsigned reason, AVAudioPCMBuffer *inpu
     const uint8_t *bytes = data.bytes; float *samples = buffer.floatChannelData[0];
     for (NSUInteger i = 0; i < buffer.frameLength; i++) samples[i] = (float)(int16_t)((uint16_t)bytes[i * 2] | ((uint16_t)bytes[i * 2 + 1] << 8)) / 32768.0f;
     [player scheduleBuffer:buffer atTime:nil options:0 completionCallbackType:AVAudioPlayerNodeCompletionDataPlayedBack completionHandler:^(AVAudioPlayerNodeCompletionCallbackType type) { completion(); }];
-    [player play];
+    if (!player.isPlaying) [player play];
   });
   return exception ?: allocationError;
 }
@@ -163,7 +163,7 @@ static AVAudioPCMBuffer *MiaCopyRejected(unsigned reason, AVAudioPCMBuffer *inpu
 }
 - (void)reset { _converter = nil; }
 + (NSDictionary<NSString *,id> *)diagnostics {
-  return @{@"apiVersion": @3, @"implementation": @"epoch-audio-4", @"events": [[NSUserDefaults standardUserDefaults] arrayForKey:MiaDiagnosticsKey] ?: @[]};
+  return @{@"apiVersion": @4, @"implementation": @"epoch-audio-4", @"events": [[NSUserDefaults standardUserDefaults] arrayForKey:MiaDiagnosticsKey] ?: @[]};
 }
 + (void)recordEvent:(NSString *)stage detail:(NSDictionary<NSString *, id> *)detail { MiaRecord(stage, detail); }
 @end

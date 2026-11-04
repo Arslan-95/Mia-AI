@@ -13,6 +13,9 @@ export type Draft = { id: string; recipientId: string; kind: 'text' | 'voice'; t
   reviewedVersion: number | null; messageId: string | null; updatedAt: Date; recipient: Profile };
 type Content = { kind: 'text' | 'voice'; text?: string; mediaId?: string };
 const messageColumns = 'id, chat_id AS "chatId", sender_id AS "senderId", kind, text, media_id AS "mediaId", created_at AS "createdAt", client_id AS "clientMessageId", (SELECT duration_ms FROM media WHERE media.id=media_id) AS "durationMs"';
+const notHeard = `NOT EXISTS (SELECT 1 FROM assistant_message_reads heard WHERE heard.user_id = own.user_id AND heard.message_id = m.id)`;
+const unread = `(own.last_read_message_id IS NULL OR (m.created_at,m.id) >
+  (SELECT created_at,id FROM messages WHERE id = own.last_read_message_id)) AND ${notHeard}`;
 const draftColumns = `id, recipient_id AS "recipientId", kind, text, media_id AS "mediaId", version, state,
   reviewed_version AS "reviewedVersion", message_id AS "messageId", updated_at AS "updatedAt",
   (SELECT json_build_object('id',u.id,'phoneNumber',u.phone_number,'displayName',COALESCE(c.name,u.display_name))
@@ -95,8 +98,7 @@ export class MessagingService {
         (SELECT json_build_object('id',m.id,'senderId',m.sender_id,'kind',m.kind,'text',m.text,'mediaId',m.media_id,'createdAt',m.created_at)
           FROM messages m WHERE m.chat_id = c.id ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS "lastMessage",
         (SELECT count(*)::integer FROM messages m WHERE m.chat_id = c.id AND m.sender_id <> $1
-          AND (own.last_read_message_id IS NULL OR (m.created_at,m.id) >
-            (SELECT created_at,id FROM messages WHERE id = own.last_read_message_id))) AS "unreadCount"
+          AND ${unread}) AS "unreadCount"
       FROM chats c JOIN chat_members own ON own.chat_id = c.id AND own.user_id = $1
       JOIN chat_members other ON other.chat_id = c.id AND other.user_id <> $1
       JOIN users u ON u.id = other.user_id LEFT JOIN contacts ct ON ct.owner_id = $1 AND ct.user_id = u.id
@@ -124,6 +126,71 @@ export class MessagingService {
     return this.db.query<Message>(`SELECT ${messageColumns} FROM messages WHERE chat_id = $1
       AND ($3::uuid IS NULL OR (created_at,id) < (SELECT created_at,id FROM messages WHERE id = $3))
       ORDER BY created_at DESC,id DESC LIMIT $2`, [chatId, limit, before ?? null]);
+  }
+
+  async unreadOverview(ownerId: string, visibleChatId?: string) {
+    const chats = await this.db.query<{ chatId: string; sender: string; unreadCount: number; totalUnread: number }>(`
+      SELECT own.chat_id AS "chatId", COALESCE(ct.name, u.display_name) AS sender, counts.unread AS "unreadCount",
+        sum(counts.unread) OVER ()::integer AS "totalUnread"
+      FROM chat_members own JOIN chat_members other ON other.chat_id = own.chat_id AND other.user_id <> own.user_id
+      JOIN users u ON u.id = other.user_id
+      LEFT JOIN contacts ct ON ct.owner_id = own.user_id AND ct.user_id = u.id
+      CROSS JOIN LATERAL (
+        SELECT count(*)::integer AS unread, max(m.created_at) AS latest
+        FROM messages m WHERE m.chat_id = own.chat_id AND m.sender_id <> own.user_id AND ${unread}
+      ) counts
+      WHERE own.user_id = $1 AND (counts.unread > 0 OR own.chat_id = $2)
+      ORDER BY (own.chat_id = $2) DESC NULLS LAST, counts.latest DESC NULLS LAST, own.chat_id LIMIT 30`,
+    [ownerId, visibleChatId ?? null]);
+    return { totalUnread: chats[0]?.totalUnread ?? 0, visibleChatId: visibleChatId ?? null,
+      chats: chats.map(({ chatId, sender, unreadCount }) => ({ chatId, sender, unreadCount })) };
+  }
+
+  async findMessagePeople(ownerId: string, name: string) {
+    return this.db.query<{ id: string; name: string; displayName: string; exact: boolean }>(`
+      SELECT u.id, COALESCE(c.name,u.display_name) AS name, u.display_name AS "displayName",
+        (lower(u.display_name) = lower($2) OR COALESCE(lower(c.name) = lower($2),false)) AS exact
+      FROM users u LEFT JOIN contacts c ON c.owner_id = $1 AND c.user_id = u.id
+      WHERE u.id <> $1 AND (c.id IS NOT NULL OR EXISTS (
+        SELECT 1 FROM chat_members own JOIN chat_members other ON other.chat_id = own.chat_id
+        WHERE own.user_id = $1 AND other.user_id = u.id))
+        AND (c.name ILIKE $3 ESCAPE '\\' OR u.display_name ILIKE $3 ESCAPE '\\')
+      ORDER BY exact DESC, name, u.id LIMIT 5`, [ownerId, name, `%${escapeLike(name)}%`]);
+  }
+
+  async selectMessages(ownerId: string, filters: {
+    chatId?: string; chatWithId?: string; senderId?: string; messageId?: string; query?: string;
+    status: 'any' | 'unread' | 'unheard'; order: 'newest' | 'oldest'; limit: number;
+  }) {
+    if (filters.chatId) await this.assertMember(ownerId, filters.chatId);
+    const direction = filters.order === 'oldest' ? 'ASC' : 'DESC';
+    const items = await this.db.query<Message & { senderName: string }>(`
+      SELECT ${messageColumns}, (
+        SELECT COALESCE(c.name, u.display_name) FROM users u
+        LEFT JOIN contacts c ON c.owner_id = $1 AND c.user_id = u.id
+        WHERE u.id = m.sender_id
+      ) AS "senderName" FROM messages m
+      WHERE EXISTS (SELECT 1 FROM chat_members own WHERE own.chat_id = m.chat_id AND own.user_id = $1
+        AND ($2::uuid IS NULL OR own.chat_id = $2)
+        AND ($3::uuid IS NULL OR m.sender_id = $3)
+        AND ($4::uuid IS NULL OR m.id = $4)
+        AND ($5::text IS NULL OR m.text ILIKE $5 ESCAPE '\\')
+        AND ($8::uuid IS NULL OR EXISTS (SELECT 1 FROM chat_members other WHERE other.chat_id = own.chat_id AND other.user_id = $8))
+        AND ($6 = 'any' OR (m.sender_id <> own.user_id AND
+          (($6 = 'unread' AND ${unread}) OR ($6 = 'unheard' AND ${notHeard})))))
+      ORDER BY m.created_at ${direction}, m.id ${direction} LIMIT $7`,
+    [ownerId, filters.chatId ?? null, filters.senderId ?? null, filters.messageId ?? null,
+      filters.query ? `%${escapeLike(filters.query)}%` : null, filters.status, filters.limit + 1, filters.chatWithId ?? null]);
+    return { messages: items.slice(0, filters.limit), more: items.length > filters.limit };
+  }
+
+  async markHeard(sql: Sql, ownerId: string, chatId: string, messageId: string, source: { narration: string } | { mediaId: string }) {
+    const [receipt] = await sql.query(`INSERT INTO assistant_message_reads(user_id,message_id)
+      SELECT $1,m.id FROM messages m JOIN chat_members own ON own.chat_id=m.chat_id AND own.user_id=$1
+      WHERE m.id=$2 AND m.chat_id=$3 AND ((m.kind='text' AND m.text=$4) OR (m.kind='voice' AND m.media_id=$5))
+      ON CONFLICT DO NOTHING RETURNING message_id`,
+    [ownerId, messageId, chatId, 'narration' in source ? source.narration : null, 'mediaId' in source ? source.mediaId : null]);
+    if (receipt) await publish(sql, ownerId, 'chat.read', { chatId, messageId });
   }
 
   async message(ownerId: string, messageId: string): Promise<Message> {

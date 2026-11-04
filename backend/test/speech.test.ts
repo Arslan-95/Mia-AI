@@ -124,6 +124,31 @@ test('Gemini TTS cancellation during authorization cannot issue a later synthesi
   assert.equal(requests, 0);
 });
 
+test('Gemini yields PCM before synthesis ends and never restarts an interrupted spoken segment', async () => {
+  const config = readConfig({ GOOGLE_TTS_MODEL: 'gemini-3.1-flash-tts-preview' });
+  let unaryCalls = 0;
+  const speech = new CloudSpeechProvider(config, async () => {
+    unaryCalls++;
+    return Response.json({ audioContent: synthesizedWav().toString('base64') });
+  }, undefined, async () => new Headers(), undefined, async function* (text, prompt) {
+    assert.equal(text, 'Hello.');
+    assert.ok(prompt.startsWith(calmSpeechPrompt));
+    yield Buffer.from([1, 2]);
+    throw new Error('Provider connection dropped');
+  });
+  const stream = speech.synthesize('Hello.', new AbortController().signal)[Symbol.asyncIterator]();
+  assert.deepEqual(await stream.next(), { done: false, value: Buffer.from([1, 2]) });
+  await assert.rejects(stream.next(), { code: 'TTS_STREAM_INTERRUPTED' });
+  assert.equal(unaryCalls, 0);
+});
+
+test('Gemini keeps unary synthesis available when the stream fails before sending audio', async () => {
+  const config = readConfig({ GOOGLE_TTS_MODEL: 'gemini-3.1-flash-tts-preview' });
+  const speech = new CloudSpeechProvider(config, async () => Response.json({ audioContent: synthesizedWav().toString('base64') }),
+    undefined, async () => new Headers(), undefined, async function* () { throw new Error('Streaming unavailable'); });
+  assert.deepEqual(await spokenAudio(speech), Buffer.from([1, 2, 3, 4, 5, 6]));
+});
+
 test('Gemini configuration rejects mismatched voices and prompts exceeding its UTF-8 limit', () => {
   assert.throws(() => readConfig({ GOOGLE_TTS_MODEL: 'gemini-3.1-flash-tts-preview', GOOGLE_TTS_VOICE: 'en-US-Neural2-F' }));
   assert.throws(() => readConfig({ GOOGLE_TTS_MODEL: 'standard', GOOGLE_TTS_VOICE: 'Kore' }));
